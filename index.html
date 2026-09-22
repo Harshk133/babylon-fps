@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>babylon-fps</title>
+  </head>
+  <body>
+    <!-- Loading screen — sits on top of everything until assets are ready -->
+    <div id="loading-screen">
+      <div class="loading-content">
+        <div class="loading-spinner"></div>
+        <p id="loading-message">Loading world…</p>
+      </div>
+    </div>
+
+    <!-- Red Damage Flash Overlay -->
+    <div id="damage-overlay"></div>
+
+    <!-- Player Health HUD -->
+    <div id="hud">
+      <div class="health-card">
+        <span class="health-label">HEALTH</span>
+        <div class="health-bar-bg">
+          <div id="health-bar-fill"></div>
+        </div>
+        <span id="health-val">100 / 100</span>
+      </div>
+    </div>
+
+    <div id="app">
+      <canvas id="webgl"></canvas>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
