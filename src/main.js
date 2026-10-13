@@ -3,8 +3,8 @@ import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import GUI from "lil-gui";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { MD2Loader } from "three/addons/loaders/MD2Loader.js";
 import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
+import { ZombieManager } from "./zombies/ZombieManager.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const WALK_SPEED          = 20;
@@ -42,8 +42,9 @@ const SCATTER_RADIUS_MAX = 200;
 // ─── Monster Settings ─────────────────────────────────────────────────────────
 const MONSTER_HEIGHT_MULTIPLIER = 1.35; // Proportional relative to character (~2.43m)
 const MONSTER_TARGET_HEIGHT     = CHARACTER_HEIGHT * MONSTER_HEIGHT_MULTIPLIER;
-const MONSTER_SPAWN            = new THREE.Vector3(-6.43, 0, 127.8);
 const MONSTER_MASS             = 120;
+const ZOMBIE_PREWARM_COUNT     = 100;
+const ZOMBIE_INITIAL_SPAWN     = 50;
 const MONSTER_LIN_DAMPING      = 0.05; // Low damping so movement is fluid
 const MONSTER_ANG_DAMPING      = 1.0;
 const MONSTER_DEFAULT_CHASE_SPEED = 4.5; // Slow, natural creepy zombie march speed (m/s)
@@ -653,13 +654,17 @@ function setupGui() {
     folder.add(model.params, "scale", 0.01, 20, 0.01).name("Scale (From Floor)").listen().onChange(model.updateTransform);
     folder.add(model.params, "visible").name("Visible").listen().onChange(model.updateTransform);
 
-    if (id === "monster") {
-      folder.add(model.params, "enableAI").name("🤖 Enable AI Behavior");
-      folder.add(model.params, "detectionRadius", 1, 15, 0.5).name("🟡 Aggro Circle (Inner)");
-      folder.add(model.params, "deaggroRadius", 3, 30, 0.5).name("🔵 Leave Circle (Outer Boundary)");
-      folder.add(model.params, "chaseSpeed", 2, 35, 0.5).name("⚡ Chase Speed (m/s)");
-      folder.add(model.params, "attackSpeed", 0.5, 10, 0.5).name("⚔️ Attack Speed (m/s)");
-    }
+  }
+
+  if (zombieManager) {
+    const zFolder = gui.addFolder("👹 Zombie AI (Global)");
+    zFolder.close();
+    zFolder.add(zombieManager.settings, "enableAI").name("🤖 Enable AI Behavior");
+    zFolder.add(zombieManager.settings, "detectionRadius", 1, 30, 0.5).name("🟡 Aggro Radius");
+    zFolder.add(zombieManager.settings, "deaggroRadius", 3, 50, 0.5).name("🔵 Deaggro Radius");
+    zFolder.add(zombieManager.settings, "chaseSpeed", 0.5, 10, 0.5).name("⚡ Chase Speed (m/s)");
+    zFolder.add(zombieManager.settings, "attackSpeed", 0.5, 10, 0.5).name("⚔️ Attack Speed (m/s)");
+    zFolder.add(zombieManager.settings, "maxHealth", 10, 500, 10).name("❤️ Max Health");
   }
 
   // Prevent pointer lock while interacting with lil-gui
@@ -667,392 +672,8 @@ function setupGui() {
   gui.domElement.addEventListener("click", e => e.stopPropagation());
 }
 
-// ─── Dual Ground Circles (Inner Aggro + Outer Leave Boundary) ────────────────
-let detectionCircleGroup   = null;
-let innerRingMesh          = null;
-let innerFillMesh          = null;
-let outerRingMesh          = null;
-let outerFillMesh          = null;
-let detectionCircleRingMat = null;
-let detectionCircleFillMat = null;
-
-function createDetectionCircle() {
-  detectionCircleGroup = new THREE.Group();
-
-  // 1. Inner Circle (Aggro / Detection Trigger)
-  const innerRingGeo = new THREE.RingGeometry(0.96, 1.0, 64);
-  detectionCircleRingMat = new THREE.MeshBasicMaterial({
-    color: 0xffaa00,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 0.85,
-  });
-  innerRingMesh = new THREE.Mesh(innerRingGeo, detectionCircleRingMat);
-
-  const innerFillGeo = new THREE.CircleGeometry(0.96, 64);
-  detectionCircleFillMat = new THREE.MeshBasicMaterial({
-    color: 0xffaa00,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 0.2,
-    depthWrite: false,
-  });
-  innerFillMesh = new THREE.Mesh(innerFillGeo, detectionCircleFillMat);
-
-  // 2. Outer Circle (Leave Chase / De-aggro Boundary)
-  const outerRingGeo = new THREE.RingGeometry(0.98, 1.0, 64);
-  const outerRingMat = new THREE.MeshBasicMaterial({
-    color: 0x00e5ff,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 0.65,
-  });
-  outerRingMesh = new THREE.Mesh(outerRingGeo, outerRingMat);
-
-  const outerFillGeo = new THREE.CircleGeometry(0.98, 64);
-  const outerFillMat = new THREE.MeshBasicMaterial({
-    color: 0x00e5ff,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 0.08,
-    depthWrite: false,
-  });
-  outerFillMesh = new THREE.Mesh(outerFillGeo, outerFillMat);
-
-  detectionCircleGroup.add(innerRingMesh);
-  detectionCircleGroup.add(innerFillMesh);
-  detectionCircleGroup.add(outerRingMesh);
-  detectionCircleGroup.add(outerFillMesh);
-
-  detectionCircleGroup.rotation.x = -Math.PI / 2;
-  detectionCircleGroup.position.set(MONSTER_SPAWN.x, 0.03, MONSTER_SPAWN.z);
-  scene.add(detectionCircleGroup);
-}
-
-// ─── Monster (MD2 with Dual-Circle Hysteresis AI & Point-Blank Attack) ─────
-let monsterMixer      = null;
-let monsterRoot       = null;
-let monsterBody       = null;
-let monsterVisualOffY = 0;
-let monsterMesh       = null;
-let monsterRawBB      = null;
-let monsterRawHeight  = 1;
-let monsterCurrentAnim = "stand";
-let monsterAnimLockTimer = 0; // Hysteresis lock timer to prevent rapid robotic thrashing
-let isMonsterChasing   = false;
-const monsterActions  = {};
-
-function setMonsterAnimation(animName, minDuration = 0) {
-  // If already playing this animation, do NOT call reset() on every frame so animation plays forward smoothly!
-  if (monsterCurrentAnim === animName) return;
-
-  // If locked playing a full animation swing, wait until duration lock expires
-  if (monsterAnimLockTimer > 0) return;
-
-  const oldAction = monsterActions[monsterCurrentAnim];
-  const newAction = monsterActions[animName];
-  if (newAction) {
-    if (oldAction && oldAction !== newAction) oldAction.fadeOut(0.2);
-    newAction.reset().fadeIn(0.2).play();
-    monsterCurrentAnim = animName;
-    if (minDuration > 0) {
-      monsterAnimLockTimer = minDuration;
-    }
-  }
-}
-
-function makeCheckerTexture() {
-  const size = 64;
-  const data = new Uint8Array(size * size * 4);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i   = (y * size + x) * 4;
-      const on  = (((x >> 3) ^ (y >> 3)) & 1) === 0;
-      data[i]   = on ? 80  : 180;
-      data[i+1] = on ? 140 : 100;
-      data[i+2] = on ? 40  : 30;
-      data[i+3] = 255;
-    }
-  }
-  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
-  tex.needsUpdate = true;
-  return tex;
-}
-
-async function loadMonster() {
-  const geometry = await new Promise((resolve, reject) => {
-    new MD2Loader().load("/models/monster.md2", resolve, undefined, reject);
-  });
-
-  let skinTexture = await new Promise(res => {
-    new THREE.TextureLoader().load(
-      "/texture/ratamahatta.png",
-      tex => { tex.colorSpace = THREE.SRGBColorSpace; res(tex); },
-      undefined,
-      () => res(null)
-    );
-  });
-  if (!skinTexture) skinTexture = makeCheckerTexture();
-
-  const material = new THREE.MeshLambertMaterial({
-    map:          skinTexture,
-    morphTargets: true,
-    morphNormals: true,
-  });
-
-  monsterMesh = new THREE.Mesh(geometry, material);
-  monsterMesh.castShadow    = true;
-  monsterMesh.receiveShadow = true;
-
-  // Align monster's front face & chest directly along local +Z axis of monsterRoot
-  monsterMesh.rotation.y    = -Math.PI / 2;
-
-  monsterRoot = new THREE.Group();
-  monsterRoot.add(monsterMesh);
-
-  geometry.computeBoundingBox();
-  monsterRawBB = geometry.boundingBox;
-  monsterRawHeight = (monsterRawBB.max.y - monsterRawBB.min.y) || 1;
-
-  const initialScale = MONSTER_TARGET_HEIGHT / monsterRawHeight;
-  monsterRoot.scale.setScalar(initialScale);
-
-  // Offset UNSCALED min.y inside monsterRoot
-  monsterMesh.position.y = -monsterRawBB.min.y;
-  
-  const scaledH = monsterRawHeight * initialScale;
-  const bodyCentreWorldY = scaledH / 2;
-  monsterVisualOffY = bodyCentreWorldY;
-
-  const capRadius = scaledH * 0.22;
-  const capHeight = Math.max(0.01, scaledH - capRadius * 2);
-
-  // Dynamic rigid body for Monster (allowSleep = false so body moves freely)
-  monsterBody = new CANNON.Body({
-    mass:           MONSTER_MASS,
-    material:       monsterMaterial,
-    linearDamping:  MONSTER_LIN_DAMPING,
-    angularDamping: MONSTER_ANG_DAMPING,
-    fixedRotation:  true,
-    allowSleep:     false,
-  });
-
-  addCapsuleToBody(monsterBody, capRadius, capHeight);
-  monsterBody.position.set(MONSTER_SPAWN.x, bodyCentreWorldY, MONSTER_SPAWN.z);
-  world.addBody(monsterBody);
-
-  monsterRoot.position.set(MONSTER_SPAWN.x, 0, MONSTER_SPAWN.z);
-  scene.add(monsterRoot);
-
-  createDetectionCircle();
-
-  if (geometry.animations?.length > 0) {
-    monsterMixer = new THREE.AnimationMixer(monsterMesh);
-    for (const clip of geometry.animations) {
-      const action = monsterMixer.clipAction(clip);
-      action.setLoop(THREE.LoopRepeat, Infinity);
-      monsterActions[clip.name] = action;
-    }
-
-    // Natural playback speed (slower timeScale so swings & movement look heavy and natural, not rapid robotic)
-    if (monsterActions["attack"]) monsterActions["attack"].setEffectiveTimeScale(0.55);
-    if (monsterActions["run"])    monsterActions["run"].setEffectiveTimeScale(0.6);
-    if (monsterActions["stand"])  monsterActions["stand"].setEffectiveTimeScale(0.8);
-
-    if (monsterActions["stand"]) {
-      monsterActions["stand"].play();
-      monsterCurrentAnim = "stand";
-    }
-  }
-
-  // Register in editableModels with synchronized ground physics & AI
-  editableModels["monster"] = {
-    id: "monster",
-    name: "👹 Zombie / Monster",
-    root: monsterRoot,
-    body: monsterBody,
-    params: {
-      posX: MONSTER_SPAWN.x,  // -6.43
-      posY: 0,
-      posZ: MONSTER_SPAWN.z,  // 127.8
-      rotY: 90,
-      scale: 1.35,
-      visible: true,
-      detectionRadius: 15.0,  // User specified aggro circle (meters)
-      deaggroRadius: 24.0,   // User specified leave chase boundary (meters)
-      chaseSpeed: 2.0,       // User specified slow chase speed (m/s)
-      attackSpeed: 2.0,      // User specified attack speed (m/s)
-      enableAI: true,
-    },
-    updateTransform() {
-      const p = editableModels["monster"].params;
-      const targetH  = CHARACTER_HEIGHT * p.scale;
-      const newScale = targetH / monsterRawHeight;
-
-      monsterRoot.scale.setScalar(newScale);
-      monsterRoot.visible = p.visible;
-
-      const sH = monsterRawHeight * newScale;
-      const bodyCentre = sH / 2;
-
-      // Re-build physics capsule shape matching exact scaled height
-      const capR = sH * 0.22;
-      const capH = Math.max(0.01, sH - capR * 2);
-
-      monsterBody.shapes.length = 0;
-      monsterBody.shapeOffsets.length = 0;
-      monsterBody.shapeOrientations.length = 0;
-
-      addCapsuleToBody(monsterBody, capR, capH);
-      monsterBody.updateBoundingRadius();
-
-      monsterVisualOffY = bodyCentre;
-      monsterMesh.position.y = -monsterRawBB.min.y;
-
-      monsterBody.position.set(p.posX, bodyCentre + p.posY, p.posZ);
-      monsterBody.velocity.set(0, 0, 0);
-      monsterRoot.position.set(p.posX, p.posY, p.posZ);
-      monsterRoot.rotation.y = THREE.MathUtils.degToRad(p.rotY);
-    }
-  };
-}
-
-/**
-  AI Hysteresis State Machine & Navigation Controller for Monster.
-  Executes every frame:
-  - Updates Inner Aggro Circle & Outer Leave Circle on ground
-  - Triggers chase when player enters Inner Circle (detectionRadius)
-  - Stops chase when player escapes past Outer Circle (deaggroRadius)
-  - Attacks from comfortable melee distance (1.5m - 1.85m gap) so claw swings hit visually with zero capsule overlap/jamming
-*/
-function updateMonster(delta) {
-  if (!monsterRoot || !monsterBody || !editableModels["monster"]) return;
-
-  if (monsterAnimLockTimer > 0) {
-    monsterAnimLockTimer -= delta;
-  }
-
-  const p = editableModels["monster"].params;
-  const mPos = monsterBody.position;
-  const pPos = characterBody.position;
-
-  // 1. Update Dual Circle positions and scales
-  if (innerRingMesh && innerFillMesh) {
-    innerRingMesh.scale.setScalar(p.detectionRadius);
-    innerFillMesh.scale.setScalar(p.detectionRadius);
-  }
-  if (outerRingMesh && outerFillMesh) {
-    outerRingMesh.scale.setScalar(p.deaggroRadius);
-    outerFillMesh.scale.setScalar(p.deaggroRadius);
-  }
-  if (detectionCircleGroup) {
-    detectionCircleGroup.position.set(mPos.x, 0.03, mPos.z);
-    detectionCircleGroup.visible = p.visible;
-  }
-
-  // 2. Calculate distance in XZ ground plane
-  const dx = pPos.x - mPos.x;
-  const dz = pPos.z - mPos.z;
-  const distXZ = Math.hypot(dx, dz);
-
-  // 3. Hysteresis State Logic:
-  //    - Start chasing when player enters Inner Aggro Circle (p.detectionRadius)
-  //    - Stop chasing when player escapes past Outer Boundary Circle (p.deaggroRadius)
-  if (!isMonsterChasing && distXZ <= p.detectionRadius) {
-    isMonsterChasing = true;
-  } else if (isMonsterChasing && distXZ > p.deaggroRadius) {
-    isMonsterChasing = false;
-  }
-
-  if (isMonsterChasing && p.enableAI) {
-    // Aggressive Pulsing Red Inner Circle
-    if (detectionCircleRingMat && detectionCircleFillMat) {
-      detectionCircleRingMat.color.setHex(0xff1133);
-      detectionCircleFillMat.color.setHex(0xff1133);
-      detectionCircleFillMat.opacity = 0.3 + Math.sin(clock.getElapsedTime() * 6) * 0.1;
-    }
-
-    // Turn monster's face & eyes directly towards player position
-    const targetAngle = Math.atan2(dx, dz);
-    const currentAngle = monsterRoot.rotation.y;
-    let diff = targetAngle - currentAngle;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    while (diff > Math.PI)  diff -= Math.PI * 2;
-    const newAngle = currentAngle + diff * Math.min(1.0, delta * 10.0);
-    monsterRoot.rotation.y = newAngle;
-    p.rotY = THREE.MathUtils.radToDeg(newAngle);
-
-    // Visual Melee Attack Distance settings:
-    // ATTACK_TRIGGER_RANGE: 2.4m (swings claws when within 2.4m)
-    // MIN_MELEE_GAP: 1.60m (holds 1.6m gap so attack animation plays with full claw reach)
-    const ATTACK_TRIGGER_RANGE = 1.1;
-    const MIN_MELEE_GAP         = 0.2;
-
-    const inAttackRange = distXZ <= ATTACK_TRIGGER_RANGE || (monsterCurrentAnim === "attack" && distXZ <= ATTACK_TRIGGER_RANGE + 0.4);
-
-    if (inAttackRange) {
-      // ── ATTACK STATE (FULL MENACING CLAW SWING ANIMATION) ──
-      setMonsterAnimation("attack", 0.8); // Lock attack animation for 0.8s full swing cycle
-
-      const nx = distXZ > 0.001 ? dx / distXZ : 0;
-      const nz = distXZ > 0.001 ? dz / distXZ : 0;
-
-      if (distXZ > MIN_MELEE_GAP) {
-        // Step forward gently towards melee gap
-        const stepSpeed = Math.min(p.attackSpeed ?? 2.0, 1.0);
-        monsterBody.position.x += nx * stepSpeed * delta;
-        monsterBody.position.z += nz * stepSpeed * delta;
-        monsterBody.velocity.x  = nx * stepSpeed;
-        monsterBody.velocity.z  = nz * stepSpeed;
-      } else {
-        // Hold standing melee stance so claws swing naturally at player
-        monsterBody.velocity.x = 0;
-        monsterBody.velocity.z = 0;
-      }
-      monsterBody.wakeUp();
-
-      // Balanced damage rate (10 HP / sec)
-      dealDamageToPlayer(10 * delta);
-    } else {
-      // ── CHASE STATE (CHASE PLAYER AT LOGGED SPEED 2 m/s) ──
-      setMonsterAnimation("run");
-      const nx = dx / distXZ;
-      const nz = dz / distXZ;
-      const currentSpeed = p.chaseSpeed ?? 2.0;
-
-      monsterBody.position.x += nx * currentSpeed * delta;
-      monsterBody.position.z += nz * currentSpeed * delta;
-      monsterBody.velocity.x  = nx * currentSpeed;
-      monsterBody.velocity.z  = nz * currentSpeed;
-      monsterBody.wakeUp();
-    }
-  } else {
-    // ── IDLE / LEAVE CHASE STATE ──
-    if (detectionCircleRingMat && detectionCircleFillMat) {
-      detectionCircleRingMat.color.setHex(0xffaa00);
-      detectionCircleFillMat.color.setHex(0xffaa00);
-      detectionCircleFillMat.opacity = 0.15;
-    }
-    setMonsterAnimation("stand");
-    monsterBody.velocity.x *= 0.85;
-    monsterBody.velocity.z *= 0.85;
-
-    // Slowly regenerate health when out of harm's way
-    regenPlayerHealth(5 * delta);
-  }
-
-  // Live update lil-gui params with current physics position
-  p.posX = mPos.x;
-  p.posZ = mPos.z;
-
-  // Visual Root tracks Cannon Body position
-  monsterRoot.position.set(
-    monsterBody.position.x,
-    monsterBody.position.y - monsterVisualOffY,
-    monsterBody.position.z
-  );
-  monsterRoot.rotation.y = THREE.MathUtils.degToRad(p.rotY);
-}
+// ─── Zombie Manager (Pooled MD2 Instances) ────────────────────────────────────
+let zombieManager = null;
 
 // ─── Character GLTF Load ──────────────────────────────────────────────────────
 async function loadCharacter() {
@@ -1273,8 +894,7 @@ function animate() {
   );
 
   if (mixer) mixer.update(delta);
-  if (monsterMixer) monsterMixer.update(delta);
-  updateMonster(delta);
+  if (zombieManager) zombieManager.update(delta);
 
   updateGroundChunks(characterBody.position.x, characterBody.position.z);
   updateSunShadow();
@@ -1299,8 +919,21 @@ async function boot() {
     setLoadMsg("Loading character…");
     await loadCharacter();
 
-    setLoadMsg("Loading monster…");
-    await loadMonster();
+    setLoadMsg("Loading zombies…");
+    zombieManager = new ZombieManager({
+      scene,
+      world,
+      monsterMaterial,
+      targetHeight: MONSTER_TARGET_HEIGHT,
+      mass: MONSTER_MASS,
+      linDamping: MONSTER_LIN_DAMPING,
+      angDamping: MONSTER_ANG_DAMPING,
+      getPlayerBody: () => characterBody,
+      dealDamageToPlayer,
+      regenPlayerHealth,
+    });
+    await zombieManager.init(ZOMBIE_PREWARM_COUNT);
+    zombieManager.spawnRing(ZOMBIE_INITIAL_SPAWN, -6.43, 127.8, 8, 35);
 
     setLoadMsg("Loading world & 3D models…");
     await loadWorld();
@@ -1311,6 +944,8 @@ async function boot() {
     animate();
 
     setupGui();
+
+    window.zombieManager = zombieManager;
 
     loadingScreen.classList.add("hidden");
     loadingScreen.addEventListener("transitionend", () => loadingScreen.remove(), { once: true });
