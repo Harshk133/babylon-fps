@@ -5,21 +5,28 @@ import GUI from "lil-gui";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
+import { Soldier } from "./player/Soldier.js";
+import { Effects } from "./combat/Effects.js";
+import { Sfx } from "./combat/Sfx.js";
+import { GROUP_WORLD, GROUP_PLAYER, GROUP_ZOMBIE } from "./physicsGroups.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const WALK_SPEED          = 20;
-const RUN_SPEED           = 40;
+const JOG_SPEED           = 5.2;   // m/s — default movement
+const BACKPEDAL_SPEED     = 3.6;
+const STRAFE_SPEED        = 4.6;
+const SPRINT_SPEED        = 8.0;   // Shift + W, can't shoot while sprinting
+const AIM_MOVE_MULTIPLIER = 0.62;  // slower while aiming down sights
 const JUMP_VELOCITY       = 5.5;
-const MOUSE_SENSITIVITY   = 0.002;
 const CHARACTER_HEIGHT    = 1.8;
 const CHARACTER_RADIUS    = 0.35;
 const CAPSULE_HEIGHT      = CHARACTER_HEIGHT - CHARACTER_RADIUS * 2;
 const CAPSULE_HALF_HEIGHT = CAPSULE_HEIGHT / 2;
 const FEET_OFFSET         = CAPSULE_HALF_HEIGHT + CHARACTER_RADIUS;
 const GROUND_SNAP_DISTANCE = 0.08;
-const MOVE_ACCEL          = 55;
-const MOVE_DECEL          = 70;
-const ROTATION_SPEED      = 14;
+const MOVE_ACCEL          = 14;    // exp-blend rates: a little weight, still responsive
+const MOVE_DECEL          = 12;
+const AIR_CONTROL         = 2;
+const ROTATION_SPEED      = 16;
 const GROUND_CHUNK_SIZE   = 48;
 const GROUND_CHUNK_RADIUS = 5;
 const GRASS_TILE_SIZE     = 2;
@@ -44,40 +51,214 @@ const MONSTER_HEIGHT_MULTIPLIER = 1.35; // Proportional relative to character (~
 const MONSTER_TARGET_HEIGHT     = CHARACTER_HEIGHT * MONSTER_HEIGHT_MULTIPLIER;
 const MONSTER_MASS             = 120;
 const ZOMBIE_PREWARM_COUNT     = 100;
-const ZOMBIE_INITIAL_SPAWN     = 50;
+const ZOMBIE_INITIAL_SPAWN     = 24;
 const MONSTER_LIN_DAMPING      = 0.05; // Low damping so movement is fluid
 const MONSTER_ANG_DAMPING      = 1.0;
-const MONSTER_DEFAULT_CHASE_SPEED = 4.5; // Slow, natural creepy zombie march speed (m/s)
+
+// ─── Weapon (SMG) ─────────────────────────────────────────────────────────────
+const WEAPON = {
+  fireRate: 11,            // rounds per second
+  magSize: 32,
+  reloadTime: 1.7,
+  damage: 25,              // zombies have 100 HP → 4 body shots
+  headshotMultiplier: 4,   // headshots one-tap
+  headHeight: 0.5,         // top N metres of a zombie count as head
+  range: 150,
+  spreadHip: 0.02,
+  spreadAim: 0.003,
+  spreadMove: 0.02,
+  spreadAir: 0.04,
+  bloomPerShot: 0.004,
+  bloomMax: 0.03,
+  bloomRecovery: 0.12,
+  recoilPitch: 0.012,
+  recoilYaw: 0.004,
+  push: 1.2,               // shove applied to the zombie per hit
+  alertRadius: 38,         // gunfire wakes zombies within this range
+};
 
 // ─── Player Health System ─────────────────────────────────────────────────────
 let playerHealth     = 100;
 const MAX_HEALTH     = 100;
+const REGEN_DELAY    = 3.0;   // seconds after the last hit before regen kicks in
 const damageOverlayEl = document.getElementById("damage-overlay");
+const lowHealthEl     = document.getElementById("low-health");
 const healthFillEl    = document.getElementById("health-bar-fill");
+const healthTrailEl   = document.getElementById("health-bar-trail");
 const healthValEl     = document.getElementById("health-val");
+const threatEl        = document.getElementById("threat");
+const threatCountEl   = document.getElementById("threat-count");
+const deathScreenEl   = document.getElementById("death-screen");
 
-function updatePlayerHealthUI() {
-  const pct = Math.max(0, Math.min(100, playerHealth));
-  if (healthFillEl) healthFillEl.style.width = `${pct}%`;
-  if (healthValEl)  healthValEl.textContent = `${Math.ceil(pct)} / 100`;
-}
+let damageFlash   = 0;   // 0..1, decays every frame
+let cameraTrauma  = 0;   // 0..1, drives camera shake
+let timeSinceHit  = 99;
+let healthTrail   = 100; // lagging "recent damage" bar
+const knockbackVel = new CANNON.Vec3();
 
-function dealDamageToPlayer(amount) {
-  playerHealth = Math.max(0, playerHealth - amount);
-  updatePlayerHealthUI();
+// Cached HUD values so the DOM is only touched when something changes
+const hudCache = { hp: -1, trail: -1, flash: -1, low: -1, threat: -1 };
 
-  if (damageOverlayEl) {
-    damageOverlayEl.style.opacity = "1";
-    setTimeout(() => {
-      if (damageOverlayEl) damageOverlayEl.style.opacity = "0";
-    }, 120);
+function updatePlayerHealthUI(delta) {
+  const hp = Math.ceil(Math.max(0, playerHealth));
+  if (hp !== hudCache.hp) {
+    hudCache.hp = hp;
+    if (healthFillEl) {
+      healthFillEl.style.width = `${hp}%`;
+      healthFillEl.classList.toggle("critical", hp <= 30);
+    }
+    if (healthValEl) healthValEl.textContent = `${hp}`;
+  }
+
+  if (timeSinceHit > 0.5) healthTrail += (playerHealth - healthTrail) * (1 - Math.exp(-4 * delta));
+  if (healthTrail < playerHealth) healthTrail = playerHealth;
+  const trail = Math.round(healthTrail);
+  if (trail !== hudCache.trail) {
+    hudCache.trail = trail;
+    if (healthTrailEl) healthTrailEl.style.width = `${trail}%`;
+  }
+
+  damageFlash = Math.max(0, damageFlash - delta * 3.2);
+  const flash = Math.round(damageFlash * 50) / 50;
+  if (flash !== hudCache.flash) {
+    hudCache.flash = flash;
+    if (damageOverlayEl) damageOverlayEl.style.opacity = `${flash}`;
+  }
+
+  const low = Math.round(THREE.MathUtils.clamp((40 - playerHealth) / 40, 0, 1) * 20) / 20;
+  if (low !== hudCache.low) {
+    hudCache.low = low;
+    if (lowHealthEl) lowHealthEl.style.opacity = `${low}`;
   }
 }
 
+function updateThreatUI() {
+  const n = zombieManager ? zombieManager.chasingCount : 0;
+  if (n === hudCache.threat) return;
+  hudCache.threat = n;
+  if (threatCountEl) threatCountEl.textContent = `${n}`;
+  if (threatEl) threatEl.classList.toggle("active", n > 0);
+}
+
+function dealDamageToPlayer(amount, knockX = 0, knockZ = 0) {
+  if (playerHealth <= 0) return;
+  playerHealth = Math.max(0, playerHealth - amount);
+  sfx.hurt();
+  timeSinceHit = 0;
+  damageFlash  = Math.min(1, damageFlash + 0.7);
+  cameraTrauma = Math.min(1, cameraTrauma + 0.45);
+  knockbackVel.x += knockX;
+  knockbackVel.z += knockZ;
+  if (playerHealth <= 0) onPlayerDeath();
+}
+
 function regenPlayerHealth(amount) {
-  if (playerHealth < MAX_HEALTH) {
+  if (playerHealth > 0 && playerHealth < MAX_HEALTH && timeSinceHit > REGEN_DELAY) {
     playerHealth = Math.min(MAX_HEALTH, playerHealth + amount);
-    updatePlayerHealthUI();
+  }
+}
+
+function onPlayerDeath() {
+  cameraTrauma = 1;
+  soldier.die();
+  sfx.hurt();
+  if (deathKillsEl) deathKillsEl.textContent = `${killsThisLife}`;
+  if (deathScreenEl) deathScreenEl.classList.add("visible");
+  if (document.pointerLockElement) document.exitPointerLock();
+}
+
+function respawnPlayer() {
+  playerHealth = MAX_HEALTH;
+  healthTrail  = MAX_HEALTH;
+  timeSinceHit = 99;
+  knockbackVel.set(0, 0, 0);
+  characterBody.position.set(0, FEET_OFFSET + 0.02, 0);
+  characterBody.velocity.set(0, 0, 0);
+  moveVelocity.set(0, 0, 0);
+  camPivot.set(0, cameraRig.pivotHeight, 0);
+  weapon.ammo = WEAPON.magSize;
+  weapon.reloading = false;
+  killsThisLife = 0;
+  soldier.revive();
+  for (const z of zombieManager?.active ?? []) { z.isChasing = false; z.isAttacker = false; }
+  if (deathScreenEl) deathScreenEl.classList.remove("visible");
+  canvas.requestPointerLock();
+}
+
+// ─── Combat HUD ───────────────────────────────────────────────────────────────
+const crosshairEl   = document.getElementById("crosshair");
+const hitMarkerEl   = document.getElementById("hitmarker");
+const ammoCountEl   = document.getElementById("ammo-count");
+const reloadBarEl   = document.getElementById("reload-bar");
+const ammoCardEl    = document.getElementById("ammo-card");
+const killsEl       = document.getElementById("kills-count");
+const startScreenEl = document.getElementById("start-screen");
+const deathKillsEl  = document.getElementById("death-kills");
+
+const hud = {
+  paused: true,
+  gap: -1, ammo: -1, reload: -1, kills: -1, low: null,
+  hitTimer: 0, hitClass: "", shownPaused: null, crosshairHidden: null,
+};
+
+function showHitMarker(headshot, killed) {
+  const cls = killed ? "show kill" : headshot ? "show head" : "show";
+  hud.hitTimer = killed ? 0.35 : 0.14;
+  if (!hitMarkerEl) return;
+  // Restart the pop animation even when the class doesn't change
+  hitMarkerEl.className = "";
+  void hitMarkerEl.offsetWidth;
+  hitMarkerEl.className = cls;
+  hud.hitClass = cls;
+}
+
+function updateCombatHUD(delta) {
+  // Crosshair gap follows the actual bullet spread
+  const gap = Math.round(4 + currentSpread() * 420 * (62 / camera.fov));
+  if (gap !== hud.gap) {
+    hud.gap = gap;
+    crosshairEl?.style.setProperty("--gap", `${gap}px`);
+  }
+  const hideCrosshair = sprinting || playerHealth <= 0;
+  if (hideCrosshair !== hud.crosshairHidden) {
+    hud.crosshairHidden = hideCrosshair;
+    crosshairEl?.classList.toggle("hidden", hideCrosshair);
+  }
+
+  if (hud.hitTimer > 0) {
+    hud.hitTimer -= delta;
+    if (hud.hitTimer <= 0 && hitMarkerEl) {
+      hitMarkerEl.className = "";
+      hud.hitClass = "";
+    }
+  }
+
+  if (weapon.ammo !== hud.ammo) {
+    hud.ammo = weapon.ammo;
+    if (ammoCountEl) ammoCountEl.textContent = `${weapon.ammo}`;
+    const low = weapon.ammo <= WEAPON.magSize * 0.25;
+    if (low !== hud.low) {
+      hud.low = low;
+      ammoCardEl?.classList.toggle("low", low);
+    }
+  }
+
+  const reload = weapon.reloading ? Math.round((1 - weapon.reloadTimer / WEAPON.reloadTime) * 50) / 50 : -1;
+  if (reload !== hud.reload) {
+    hud.reload = reload;
+    ammoCardEl?.classList.toggle("reloading", reload >= 0);
+    if (reloadBarEl) reloadBarEl.style.transform = `scaleX(${Math.max(0, reload)})`;
+  }
+
+  if (killsThisLife !== hud.kills) {
+    hud.kills = killsThisLife;
+    if (killsEl) killsEl.textContent = `${killsThisLife}`;
+  }
+
+  const showStart = hud.paused && playerHealth > 0;
+  if (showStart !== hud.shownPaused) {
+    hud.shownPaused = showStart;
+    startScreenEl?.classList.toggle("visible", showStart);
   }
 }
 
@@ -118,9 +299,31 @@ function scatterPositions(count, rngFn, minR, maxR, minSep) {
 }
 
 // ─── Scene & Renderer ─────────────────────────────────────────────────────────
+const FOG_COLOR = 0xb08468;
+
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb);
-scene.fog = new THREE.Fog(0x87ceeb, 60, 200);
+scene.background = makeSkyTexture();
+scene.fog = new THREE.Fog(FOG_COLOR, 35, 190);
+
+// Dusk gradient mapped as an equirect background so the horizon tracks the view
+function makeSkyTexture() {
+  const c = document.createElement("canvas");
+  c.width = 4; c.height = 512;
+  const g = c.getContext("2d");
+  const grad = g.createLinearGradient(0, 0, 0, c.height);
+  grad.addColorStop(0.0,  "#1f2b44");
+  grad.addColorStop(0.3,  "#5d5a72");
+  grad.addColorStop(0.46, "#d99a68");
+  grad.addColorStop(0.5,  "#b08468");
+  grad.addColorStop(0.56, "#3a2e2a");
+  grad.addColorStop(1.0,  "#2a221f");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, c.width, c.height);
+  const tex = new THREE.CanvasTexture(c);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
 const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.5, 220);
 
@@ -131,6 +334,11 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.shadowMap.autoUpdate = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+
+const effects = new Effects(scene);
+const sfx = new Sfx();
 
 // ─── Physics World ────────────────────────────────────────────────────────────
 const world = new CANNON.World();
@@ -145,8 +353,10 @@ const characterMaterial = new CANNON.Material("character");
 const staticMaterial    = new CANNON.Material("static");
 const monsterMaterial   = new CANNON.Material("monster");
 
+// The controller sets the player's velocity directly every frame, so friction
+// would only fight it (and make the player stick to walls instead of sliding)
 const contactDefaults = {
-  friction: 0.85, restitution: 0,
+  friction: 0.0, restitution: 0,
   contactEquationStiffness: 1e7, contactEquationRelaxation: 3,
   frictionEquationStiffness: 1e7, frictionEquationRelaxation: 3,
 };
@@ -158,8 +368,13 @@ world.addContactMaterial(new CANNON.ContactMaterial(groundMaterial, monsterMater
   friction: 0.0, restitution: 0,
   contactEquationStiffness: 1e7, contactEquationRelaxation: 3,
 }));
+// Frictionless so player/zombie and zombie/zombie bodies slide apart instead of climbing
 world.addContactMaterial(new CANNON.ContactMaterial(characterMaterial, monsterMaterial, {
-  friction: 0.2, restitution: 0,
+  friction: 0.0, restitution: 0,
+  contactEquationStiffness: 1e7, contactEquationRelaxation: 3,
+}));
+world.addContactMaterial(new CANNON.ContactMaterial(monsterMaterial, monsterMaterial, {
+  friction: 0.0, restitution: 0,
   contactEquationStiffness: 1e7, contactEquationRelaxation: 3,
 }));
 world.addContactMaterial(new CANNON.ContactMaterial(staticMaterial, monsterMaterial, {
@@ -281,8 +496,9 @@ world.addBody(groundBody);
 updateGroundChunks(0, 0);
 
 // ─── Lighting ─────────────────────────────────────────────────────────────────
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const sun = new THREE.DirectionalLight(0xfff2d6, 1.1);
+scene.add(new THREE.HemisphereLight(0x9fb4d8, 0x4a3a2c, 0.9));
+scene.add(new THREE.AmbientLight(0xffe2c8, 0.25));
+const sun = new THREE.DirectionalLight(0xffc48a, 2.4);
 sun.position.set(6, 12, 4);
 sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024);
@@ -294,6 +510,14 @@ sun.shadow.camera.top    =  SHADOW_FRUSTUM_SIZE;
 sun.shadow.camera.bottom = -SHADOW_FRUSTUM_SIZE;
 sun.shadow.bias          = -0.0003;
 sun.shadow.normalBias    = 0.05;
+// Soft fill from the camera side so the player and zombies don't turn into pure
+// silhouettes when looking away from the low sun
+const fillLight = new THREE.DirectionalLight(0xc8d4ff, 0.55);
+camera.add(fillLight);
+fillLight.position.set(0, 1, 1);
+fillLight.target.position.set(0, 0, -1);
+camera.add(fillLight.target);
+scene.add(camera);
 const sunTarget = new THREE.Object3D();
 scene.add(sunTarget);
 sun.target = sunTarget;
@@ -308,47 +532,65 @@ const characterBody = new CANNON.Body({
   linearDamping: 0.08, angularDamping: 1,
   fixedRotation: true,
   sleepSpeedLimit: 0.1, sleepTimeLimit: 0.5,
+  collisionFilterGroup: GROUP_PLAYER,
 });
 addCapsuleToBody(characterBody, CHARACTER_RADIUS, CAPSULE_HEIGHT);
 characterBody.position.set(0, FEET_OFFSET + 0.02, 0);
 world.addBody(characterBody);
 
-// ─── Camera ───────────────────────────────────────────────────────────────────
-const cameraPivot  = new THREE.Vector3();
-const cameraTarget = new THREE.Vector3();
-const cameraRight  = new THREE.Vector3();
-let cameraYaw   = Math.PI;
-let cameraPitch = 0.25;
-let onGround    = false;
-let jumpQueued  = false;
+const soldier = new Soldier();
+characterRoot.add(soldier.root);
 
+let bodyYaw       = 0;     // facing of the character mesh (rad); 0 faces +Z
+let turningInPlace = false;
+let onGround      = false;
+let jumpQueued    = false;
+let sprinting     = false;
+
+// ─── Camera Rig (over-the-shoulder) ───────────────────────────────────────────
+// Aim direction = (sin yaw·cos pitch, sin pitch, cos yaw·cos pitch); +pitch looks up.
 const cameraRig = {
-  distance: 2.7, offsetX: -0.15, offsetY: 0.18,
-  lookAtY: 0.86, smooth: 1.0, fov: 58,
-  pitchMin: -0.35, pitchMax: 1.1,
+  pivotHeight: 1.55,
+  hip:    { distance: 2.6,  shoulder: 0.55, height: 0.12, fov: 62 },
+  aim:    { distance: 1.25, shoulder: 0.5,  height: 0.06, fov: 42 },
+  sprint: { distance: 3.0,  shoulder: 0.45, height: 0.15, fov: 70 },
+  followXZ: 16, followY: 9,
+  pitchMin: -1.2, pitchMax: 1.0,
+  sensitivity: 0.0022, aimSensitivity: 0.0012,
 };
+let aimYaw = 0, aimPitch = -0.12;
+let aimBlend = 0, sprintBlend = 0;
+let camFrac = 1;                 // 0..1 of the desired boom length after collision
+let recoilPitch = 0, recoilYaw = 0;
+const camPivot     = new THREE.Vector3(0, cameraRig.pivotHeight, 0);
+const camOffset    = new THREE.Vector3();
+const camLook      = new THREE.Vector3();
+const camRight     = new THREE.Vector3();
+const camRayFrom   = new CANNON.Vec3();
+const camRayTo     = new CANNON.Vec3();
+const camRayResult = new CANNON.RaycastResult();
+const camRayOpts   = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
 
 // ─── Movement Helpers ─────────────────────────────────────────────────────────
-const movement                  = new THREE.Vector3();
-const forward                   = new THREE.Vector3();
-const right                     = new THREE.Vector3();
-const desiredVelocity           = new THREE.Vector3();
-const currentHorizontalVelocity = new CANNON.Vec3();
+const moveVelocity              = new CANNON.Vec3(); // input-driven, excludes knockback
 const groundContactNormal       = new CANNON.Vec3(0, 1, 0);
+const groundStickForce          = new CANNON.Vec3();
 const rayOrigin                 = new CANNON.Vec3();
 const rayTo                     = new CANNON.Vec3();
 const rayResult                 = new CANNON.RaycastResult();
+const groundRayOpts             = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
 
-// ─── Animation ────────────────────────────────────────────────────────────────
-let mixer      = null;
-let jumpActive = false;
-const actions      = {};
-const animWeights  = { idle: 1, walk: 0, run: 0 };
-const LOCOMOTION_CLIPS    = ["idle", "walk", "run"];
-const ANIM_BLEND_SPEED    = 7.5;
-const WALK_RUN_BLEND_SPEED = 5.5;
+function angleDiff(a, b) {
+  let d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  else if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
 
 // ─── Input ────────────────────────────────────────────────────────────────────
+const input = { fire: false, aim: false, firePressed: false };
+const isLocked = () => document.pointerLockElement === canvas;
+
 function setKey(code, pressed) {
   switch (code) {
     case "KeyW": case "ArrowUp":    keys.forward   = pressed; break;
@@ -360,82 +602,43 @@ function setKey(code, pressed) {
       if (pressed) jumpQueued = true;
       break;
     case "ShiftLeft": case "ShiftRight": keys.run = pressed; break;
+    case "KeyR": if (pressed) startReload(); break;
   }
 }
 window.addEventListener("keydown", e => setKey(e.code, true));
 window.addEventListener("keyup",   e => setKey(e.code, false));
-canvas.addEventListener("click",   () => canvas.requestPointerLock());
-document.addEventListener("mousemove", e => {
-  if (document.pointerLockElement !== canvas) return;
-  cameraYaw   -= e.movementX * MOUSE_SENSITIVITY;
-  cameraPitch -= e.movementY * MOUSE_SENSITIVITY;
-  cameraPitch  = THREE.MathUtils.clamp(cameraPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+canvas.addEventListener("click", () => {
+  sfx.unlock();
+  if (playerHealth > 0) canvas.requestPointerLock();
 });
-
-// ─── Animation Helpers ────────────────────────────────────────────────────────
-function isMovingInput() { return keys.forward || keys.backward || keys.left || keys.right; }
-
-function setActionWeight(action, weight) {
-  if (!action) return;
-  const w = THREE.MathUtils.clamp(weight, 0, 1);
-  action.enabled = true;
-  action.setEffectiveWeight(w);
-  if (w > 0.001) action.play();
-}
-
-function updateCharacterAnimation(delta) {
-  if (!mixer || !actions.idle) return;
-  const hSpeed     = Math.hypot(characterBody.velocity.x, characterBody.velocity.z);
-  const movingInput = isMovingInput();
-
-  if (onGround) jumpActive = false;
-
-  if (jumpActive && actions.jump && !onGround) {
-    setActionWeight(actions.jump, 1);
-    setActionWeight(actions.idle, 0);
-    setActionWeight(actions.walk, 0);
-    setActionWeight(actions.run,  0);
-    return;
-  }
-  if (actions.jump) setActionWeight(actions.jump, 0);
-
-  let tIdle = 0, tWalk = 0, tRun = 0;
-  if (!movingInput)  tIdle = 1;
-  else if (keys.run) tRun  = 1;
-  else               tWalk = 1;
-
-  const ib = 1 - Math.exp(-ANIM_BLEND_SPEED     * delta);
-  const gb = 1 - Math.exp(-WALK_RUN_BLEND_SPEED * delta);
-  animWeights.idle = THREE.MathUtils.lerp(animWeights.idle, tIdle, ib);
-  animWeights.walk = THREE.MathUtils.lerp(animWeights.walk, tWalk, gb);
-  animWeights.run  = THREE.MathUtils.lerp(animWeights.run,  tRun,  gb);
-
-  const sum    = animWeights.idle + animWeights.walk + animWeights.run || 1;
-  const iW     = animWeights.idle / sum;
-  const wW     = animWeights.walk / sum;
-  const rW     = animWeights.run  / sum;
-
-  setActionWeight(actions.idle, iW);
-  setActionWeight(actions.walk, wW);
-  setActionWeight(actions.run,  rW);
-
-  if (actions.walk && actions.run && wW > 0.05 && rW > 0.05) {
-    const wc = actions.walk.getClip(), rc = actions.run.getClip();
-    if (wc.duration > 0 && rc.duration > 0)
-      actions.run.time = ((actions.walk.time / wc.duration) * rc.duration) % rc.duration;
-  }
-  if (actions.walk && wW > 0.05)
-    actions.walk.setEffectiveTimeScale(THREE.MathUtils.clamp(hSpeed / WALK_SPEED, 0.85, 1.25));
-  if (actions.run  && rW > 0.05)
-    actions.run.setEffectiveTimeScale (THREE.MathUtils.clamp(hSpeed / RUN_SPEED,  0.85, 1.25));
-}
+canvas.addEventListener("mousedown", e => {
+  if (!isLocked()) return;
+  if (e.button === 0) { input.fire = true; input.firePressed = true; }
+  if (e.button === 2) input.aim = true;
+});
+window.addEventListener("mouseup", e => {
+  if (e.button === 0) input.fire = false;
+  if (e.button === 2) input.aim = false;
+});
+window.addEventListener("contextmenu", e => e.preventDefault());
+document.addEventListener("pointerlockchange", () => {
+  if (!isLocked()) { input.fire = false; input.aim = false; }
+  hud.paused = !isLocked();
+});
+document.addEventListener("mousemove", e => {
+  if (!isLocked()) return;
+  const s = THREE.MathUtils.lerp(cameraRig.sensitivity, cameraRig.aimSensitivity, aimBlend);
+  aimYaw   -= e.movementX * s;
+  aimPitch -= e.movementY * s;
+  aimPitch  = THREE.MathUtils.clamp(aimPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+});
 
 // ─── Ground Check ─────────────────────────────────────────────────────────────
 function checkGrounded() {
   onGround = false;
   rayOrigin.set(characterBody.position.x, characterBody.position.y + 0.05,          characterBody.position.z);
   rayTo    .set(characterBody.position.x, characterBody.position.y - FEET_OFFSET - 0.45, characterBody.position.z);
-  const hit = world.raycastClosest(rayOrigin, rayTo, { skipBackfaces: true }, rayResult);
+  const hit = world.raycastClosest(rayOrigin, rayTo, groundRayOpts, rayResult);
   if (!hit) return;
   const dist = rayResult.distance - FEET_OFFSET;
   if (dist <= GROUND_SNAP_DISTANCE && characterBody.velocity.y <= 0.75) {
@@ -448,16 +651,15 @@ function applyGroundStickForce(delta) {
   if (!onGround) return;
   if (characterBody.velocity.y < 0) characterBody.velocity.y = 0;
   const f = 70 * characterBody.mass * delta;
-  characterBody.applyForce(new CANNON.Vec3(
-    -groundContactNormal.x * f, -groundContactNormal.y * f, -groundContactNormal.z * f
-  ));
+  groundStickForce.set(-groundContactNormal.x * f, -groundContactNormal.y * f, -groundContactNormal.z * f);
+  characterBody.applyForce(groundStickForce);
 }
 
 function snapCharacterToGround() {
   if (!onGround) return;
   rayOrigin.set(characterBody.position.x, characterBody.position.y + 0.05,          characterBody.position.z);
   rayTo    .set(characterBody.position.x, characterBody.position.y - FEET_OFFSET - 0.45, characterBody.position.z);
-  if (world.raycastClosest(rayOrigin, rayTo, { skipBackfaces: true }, rayResult)) {
+  if (world.raycastClosest(rayOrigin, rayTo, groundRayOpts, rayResult)) {
     const d = rayResult.distance - FEET_OFFSET;
     if (Math.abs(d) < GROUND_SNAP_DISTANCE) characterBody.position.y -= d;
   }
@@ -465,77 +667,274 @@ function snapCharacterToGround() {
 }
 
 // ─── Movement ─────────────────────────────────────────────────────────────────
-const _targetVelocity = new CANNON.Vec3();
-
+// WASD is camera-relative; the body turns to face the aim direction (strafe mode)
 function updateCharacterMovement(delta) {
-  forward.set(Math.sin(cameraYaw), 0, Math.cos(cameraYaw)).normalize();
-  right.set(forward.z, 0, -forward.x).normalize();
+  const alive = playerHealth > 0;
+  let ix = 0, iz = 0; // ix: +right, iz: +forward
+  if (alive) {
+    if (keys.forward)  iz += 1;
+    if (keys.backward) iz -= 1;
+    if (keys.right)    ix += 1;
+    if (keys.left)     ix -= 1;
+  }
+  const len = Math.hypot(ix, iz);
+  const movingInput = len > 0;
+  if (movingInput) { ix /= len; iz /= len; }
 
-  movement.set(0, 0, 0);
-  if (keys.forward)  movement.add(forward);
-  if (keys.backward) movement.sub(forward);
-  if (keys.left)     movement.sub(right);
-  if (keys.right)    movement.add(right);
+  sprinting = alive && keys.run && iz > 0.5 && !input.fire && !input.aim;
 
-  const movingInput = movement.lengthSq() > 0.001;
-  if (movingInput) movement.normalize();
+  let speed = 0;
+  if (sprinting) {
+    speed = SPRINT_SPEED;
+  } else if (movingInput) {
+    const ax = Math.abs(ix), az = Math.abs(iz);
+    speed = (az * (iz >= 0 ? JOG_SPEED : BACKPEDAL_SPEED) + ax * STRAFE_SPEED) / (ax + az);
+    if (input.aim) speed *= AIM_MOVE_MULTIPLIER;
+  }
 
-  const speed = keys.run ? RUN_SPEED : WALK_SPEED;
-  desiredVelocity.copy(movement).multiplyScalar(speed);
+  // forward = (sin yaw, cos yaw), right = (−cos yaw, sin yaw)
+  const sy = Math.sin(aimYaw), cy = Math.cos(aimYaw);
+  const targetX = (iz * sy - ix * cy) * speed;
+  const targetZ = (iz * cy + ix * sy) * speed;
 
-  currentHorizontalVelocity.set(characterBody.velocity.x, 0, characterBody.velocity.z);
-  _targetVelocity.set(desiredVelocity.x, 0, desiredVelocity.z);
+  // Knockback rides on top of the input-driven velocity and decays on its own
+  const rate = onGround ? (movingInput ? MOVE_ACCEL : MOVE_DECEL) : AIR_CONTROL;
+  const blend = 1 - Math.exp(-rate * delta);
+  moveVelocity.x += (targetX - moveVelocity.x) * blend;
+  moveVelocity.z += (targetZ - moveVelocity.z) * blend;
+  if (!movingInput && moveVelocity.lengthSquared() < 0.01)
+    moveVelocity.set(0, 0, 0);
 
-  const blend = 1 - Math.exp(-(movingInput ? MOVE_ACCEL : MOVE_DECEL) * delta);
-  currentHorizontalVelocity.x += (_targetVelocity.x - currentHorizontalVelocity.x) * blend;
-  currentHorizontalVelocity.z += (_targetVelocity.z - currentHorizontalVelocity.z) * blend;
-  if (!movingInput && currentHorizontalVelocity.lengthSquared() < 0.04)
-    currentHorizontalVelocity.set(0, 0, 0);
+  const knockDecay = Math.exp(-9 * delta);
+  knockbackVel.x *= knockDecay;
+  knockbackVel.z *= knockDecay;
+  characterBody.velocity.x = moveVelocity.x + knockbackVel.x;
+  characterBody.velocity.z = moveVelocity.z + knockbackVel.z;
 
-  characterBody.velocity.x = currentHorizontalVelocity.x;
-  characterBody.velocity.z = currentHorizontalVelocity.z;
-
-  if (jumpQueued && onGround) {
+  if (jumpQueued && onGround && alive) {
     characterBody.velocity.y = JUMP_VELOCITY;
-    onGround   = false;
-    jumpActive = true;
-    if (actions.jump) {
-      actions.jump.reset();
-      actions.jump.setLoop(THREE.LoopOnce, 1);
-      actions.jump.clampWhenFinished = true;
-      actions.jump.enabled = true;
-      actions.jump.setEffectiveWeight(1);
-      actions.jump.play();
-    }
+    onGround = false;
   }
   jumpQueued = false;
 
-  if (movingInput) {
-    const tRot    = Math.atan2(movement.x, movement.z);
-    const tBlend  = 1 - Math.exp(-ROTATION_SPEED * delta);
-    characterRoot.rotation.y = THREE.MathUtils.lerp(characterRoot.rotation.y, tRot, tBlend);
+  // Facing: lock to the camera while moving or using the gun; when standing
+  // still, only turn in place once the camera swings well past the shoulder.
+  if (!alive) return;
+  const engaged = movingInput || input.aim || input.fire || timeSinceShot < 0.6;
+  const diff = angleDiff(aimYaw, bodyYaw);
+  if (!engaged && Math.abs(diff) > 1.4) turningInPlace = true;
+  if (turningInPlace && Math.abs(diff) < 0.05) turningInPlace = false;
+  if (engaged || turningInPlace) {
+    const turnRate = engaged ? ROTATION_SPEED : ROTATION_SPEED * 0.5;
+    bodyYaw += diff * (1 - Math.exp(-turnRate * delta));
   }
+  characterRoot.rotation.y = bodyYaw;
+}
+
+function updateSoldier(delta) {
+  characterRoot.updateMatrixWorld(true);
+  const vx = characterBody.velocity.x - knockbackVel.x;
+  const vz = characterBody.velocity.z - knockbackVel.z;
+  const sy = Math.sin(bodyYaw), cy = Math.cos(bodyYaw);
+  const alive = playerHealth > 0;
+  soldier.update(delta, {
+    localForward: onGround ? vx * sy + vz * cy : 0,
+    localRight:   onGround ? -vx * cy + vz * sy : 0,
+    aiming: alive && !sprinting && (input.aim || input.fire || timeSinceShot < 0.5),
+    firing: timeSinceShot < 0.12,
+    aimYawOffset: angleDiff(aimYaw + recoilYaw, bodyYaw),
+    aimPitch: aimPitch + recoilPitch,
+  });
 }
 
 // ─── Shadow / Camera ──────────────────────────────────────────────────────────
 function updateSunShadow() {
   const fx = characterBody.position.x, fz = characterBody.position.z;
   sunTarget.position.set(fx, 0, fz);
-  sun.position.set(fx + 24, 34, fz + 16);
+  sun.position.set(fx + 30, 22, fz + 18); // low evening sun → longer shadows
   sun.shadow.camera.updateProjectionMatrix();
 }
 
-function updateThirdPersonCamera() {
-  cameraPivot.set(characterBody.position.x, characterBody.position.y + cameraRig.lookAtY, characterBody.position.z);
-  const cosPitch = Math.cos(cameraPitch);
-  cameraRight.set(Math.cos(cameraYaw), 0, -Math.sin(cameraYaw)).normalize();
-  cameraTarget.set(
-    cameraPivot.x + Math.sin(cameraYaw) * cosPitch          * cameraRig.distance + cameraRight.x * cameraRig.offsetX,
-    cameraPivot.y + Math.sin(cameraPitch)                    * cameraRig.distance + cameraRig.offsetY,
-    cameraPivot.z + Math.cos(cameraYaw) * cosPitch           * cameraRig.distance + cameraRight.z * cameraRig.offsetX
-  );
-  camera.position.copy(cameraTarget);
-  camera.lookAt(cameraPivot);
+function rigValue(key) {
+  const { hip, aim, sprint } = cameraRig;
+  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(hip[key], aim[key], aimBlend), sprint[key], sprintBlend);
+}
+
+function updateThirdPersonCamera(delta) {
+  const alive = playerHealth > 0;
+  aimBlend    += ((input.aim && alive && !sprinting ? 1 : 0) - aimBlend) * (1 - Math.exp(-12 * delta));
+  sprintBlend += ((sprinting ? 1 : 0) - sprintBlend) * (1 - Math.exp(-4 * delta));
+
+  // Critically-damped style follow: tight on XZ, softer on Y so jumps/steps don't jolt
+  const kxz = 1 - Math.exp(-cameraRig.followXZ * delta);
+  const ky  = 1 - Math.exp(-cameraRig.followY * delta);
+  camPivot.x += (characterBody.position.x - camPivot.x) * kxz;
+  camPivot.z += (characterBody.position.z - camPivot.z) * kxz;
+  camPivot.y += (characterBody.position.y - FEET_OFFSET + cameraRig.pivotHeight - camPivot.y) * ky;
+
+  recoilPitch *= Math.exp(-10 * delta);
+  recoilYaw   *= Math.exp(-12 * delta);
+  const yaw   = aimYaw + recoilYaw;
+  const pitch = THREE.MathUtils.clamp(aimPitch + recoilPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+  const cp = Math.cos(pitch);
+  camLook.set(Math.sin(yaw) * cp, Math.sin(pitch), Math.cos(yaw) * cp);
+  camRight.set(-Math.cos(yaw), 0, Math.sin(yaw));
+
+  // Boom: pivot → shoulder → back along the aim direction
+  camOffset.copy(camRight).multiplyScalar(rigValue("shoulder"));
+  camOffset.y += rigValue("height");
+  camOffset.addScaledVector(camLook, -rigValue("distance"));
+
+  // Pull in instantly when something blocks the boom, ease back out when clear
+  const boom = camOffset.length();
+  camRayFrom.set(camPivot.x, camPivot.y, camPivot.z);
+  camRayTo.set(camPivot.x + camOffset.x, camPivot.y + camOffset.y, camPivot.z + camOffset.z);
+  let targetFrac = 1;
+  if (world.raycastClosest(camRayFrom, camRayTo, camRayOpts, camRayResult)) {
+    targetFrac = Math.max(0.1, (camRayResult.distance - 0.25) / boom);
+  }
+  if (targetFrac < camFrac) camFrac = targetFrac;
+  else camFrac += (targetFrac - camFrac) * (1 - Math.exp(-5 * delta));
+
+  camera.position.copy(camPivot).addScaledVector(camOffset, camFrac);
+  camera.rotation.order = "YXZ";
+  camera.rotation.set(pitch, yaw + Math.PI, 0);
+
+  // Trauma-based shake: squared falloff feels punchy on a hit, then settles fast
+  if (cameraTrauma > 0.001) {
+    const t = clock.elapsedTime * 38;
+    const s = cameraTrauma * cameraTrauma;
+    camera.rotation.z += Math.sin(t * 1.3) * 0.035 * s;
+    camera.rotation.x += Math.sin(t * 0.9 + 1.7) * 0.025 * s;
+    camera.rotation.y += Math.sin(t * 1.1 + 4.2) * 0.025 * s;
+  }
+
+  const fov = rigValue("fov");
+  if (Math.abs(camera.fov - fov) > 0.01) {
+    camera.fov = fov;
+    camera.updateProjectionMatrix();
+  }
+  camera.updateMatrixWorld();
+}
+
+// ─── Weapon ───────────────────────────────────────────────────────────────────
+const weapon = { ammo: WEAPON.magSize, cooldown: 0, reloading: false, reloadTimer: 0, bloom: 0 };
+let timeSinceShot = 99;
+let killsThisLife = 0;
+
+const _shotDir    = new THREE.Vector3();
+const _muzzle     = new THREE.Vector3();
+const _hitPoint   = new THREE.Vector3();
+const _shotFrom   = new CANNON.Vec3();
+const _shotTo     = new CANNON.Vec3();
+const _shotResult = new CANNON.RaycastResult();
+const shotOpts    = { collisionFilterMask: GROUP_WORLD | GROUP_ZOMBIE, skipBackfaces: true };
+
+function startReload() {
+  if (weapon.reloading || weapon.ammo === WEAPON.magSize || playerHealth <= 0) return;
+  weapon.reloading = true;
+  weapon.reloadTimer = WEAPON.reloadTime;
+  sfx.reload(WEAPON.reloadTime);
+}
+
+function currentSpread() {
+  const hSpeed = Math.hypot(characterBody.velocity.x, characterBody.velocity.z);
+  const moving = THREE.MathUtils.clamp(hSpeed / JOG_SPEED, 0, 1);
+  return THREE.MathUtils.lerp(WEAPON.spreadHip, WEAPON.spreadAim, aimBlend)
+    + WEAPON.spreadMove * moving * (1 - aimBlend * 0.6)
+    + (onGround ? 0 : WEAPON.spreadAir)
+    + weapon.bloom;
+}
+
+function updateWeapon(delta) {
+  weapon.cooldown = Math.max(0, weapon.cooldown - delta);
+  weapon.bloom = Math.max(0, weapon.bloom - delta * WEAPON.bloomRecovery);
+  timeSinceShot += delta;
+
+  if (weapon.reloading) {
+    weapon.reloadTimer -= delta;
+    if (weapon.reloadTimer <= 0) {
+      weapon.reloading = false;
+      weapon.ammo = WEAPON.magSize;
+    }
+  }
+
+  const pressed = input.firePressed;
+  input.firePressed = false;
+  if (!input.fire || playerHealth <= 0 || !isLocked() || sprinting || weapon.reloading) return;
+
+  if (weapon.ammo <= 0) {
+    if (pressed) sfx.click();
+    startReload();
+    return;
+  }
+  // Wait for the gun to come up so the first tracer leaves the barrel, not the hip
+  if (soldier.aimWeight < 0.55 || weapon.cooldown > 0) return;
+
+  fireShot();
+  weapon.cooldown = 1 / WEAPON.fireRate;
+}
+
+function fireShot() {
+  weapon.ammo--;
+  timeSinceShot = 0;
+
+  const spread = currentSpread();
+  weapon.bloom = Math.min(WEAPON.bloomMax, weapon.bloom + WEAPON.bloomPerShot);
+
+  camera.getWorldDirection(_shotDir);
+  _shotDir.x += (Math.random() - 0.5) * 2 * spread;
+  _shotDir.y += (Math.random() - 0.5) * 2 * spread;
+  _shotDir.z += (Math.random() - 0.5) * 2 * spread;
+  _shotDir.normalize();
+
+  // Start the trace level with the player so nothing between camera and player gets hit
+  const startT = Math.max(0,
+    (camPivot.x - camera.position.x) * _shotDir.x +
+    (camPivot.y - camera.position.y) * _shotDir.y +
+    (camPivot.z - camera.position.z) * _shotDir.z);
+  _shotFrom.set(
+    camera.position.x + _shotDir.x * startT,
+    camera.position.y + _shotDir.y * startT,
+    camera.position.z + _shotDir.z * startT);
+  _shotTo.set(
+    _shotFrom.x + _shotDir.x * WEAPON.range,
+    _shotFrom.y + _shotDir.y * WEAPON.range,
+    _shotFrom.z + _shotDir.z * WEAPON.range);
+
+  const hit = world.raycastClosest(_shotFrom, _shotTo, shotOpts, _shotResult);
+  if (hit) _hitPoint.copy(_shotResult.hitPointWorld);
+  else _hitPoint.set(_shotTo.x, _shotTo.y, _shotTo.z);
+
+  soldier.getMuzzleWorldPosition(_muzzle);
+  effects.muzzleFlash(_muzzle);
+  effects.tracer(_muzzle, _hitPoint);
+  sfx.gunshot();
+
+  if (hit) {
+    const zombie = _shotResult.body.zombie;
+    if (zombie && zombieManager) {
+      const headshot = _hitPoint.y > MONSTER_TARGET_HEIGHT - WEAPON.headHeight;
+      const damage = WEAPON.damage * (headshot ? WEAPON.headshotMultiplier : 1);
+      const killed = zombieManager.damage(zombie, damage, _shotDir.x * WEAPON.push, _shotDir.z * WEAPON.push);
+      effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", headshot ? 22 : 10);
+      showHitMarker(headshot, killed);
+      sfx.hit(headshot);
+      if (killed) sfx.kill();
+    } else {
+      const n = _shotResult.hitNormalWorld;
+      effects.impact(_hitPoint, n.x, n.y, n.z, "dust", 7);
+    }
+  }
+
+  // Recoil: kick that recovers, plus a little permanent climb to manage
+  const kick = WEAPON.recoilPitch * (1 - aimBlend * 0.45);
+  recoilPitch += kick;
+  recoilYaw   += (Math.random() - 0.5) * 2 * WEAPON.recoilYaw;
+  aimPitch     = Math.min(cameraRig.pitchMax, aimPitch + kick * 0.25);
+  cameraTrauma = Math.min(1, cameraTrauma + 0.05);
+
+  zombieManager?.alert(characterBody.position.x, characterBody.position.z, WEAPON.alertRadius);
 }
 
 // ─── Model Registry & Lil-GUI Controls ────────────────────────────────────────
@@ -613,6 +1012,7 @@ function createEditableModel({ id, name, object3D, initialParams, customUpdate =
 
 function setupGui() {
   const gui = new GUI({ title: "🎯 Scene Assets & Locations" });
+  gui.close();
 
   const actions = {
     logCoordinates() {
@@ -677,38 +1077,7 @@ let zombieManager = null;
 
 // ─── Character GLTF Load ──────────────────────────────────────────────────────
 async function loadCharacter() {
-  const loader = new GLTFLoader();
-  const gltf   = await loader.loadAsync("/models/model_all.glb");
-  const model  = gltf.scene;
-
-  model.traverse(child => {
-    if (child.isMesh) { child.castShadow = true; child.receiveShadow = false; }
-  });
-
-  const bounds = new THREE.Box3().setFromObject(model);
-  const size   = new THREE.Vector3();
-  bounds.getSize(size);
-  model.scale.setScalar(CHARACTER_HEIGHT / size.y);
-  bounds.setFromObject(model);
-  model.position.y = -bounds.min.y;
-  characterRoot.add(model);
-
-  mixer = new THREE.AnimationMixer(model);
-  for (const clip of gltf.animations) {
-    const action = mixer.clipAction(clip);
-    action.enabled = false;
-    action.setEffectiveWeight(0);
-    action.setEffectiveTimeScale(1);
-    if (clip.name === "jump") { action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; }
-    else                      { action.setLoop(THREE.LoopRepeat, Infinity); }
-    actions[clip.name] = action;
-  }
-  for (const name of LOCOMOTION_CLIPS) {
-    const a = actions[name]; if (!a) continue;
-    a.enabled = true; a.play();
-  }
-  if (actions.idle) actions.idle.setEffectiveWeight(1);
-  animWeights.idle = 1; animWeights.walk = 0; animWeights.run = 0;
+  await soldier.load(new GLTFLoader());
 }
 
 // ─── World Assets Load ────────────────────────────────────────────────────────
@@ -885,7 +1254,6 @@ function animate() {
 
   checkGrounded();
   snapCharacterToGround();
-  updateCharacterAnimation(delta);
 
   characterRoot.position.set(
     characterBody.position.x,
@@ -893,12 +1261,21 @@ function animate() {
     characterBody.position.z
   );
 
-  if (mixer) mixer.update(delta);
   if (zombieManager) zombieManager.update(delta);
+
+  updateThirdPersonCamera(delta);
+  updateSoldier(delta);
+  updateWeapon(delta);
+  effects.update(delta);
+
+  timeSinceHit += delta;
+  cameraTrauma = Math.max(0, cameraTrauma - delta * 1.6);
+  updatePlayerHealthUI(delta);
+  updateThreatUI();
+  updateCombatHUD(delta);
 
   updateGroundChunks(characterBody.position.x, characterBody.position.z);
   updateSunShadow();
-  updateThirdPersonCamera();
   renderer.render(scene, camera);
 }
 
@@ -916,7 +1293,7 @@ function setLoadMsg(text) { if (loadingMsg) loadingMsg.textContent = text; }
 
 async function boot() {
   try {
-    setLoadMsg("Loading character…");
+    setLoadMsg("Loading soldier…");
     await loadCharacter();
 
     setLoadMsg("Loading zombies…");
@@ -928,12 +1305,15 @@ async function boot() {
       mass: MONSTER_MASS,
       linDamping: MONSTER_LIN_DAMPING,
       angDamping: MONSTER_ANG_DAMPING,
+      playerRadius: CHARACTER_RADIUS,
       getPlayerBody: () => characterBody,
+      canAttackPlayer: () => playerHealth > 0,
       dealDamageToPlayer,
       regenPlayerHealth,
     });
     await zombieManager.init(ZOMBIE_PREWARM_COUNT);
-    zombieManager.spawnRing(ZOMBIE_INITIAL_SPAWN, -6.43, 127.8, 8, 35);
+    zombieManager.onKill = () => { killsThisLife++; };
+    zombieManager.spawnRing(ZOMBIE_INITIAL_SPAWN, 0, 0, 26, 45);
 
     setLoadMsg("Loading world & 3D models…");
     await loadWorld();
@@ -946,6 +1326,7 @@ async function boot() {
     setupGui();
 
     window.zombieManager = zombieManager;
+    deathScreenEl?.addEventListener("click", respawnPlayer);
 
     loadingScreen.classList.add("hidden");
     loadingScreen.addEventListener("transitionend", () => loadingScreen.remove(), { once: true });

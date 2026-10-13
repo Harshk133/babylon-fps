@@ -1,8 +1,17 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { MD2Loader } from "three/addons/loaders/MD2Loader.js";
+import { GROUP_ZOMBIE } from "../physicsGroups.js";
 
 const POOL_HIDE_Y = -500;
+const MD2_FPS = 10;
+
+// The MD2 merges death1..3 / pain1..3 into single clips; split them back out
+const SUBCLIPS = {
+  death: [["death1", 0, 6], ["death2", 6, 12], ["death3", 12, 20]],
+  pain:  [["pain1", 0, 4], ["pain2", 4, 8], ["pain3", 8, 12]],
+};
+const ONE_SHOT = new Set(["death1", "death2", "death3", "pain1", "pain2", "pain3"]);
 
 function addCapsuleToBody(body, radius, height) {
   const hh = height / 2;
@@ -75,11 +84,22 @@ export class ZombiePool {
     if (!skinTexture) skinTexture = makeCheckerTexture();
 
     this.geometry = geometry;
-    this.material = new THREE.MeshLambertMaterial({
+    this.material = new THREE.MeshLambertMaterial({ map: skinTexture });
+    // Swapped in for a few frames when a bullet lands
+    this.hitMaterial = new THREE.MeshLambertMaterial({
       map: skinTexture,
-      morphTargets: true,
-      morphNormals: true,
+      emissive: new THREE.Color(0xff2a10),
+      emissiveIntensity: 0.9,
     });
+
+    this.clips = [];
+    for (const clip of geometry.animations ?? []) {
+      const parts = SUBCLIPS[clip.name];
+      if (!parts) { this.clips.push(clip); continue; }
+      for (const [name, start, end] of parts) {
+        this.clips.push(THREE.AnimationUtils.subclip(clip, name, start, end, MD2_FPS));
+      }
+    }
 
     geometry.computeBoundingBox();
     this.rawBB = geometry.boundingBox;
@@ -138,6 +158,7 @@ export class ZombiePool {
       angularDamping: this.angDamping,
       fixedRotation: true,
       allowSleep: true,
+      collisionFilterGroup: GROUP_ZOMBIE,
     });
     addCapsuleToBody(body, this.capRadius, this.capHeight);
     body.position.set(0, POOL_HIDE_Y, 0);
@@ -145,11 +166,16 @@ export class ZombiePool {
 
     const actions = {};
     let mixer = null;
-    if (this.geometry.animations?.length > 0) {
+    if (this.clips.length > 0) {
       mixer = new THREE.AnimationMixer(mesh);
-      for (const clip of this.geometry.animations) {
+      for (const clip of this.clips) {
         const action = mixer.clipAction(clip);
-        action.setLoop(THREE.LoopRepeat, Infinity);
+        if (ONE_SHOT.has(clip.name)) {
+          action.setLoop(THREE.LoopOnce, 1);
+          action.clampWhenFinished = true;
+        } else {
+          action.setLoop(THREE.LoopRepeat, Infinity);
+        }
         actions[clip.name] = action;
       }
       if (actions.attack) actions.attack.setEffectiveTimeScale(0.55);
@@ -157,7 +183,7 @@ export class ZombiePool {
       if (actions.stand) actions.stand.setEffectiveTimeScale(0.8);
     }
 
-    return {
+    const zombie = {
       id,
       active: false,
       health: 100,
@@ -171,8 +197,24 @@ export class ZombiePool {
       currentAnim: "stand",
       animLockTimer: 0,
       isChasing: false,
+      isAttacker: false,
+      attackTimer: 0,
+      distXZ: 0,
+      priority: 0,
+      sepX: 0,
+      sepZ: 0,
+      aiTimer: 0,
+      circleDir: 1,
+      taunts: false,
+      speedMul: 1,
+      dying: false,
+      dieTimer: 0,
+      staggerTimer: 0,
+      flashTimer: 0,
       rotY: 90,
     };
+    body.zombie = zombie; // lets bullet raycasts map a hit body back to its zombie
+    return zombie;
   }
 
   _resetAnimations(zombie) {
@@ -191,6 +233,15 @@ export class ZombiePool {
     zombie.health = health;
     zombie.maxHealth = maxHealth;
     zombie.isChasing = false;
+    zombie.isAttacker = false;
+    zombie.attackTimer = 0;
+    zombie.aiTimer = 0;
+    zombie.dying = false;
+    zombie.dieTimer = 0;
+    zombie.staggerTimer = 0;
+    zombie.flashTimer = 0;
+    zombie.mesh.material = this.material;
+    zombie.body.collisionFilterGroup = GROUP_ZOMBIE;
     zombie.rotY = 90;
 
     this._resetAnimations(zombie);
@@ -208,6 +259,7 @@ export class ZombiePool {
   _deactivate(zombie) {
     zombie.active = false;
     zombie.isChasing = false;
+    zombie.isAttacker = false;
     zombie.health = 0;
 
     for (const action of Object.values(zombie.actions)) {

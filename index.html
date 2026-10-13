@@ -15,18 +15,79 @@
       </div>
     </div>
 
-    <!-- Red Damage Flash Overlay -->
+    <!-- Screen-space mood: permanent vignette, low-health pulse, hit flash -->
+    <div id="vignette"></div>
+    <div id="low-health"></div>
     <div id="damage-overlay"></div>
 
     <!-- Player Health HUD -->
     <div id="hud">
       <div class="health-card">
-        <span class="health-label">HEALTH</span>
+        <div class="health-head">
+          <span class="health-label">HEALTH</span>
+          <span id="health-val">100</span>
+        </div>
         <div class="health-bar-bg">
+          <div id="health-bar-trail"></div>
           <div id="health-bar-fill"></div>
         </div>
-        <span id="health-val">100 / 100</span>
       </div>
+    </div>
+
+    <!-- Threat counter -->
+    <div id="threat">
+      <span class="threat-dot"></span>
+      <span id="threat-count">0</span>
+      <span class="threat-label">HUNTING YOU</span>
+    </div>
+
+    <!-- Crosshair + hit marker -->
+    <div id="crosshair">
+      <span class="ch ch-t"></span><span class="ch ch-b"></span>
+      <span class="ch ch-l"></span><span class="ch ch-r"></span>
+      <span class="ch-dot"></span>
+    </div>
+    <div id="hitmarker-wrap"><div id="hitmarker"></div></div>
+
+    <!-- Ammo + kills -->
+    <div id="combat-hud">
+      <div id="kills-card">
+        <span class="kills-label">KILLS</span>
+        <span id="kills-count">0</span>
+      </div>
+      <div id="ammo-card">
+        <div class="ammo-row">
+          <span id="ammo-count">32</span>
+          <span class="ammo-reserve">/ ∞</span>
+        </div>
+        <div class="ammo-weapon">SMG</div>
+        <div class="reload-track"><div id="reload-bar"></div></div>
+        <div class="reload-text">RELOADING</div>
+      </div>
+    </div>
+
+    <!-- Start / pause screen -->
+    <div id="start-screen" class="visible">
+      <h1>SURVIVE THE HORDE</h1>
+      <p class="start-cta">Click to play</p>
+      <div class="controls">
+        <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>Move</span></div>
+        <div><kbd>Shift</kbd><span>Sprint</span></div>
+        <div><kbd>Mouse</kbd><span>Look / aim</span></div>
+        <div><kbd>LMB</kbd><span>Fire</span></div>
+        <div><kbd>RMB</kbd><span>Aim down sights</span></div>
+        <div><kbd>R</kbd><span>Reload</span></div>
+        <div><kbd>Space</kbd><span>Jump</span></div>
+        <div><kbd>Esc</kbd><span>Pause</span></div>
+      </div>
+      <p class="start-tip">Headshots kill in one hit. Gunfire draws the horde.</p>
+    </div>
+
+    <!-- Death screen -->
+    <div id="death-screen">
+      <h1>YOU DIED</h1>
+      <p class="death-score"><span id="death-kills">0</span> zombies put down</p>
+      <p class="death-cta">Click to rise again</p>
     </div>
 
     <div id="app">
