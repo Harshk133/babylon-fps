@@ -18,11 +18,12 @@ export class Net {
   get isClient() { return this.connected && this.id !== this.hostId; }
 
   /**
-   * Relay address: VITE_RELAY_URL at build time (e.g. wss://my-relay.onrender.com/ws
-   * when the game is on Vercel), otherwise the relay built into the Vite server.
+   * Relay address: RELAY_URL or VITE_RELAY_URL at build time (e.g.
+   * wss://my-relay.onrender.com/ws when the game is on Vercel), otherwise the
+   * relay built into the Vite server.
    */
   static defaultUrl() {
-    const configured = import.meta.env.VITE_RELAY_URL;
+    const configured = (import.meta.env.RELAY_URL || import.meta.env.VITE_RELAY_URL || "").trim();
     if (configured) return configured;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     return `${proto}://${location.host}/ws`;

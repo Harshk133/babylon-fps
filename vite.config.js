@@ -15,6 +15,8 @@ export default defineConfig({
   // Serve from project root so /models, /trees, /texture paths work.
   publicDir: "public",
   plugins: [coopRelay],
+  // Expose RELAY_URL as well as VITE_* (some hosts' dashboards reject the VITE_ name)
+  envPrefix: ["VITE_", "RELAY_"],
 
   build: {
     // Raise the chunk-size warning threshold — three.js is intentionally large.

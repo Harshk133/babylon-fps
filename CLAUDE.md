@@ -55,7 +55,7 @@ Monsters are the Quake 2 MD2 player models from the three.js examples (`webgl_lo
 
 ### Deployment
 
-See `DEPLOY.md`. The game goes on Vercel (`vercel.json`) and the relay on Render (`render.yaml`, `server/package.json`), because Vercel can't hold WebSockets. `VITE_RELAY_URL` (build-time) points the client at the relay; unset, it uses the dev server's `/ws`. The relay's `ALLOWED_ORIGINS` limits which sites may connect. Only optimized runtime assets are committed (see `.gitignore` / `.vercelignore`), about 8 MB. `Soldier.js` and `loadGLB()` load `*.opt.glb` first.
+See `DEPLOY.md`. The game goes on Vercel (`vercel.json`) and the relay on Render (`render.yaml`, `server/package.json`), because Vercel can't hold WebSockets. `RELAY_URL` or `VITE_RELAY_URL` (build-time, exposed via `envPrefix`) points the client at the relay; unset, it uses the dev server's `/ws`. The relay's `ALLOWED_ORIGINS` limits which sites may connect. Only optimized runtime assets are committed (see `.gitignore` / `.vercelignore`), about 8 MB. `Soldier.js` and `loadGLB()` load `*.opt.glb` first.
 
 ### Physics (`cannon-es`)
 
