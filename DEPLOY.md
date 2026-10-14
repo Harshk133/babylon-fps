@@ -46,7 +46,7 @@ open **Environment Variables** and add:
 
 | Name | Value |
 |---|---|
-| `VITE_RELAY_URL` | `wss://babylon-fps-relay.onrender.com/ws` |
+| `RELAY_URL` | `wss://babylon-fps-relay.onrender.com/ws` |
 
 → **Deploy**. You get e.g. `https://babylon-fps.vercel.app`.
 
@@ -55,11 +55,11 @@ open **Environment Variables** and add:
 ```bash
 npm i -g vercel
 vercel                                   # link / create the project (preview)
-vercel env add VITE_RELAY_URL production # paste the wss://…/ws address
+vercel env add RELAY_URL production      # paste the wss://…/ws address
 vercel --prod
 ```
 
-`VITE_RELAY_URL` is baked in at build time: after changing it, redeploy.
+`RELAY_URL` (or `VITE_RELAY_URL`) is baked in at build time: after changing it, redeploy.
 
 ## 3. Lock the relay to your site
 
