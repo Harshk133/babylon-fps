@@ -23,8 +23,14 @@ export class Net {
    * relay built into the Vite server.
    */
   static defaultUrl() {
-    const configured = (import.meta.env.RELAY_URL || import.meta.env.VITE_RELAY_URL || "").trim();
+    // ?relay=wss://…/ws in the page address overrides the build setting (handy for testing)
+    const fromLink = new URLSearchParams(location.search).get("relay");
+    const configured = (fromLink || import.meta.env.RELAY_URL || import.meta.env.VITE_RELAY_URL || "").trim();
     if (configured) return configured;
+    // Static hosts can't run the relay, so falling back to this site's own /ws can't work there
+    if (/\.(vercel\.app|netlify\.app|github\.io|pages\.dev)$/.test(location.hostname)) {
+      throw new Error("Co-op server address isn't set in this build. Add RELAY_URL = wss://<your-relay>.onrender.com/ws in Vercel and redeploy.");
+    }
     const proto = location.protocol === "https:" ? "wss" : "ws";
     return `${proto}://${location.host}/ws`;
   }
@@ -47,7 +53,7 @@ export class Net {
       // Generous: free relay hosts (e.g. Render) sleep and take up to a minute to wake
       const timer = setTimeout(() => { if (!settled) { settled = true; ws.close(); reject(new Error("Timed out: is the co-op server running?")); } }, 75000);
       ws.onopen = () => ws.send(JSON.stringify({ t: "join", name, room }));
-      ws.onerror = () => { if (!settled) { settled = true; clearTimeout(timer); reject(new Error("Can't reach the co-op server")); } };
+      ws.onerror = () => { if (!settled) { settled = true; clearTimeout(timer); reject(new Error(`Can't reach the co-op server at ${url}`)); } };
       ws.onclose = () => {
         const was = this.connected;
         this.connected = false;
