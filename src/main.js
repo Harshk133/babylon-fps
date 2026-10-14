@@ -4,22 +4,45 @@ import * as CANNON from "cannon-es";
 import GUI from "lil-gui";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
+import { Soldier } from "./player/Soldier.js";
+import { Effects } from "./combat/Effects.js";
+import { Sfx } from "./combat/Sfx.js";
+import { Throwables } from "./combat/Throwables.js";
+import { FireFX } from "./combat/FireFX.js";
+import { Minimap } from "./ui/Minimap.js";
+import { Houses, HOUSE_LOOT_SPOTS } from "./world/Houses.js";
+import { EnemyFire } from "./combat/EnemyFire.js";
+import { LevelDirector } from "./zombies/LevelDirector.js";
+import { MONSTER_TYPES } from "./zombies/MonsterTypes.js";
+import { GameHUD } from "./ui/GameHUD.js";
+import {
+  WEAPONS, WEAPON_ORDER, HEAD_HEIGHT, GRENADE, MOLOTOV, MEDKIT, THROWABLES,
+} from "./combat/weapons.js";
+import { Inventory } from "./inventory/Inventory.js";
+import { InventoryUI } from "./inventory/InventoryUI.js";
+import { Pickups } from "./pickups/Pickups.js";
+import { renderItemIcon } from "./items/ItemModels.js";
+import { GROUP_WORLD, GROUP_PLAYER, GROUP_ZOMBIE } from "./physicsGroups.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const WALK_SPEED          = 20;
-const RUN_SPEED           = 40;
+const JOG_SPEED           = 5.2;   // m/s — default movement
+const BACKPEDAL_SPEED     = 3.6;
+const STRAFE_SPEED        = 4.6;
+const SPRINT_SPEED        = 8.0;   // Shift + W, can't shoot while sprinting
+const AIM_MOVE_MULTIPLIER = 0.62;  // slower while aiming down sights
 const JUMP_VELOCITY       = 5.5;
-const MOUSE_SENSITIVITY   = 0.002;
 const CHARACTER_HEIGHT    = 1.8;
 const CHARACTER_RADIUS    = 0.35;
 const CAPSULE_HEIGHT      = CHARACTER_HEIGHT - CHARACTER_RADIUS * 2;
 const CAPSULE_HALF_HEIGHT = CAPSULE_HEIGHT / 2;
 const FEET_OFFSET         = CAPSULE_HALF_HEIGHT + CHARACTER_RADIUS;
 const GROUND_SNAP_DISTANCE = 0.08;
-const MOVE_ACCEL          = 55;
-const MOVE_DECEL          = 70;
-const ROTATION_SPEED      = 14;
+const MOVE_ACCEL          = 14;    // exp-blend rates: a little weight, still responsive
+const MOVE_DECEL          = 12;
+const AIR_CONTROL         = 2;
+const ROTATION_SPEED      = 16;
 const GROUND_CHUNK_SIZE   = 48;
 const GROUND_CHUNK_RADIUS = 5;
 const GRASS_TILE_SIZE     = 2;
@@ -29,7 +52,6 @@ const SHADOW_FRUSTUM_SIZE = 25;
 const HOUSE_COUNT        = 2;
 const TREE_A_COUNT       = 2;
 const TREE_B_COUNT       = 1;
-const HOUSE_SCALE        = 7.8;
 
 const TREE_A_HEIGHT_MIN  = 10;
 const TREE_A_HEIGHT_MAX  = 16;
@@ -40,44 +62,236 @@ const SCATTER_RADIUS_MIN = 18;
 const SCATTER_RADIUS_MAX = 200;
 
 // ─── Monster Settings ─────────────────────────────────────────────────────────
-const MONSTER_HEIGHT_MULTIPLIER = 1.35; // Proportional relative to character (~2.43m)
-const MONSTER_TARGET_HEIGHT     = CHARACTER_HEIGHT * MONSTER_HEIGHT_MULTIPLIER;
-const MONSTER_MASS             = 120;
-const ZOMBIE_PREWARM_COUNT     = 100;
-const ZOMBIE_INITIAL_SPAWN     = 50;
+// Per-type size, health, speed and senses live in zombies/MonsterTypes.js
 const MONSTER_LIN_DAMPING      = 0.05; // Low damping so movement is fluid
 const MONSTER_ANG_DAMPING      = 1.0;
-const MONSTER_DEFAULT_CHASE_SPEED = 4.5; // Slow, natural creepy zombie march speed (m/s)
+
+// ─── Weapons & Items ──────────────────────────────────────────────────────────
+// Gun stats live in combat/weapons.js; the inventory tracks what's carried.
+const SWITCH_TIME    = 0.4;   // weapon draw time after a swap
+const THROW_SPEED    = 15;
+const THROW_LOFT     = 4.5;
+const THROW_COOLDOWN = 0.6;
+const DROP_LIFETIME  = 45;    // zombie loot despawns after this many seconds
+
+const inventory = new Inventory();
+const currentDef = () => WEAPONS[inventory.current];
 
 // ─── Player Health System ─────────────────────────────────────────────────────
 let playerHealth     = 100;
 const MAX_HEALTH     = 100;
+const REGEN_DELAY    = 3.0;   // seconds after the last hit before regen kicks in
 const damageOverlayEl = document.getElementById("damage-overlay");
+const lowHealthEl     = document.getElementById("low-health");
 const healthFillEl    = document.getElementById("health-bar-fill");
+const healthTrailEl   = document.getElementById("health-bar-trail");
 const healthValEl     = document.getElementById("health-val");
+const threatEl        = document.getElementById("threat");
+const threatCountEl   = document.getElementById("threat-count");
+const deathScreenEl   = document.getElementById("death-screen");
 
-function updatePlayerHealthUI() {
-  const pct = Math.max(0, Math.min(100, playerHealth));
-  if (healthFillEl) healthFillEl.style.width = `${pct}%`;
-  if (healthValEl)  healthValEl.textContent = `${Math.ceil(pct)} / 100`;
-}
+let damageFlash   = 0;   // 0..1, decays every frame
+let cameraTrauma  = 0;   // 0..1, drives camera shake
+let timeSinceHit  = 99;
+let healthTrail   = 100; // lagging "recent damage" bar
+const knockbackVel = new CANNON.Vec3();
 
-function dealDamageToPlayer(amount) {
-  playerHealth = Math.max(0, playerHealth - amount);
-  updatePlayerHealthUI();
+// Cached HUD values so the DOM is only touched when something changes
+const hudCache = { hp: -1, trail: -1, flash: -1, low: -1, threat: -1 };
 
-  if (damageOverlayEl) {
-    damageOverlayEl.style.opacity = "1";
-    setTimeout(() => {
-      if (damageOverlayEl) damageOverlayEl.style.opacity = "0";
-    }, 120);
+function updatePlayerHealthUI(delta) {
+  const hp = Math.ceil(Math.max(0, playerHealth));
+  if (hp !== hudCache.hp) {
+    hudCache.hp = hp;
+    if (healthFillEl) {
+      healthFillEl.style.width = `${hp}%`;
+      healthFillEl.classList.toggle("critical", hp <= 30);
+    }
+    if (healthValEl) healthValEl.textContent = `${hp}`;
+  }
+
+  if (timeSinceHit > 0.5) healthTrail += (playerHealth - healthTrail) * (1 - Math.exp(-4 * delta));
+  if (healthTrail < playerHealth) healthTrail = playerHealth;
+  const trail = Math.round(healthTrail);
+  if (trail !== hudCache.trail) {
+    hudCache.trail = trail;
+    if (healthTrailEl) healthTrailEl.style.width = `${trail}%`;
+  }
+
+  damageFlash = Math.max(0, damageFlash - delta * 3.2);
+  const flash = Math.round(damageFlash * 50) / 50;
+  if (flash !== hudCache.flash) {
+    hudCache.flash = flash;
+    if (damageOverlayEl) damageOverlayEl.style.opacity = `${flash}`;
+  }
+
+  const low = Math.round(THREE.MathUtils.clamp((40 - playerHealth) / 40, 0, 1) * 20) / 20;
+  if (low !== hudCache.low) {
+    hudCache.low = low;
+    if (lowHealthEl) lowHealthEl.style.opacity = `${low}`;
   }
 }
 
+function updateThreatUI() {
+  const n = zombieManager ? zombieManager.chasingCount : 0;
+  if (n === hudCache.threat) return;
+  hudCache.threat = n;
+  if (threatCountEl) threatCountEl.textContent = `${n}`;
+  if (threatEl) threatEl.classList.toggle("active", n > 0);
+}
+
+/** srcX / srcZ: where the hit came from (shows the red direction arc). */
+function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX = null, srcZ = null) {
+  if (playerHealth <= 0) return;
+  playerHealth = Math.max(0, playerHealth - amount);
+  if (srcX !== null) {
+    const dx = srcX - characterBody.position.x, dz = srcZ - characterBody.position.z;
+    // Angle clockwise from the camera's forward: right = (−cos, sin), forward = (sin, cos)
+    const right = dx * -Math.cos(aimYaw) + dz * Math.sin(aimYaw);
+    const fwd = dx * Math.sin(aimYaw) + dz * Math.cos(aimYaw);
+    gameHud.hitFrom(Math.atan2(right, fwd), amount / 15);
+  }
+  sfx.hurt();
+  timeSinceHit = 0;
+  damageFlash  = Math.min(1, damageFlash + Math.max(0.25, shake * 1.5));
+  cameraTrauma = Math.min(1, cameraTrauma + shake);
+  knockbackVel.x += knockX;
+  knockbackVel.z += knockZ;
+  if (playerHealth <= 0) onPlayerDeath();
+}
+
 function regenPlayerHealth(amount) {
-  if (playerHealth < MAX_HEALTH) {
+  if (playerHealth > 0 && playerHealth < MAX_HEALTH && timeSinceHit > REGEN_DELAY) {
     playerHealth = Math.min(MAX_HEALTH, playerHealth + amount);
-    updatePlayerHealthUI();
+  }
+}
+
+function onPlayerDeath() {
+  cameraTrauma = 1;
+  soldier.die();
+  sfx.hurt();
+  cancelThrow();
+  setInventoryOpen(false);
+  if (deathKillsEl) deathKillsEl.textContent = `${killsThisLife}`;
+  if (deathScreenEl) deathScreenEl.classList.add("visible");
+  if (document.pointerLockElement) document.exitPointerLock();
+}
+
+function respawnPlayer() {
+  playerHealth = MAX_HEALTH;
+  healthTrail  = MAX_HEALTH;
+  timeSinceHit = 99;
+  knockbackVel.set(0, 0, 0);
+  characterBody.position.set(0, FEET_OFFSET + 0.02, 0);
+  characterBody.velocity.set(0, 0, 0);
+  moveVelocity.set(0, 0, 0);
+  camPivot.set(0, cameraRig.pivotHeight, 0);
+  inventory.reset();
+  onWeaponChanged(false);
+  throwables.clear();
+  fireFX.clear();
+  enemyFire.clear();
+  killsThisLife = 0;
+  soldier.revive();
+  director?.restart(); // same level, from the top
+  if (deathScreenEl) deathScreenEl.classList.remove("visible");
+  requestLock();
+}
+
+function requestLock() {
+  // Newer browsers return a promise that rejects if the lock is refused
+  const p = canvas.requestPointerLock();
+  if (p && p.catch) p.catch(() => {});
+}
+
+// ─── Combat HUD ───────────────────────────────────────────────────────────────
+const crosshairEl   = document.getElementById("crosshair");
+const hitMarkerEl   = document.getElementById("hitmarker");
+const ammoCountEl   = document.getElementById("ammo-count");
+const reloadBarEl   = document.getElementById("reload-bar");
+const ammoCardEl    = document.getElementById("ammo-card");
+const killsEl       = document.getElementById("kills-count");
+const startScreenEl = document.getElementById("start-screen");
+const deathKillsEl  = document.getElementById("death-kills");
+
+const ammoReserveEl = document.getElementById("ammo-reserve");
+const ammoWeaponEl  = document.getElementById("ammo-weapon");
+
+const hud = {
+  paused: true,
+  gap: -1, ammo: -1, reserve: null, weapon: null, reload: -1, kills: -1, low: null,
+  hitTimer: 0, hitClass: "", shownPaused: null, crosshairHidden: null,
+};
+
+function showHitMarker(headshot, killed) {
+  const cls = killed ? "show kill" : headshot ? "show head" : "show";
+  hud.hitTimer = killed ? 0.35 : 0.14;
+  if (!hitMarkerEl) return;
+  // Restart the pop animation even when the class doesn't change
+  hitMarkerEl.className = "";
+  void hitMarkerEl.offsetWidth;
+  hitMarkerEl.className = cls;
+  hud.hitClass = cls;
+}
+
+function updateCombatHUD(delta) {
+  // Crosshair gap follows the actual bullet spread
+  const gap = Math.round(4 + currentSpread() * 420 * (62 / camera.fov));
+  if (gap !== hud.gap) {
+    hud.gap = gap;
+    crosshairEl?.style.setProperty("--gap", `${gap}px`);
+  }
+  const hideCrosshair = sprinting || playerHealth <= 0;
+  if (hideCrosshair !== hud.crosshairHidden) {
+    hud.crosshairHidden = hideCrosshair;
+    crosshairEl?.classList.toggle("hidden", hideCrosshair);
+  }
+
+  if (hud.hitTimer > 0) {
+    hud.hitTimer -= delta;
+    if (hud.hitTimer <= 0 && hitMarkerEl) {
+      hitMarkerEl.className = "";
+      hud.hitClass = "";
+    }
+  }
+
+  const def = currentDef();
+  const slot = inventory.currentSlot;
+  if (inventory.current !== hud.weapon) {
+    hud.weapon = inventory.current;
+    hud.ammo = -1;
+    if (ammoWeaponEl) ammoWeaponEl.textContent = def.short;
+  }
+  if (slot.ammo !== hud.ammo) {
+    hud.ammo = slot.ammo;
+    if (ammoCountEl) ammoCountEl.textContent = `${slot.ammo}`;
+    const low = slot.ammo <= Math.max(1, def.magSize * 0.25);
+    if (low !== hud.low) {
+      hud.low = low;
+      ammoCardEl?.classList.toggle("low", low);
+    }
+  }
+  if (slot.reserve !== hud.reserve) {
+    hud.reserve = slot.reserve;
+    if (ammoReserveEl) ammoReserveEl.textContent = `/ ${slot.reserve === Infinity ? "∞" : slot.reserve}`;
+  }
+
+  const reload = weapon.reloading ? Math.round((1 - weapon.reloadTimer / def.reloadTime) * 50) / 50 : -1;
+  if (reload !== hud.reload) {
+    hud.reload = reload;
+    ammoCardEl?.classList.toggle("reloading", reload >= 0);
+    if (reloadBarEl) reloadBarEl.style.transform = `scaleX(${Math.max(0, reload)})`;
+  }
+
+  if (killsThisLife !== hud.kills) {
+    hud.kills = killsThisLife;
+    if (killsEl) killsEl.textContent = `${killsThisLife}`;
+  }
+
+  const showStart = hud.paused && playerHealth > 0 && !inventoryOpen;
+  if (showStart !== hud.shownPaused) {
+    hud.shownPaused = showStart;
+    startScreenEl?.classList.toggle("visible", showStart);
   }
 }
 
@@ -118,19 +332,72 @@ function scatterPositions(count, rngFn, minR, maxR, minSep) {
 }
 
 // ─── Scene & Renderer ─────────────────────────────────────────────────────────
+const FOG_COLOR = 0xb08468;
+
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb);
-scene.fog = new THREE.Fog(0x87ceeb, 60, 200);
+scene.background = makeSkyTexture();
+scene.fog = new THREE.Fog(FOG_COLOR, 35, 190);
+
+// Dusk gradient mapped as an equirect background so the horizon tracks the view
+function makeSkyTexture() {
+  const c = document.createElement("canvas");
+  c.width = 4; c.height = 512;
+  const g = c.getContext("2d");
+  const grad = g.createLinearGradient(0, 0, 0, c.height);
+  grad.addColorStop(0.0,  "#1f2b44");
+  grad.addColorStop(0.3,  "#5d5a72");
+  grad.addColorStop(0.46, "#d99a68");
+  grad.addColorStop(0.5,  "#b08468");
+  grad.addColorStop(0.56, "#3a2e2a");
+  grad.addColorStop(1.0,  "#2a221f");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, c.width, c.height);
+  const tex = new THREE.CanvasTexture(c);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
 const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.5, 220);
 
 const canvas = document.getElementById("webgl");
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", logarithmicDepthBuffer: true });
+// No logarithmic depth: near/far of 0.5/220 doesn't need it, and log depth
+// writes gl_FragDepth, which disables early-Z for every pixel in the scene.
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+// ─── Dynamic resolution ───────────────────────────────────────────────────────
+// Drops the render scale when frames run long and creeps back up when there's
+// headroom, so a heavy moment (big horde, explosions) costs sharpness, not FPS.
+const MAX_PIXEL_RATIO = Math.min(window.devicePixelRatio, 1.5);
+const MIN_PIXEL_RATIO = Math.min(0.65, MAX_PIXEL_RATIO);
+const perf = { ratio: MAX_PIXEL_RATIO, avg: 16.7, slow: 0, fast: 0 };
+renderer.setPixelRatio(perf.ratio);
+
+function updateDynamicResolution(frameMs) {
+  perf.avg += (Math.min(frameMs, 100) - perf.avg) * 0.05;
+  if (perf.avg > 20) { perf.slow += frameMs; perf.fast = 0; }
+  else if (perf.avg < 14) { perf.fast += frameMs; perf.slow = 0; }
+  else { perf.slow = 0; perf.fast = 0; }
+
+  let next = perf.ratio;
+  if (perf.slow > 600) next = Math.max(MIN_PIXEL_RATIO, perf.ratio - 0.1);
+  else if (perf.fast > 3000) next = Math.min(MAX_PIXEL_RATIO, perf.ratio + 0.05);
+  if (next !== perf.ratio) {
+    perf.ratio = next;
+    perf.slow = 0;
+    perf.fast = 0;
+    renderer.setPixelRatio(next);
+  }
+}
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.shadowMap.autoUpdate = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+
+const effects = new Effects(scene);
+const sfx = new Sfx();
 
 // ─── Physics World ────────────────────────────────────────────────────────────
 const world = new CANNON.World();
@@ -144,9 +411,12 @@ const groundMaterial    = new CANNON.Material("ground");
 const characterMaterial = new CANNON.Material("character");
 const staticMaterial    = new CANNON.Material("static");
 const monsterMaterial   = new CANNON.Material("monster");
+const projectileMaterial = new CANNON.Material("projectile");
 
+// The controller sets the player's velocity directly every frame, so friction
+// would only fight it (and make the player stick to walls instead of sliding)
 const contactDefaults = {
-  friction: 0.85, restitution: 0,
+  friction: 0.0, restitution: 0,
   contactEquationStiffness: 1e7, contactEquationRelaxation: 3,
   frictionEquationStiffness: 1e7, frictionEquationRelaxation: 3,
 };
@@ -158,14 +428,36 @@ world.addContactMaterial(new CANNON.ContactMaterial(groundMaterial, monsterMater
   friction: 0.0, restitution: 0,
   contactEquationStiffness: 1e7, contactEquationRelaxation: 3,
 }));
+// Frictionless so player/zombie and zombie/zombie bodies slide apart instead of climbing
 world.addContactMaterial(new CANNON.ContactMaterial(characterMaterial, monsterMaterial, {
-  friction: 0.2, restitution: 0,
+  friction: 0.0, restitution: 0,
   contactEquationStiffness: 1e7, contactEquationRelaxation: 3,
 }));
+world.addContactMaterial(new CANNON.ContactMaterial(monsterMaterial, monsterMaterial, {
+  friction: 0.0, restitution: 0,
+  contactEquationStiffness: 1e7, contactEquationRelaxation: 3,
+}));
+// Frictionless too: zombies slide along walls and door jambs instead of sticking to them
 world.addContactMaterial(new CANNON.ContactMaterial(staticMaterial, monsterMaterial, {
-  friction: 0.2, restitution: 0,
+  friction: 0.0, restitution: 0,
   contactEquationStiffness: 1e7, contactEquationRelaxation: 3,
 }));
+
+// Grenades bounce and roll a little; molotovs shatter on the first contact anyway
+world.addContactMaterial(new CANNON.ContactMaterial(groundMaterial, projectileMaterial, { friction: 0.5, restitution: 0.3 }));
+world.addContactMaterial(new CANNON.ContactMaterial(staticMaterial, projectileMaterial, { friction: 0.3, restitution: 0.4 }));
+world.addContactMaterial(new CANNON.ContactMaterial(monsterMaterial, projectileMaterial, { friction: 0.2, restitution: 0.2 }));
+
+// ─── Static objects ───────────────────────────────────────────────────────────
+// Things that never move skip the per-frame matrix recompute.
+function freezeStatic(root) {
+  root.updateMatrixWorld(true);
+  root.traverse(o => { o.matrixAutoUpdate = false; });
+}
+
+// Footprints of world objects for the minimap, and solid rects zombies path around
+const mapObstacles = [];
+const navObstacles = [];
 
 // ─── Collider Helpers ─────────────────────────────────────────────────────────
 function addTreeCollider(x, y, z, rotY, scale, trunkR, trunkH, crownR, crownY) {
@@ -174,10 +466,9 @@ function addTreeCollider(x, y, z, rotY, scale, trunkR, trunkH, crownR, crownY) {
   body.sleepSpeedLimit = 0.01;
   body.sleepTimeLimit  = 0.1;
 
-  const q = new CANNON.Quaternion();
-  q.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.PI / 2);
+  // cannon-es cylinders are already Y-up: no rotation (a rotated one lies sideways in the air)
   const trunk = new CANNON.Cylinder(trunkR * scale, trunkR * scale, trunkH * scale, 8);
-  body.addShape(trunk, new CANNON.Vec3(0, (trunkH * scale) / 2, 0), q);
+  body.addShape(trunk, new CANNON.Vec3(0, (trunkH * scale) / 2, 0));
 
   const canopy = new CANNON.Sphere(crownR * scale);
   body.addShape(canopy, new CANNON.Vec3(0, crownY * scale, 0));
@@ -185,6 +476,7 @@ function addTreeCollider(x, y, z, rotY, scale, trunkR, trunkH, crownR, crownY) {
   body.position.set(x, y, z);
   body.quaternion.setFromEuler(0, rotY, 0);
   world.addBody(body);
+  mapObstacles.push({ type: "circle", x, z, r: Math.max(0.8, crownR * scale * 0.7) });
 }
 
 function addBoxCollider(x, y, z, rotY, scale, sizeX, sizeY, sizeZ, centreY) {
@@ -202,21 +494,25 @@ function addBoxCollider(x, y, z, rotY, scale, sizeX, sizeY, sizeZ, centreY) {
   body.position.set(x, y, z);
   body.quaternion.setFromEuler(0, rotY, 0);
   world.addBody(body);
+  mapObstacles.push({ type: "box", x, z, w: sizeX * scale, d: sizeZ * scale, rot: rotY });
 }
 
 function addCapsuleToBody(body, radius, height) {
   const hh = height / 2;
-  const q = new CANNON.Quaternion();
-  q.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.PI / 2); // Orient Z-axis cylinder to vertical Y-axis
-
+  // cannon-es Cylinder is Y-aligned already. Rotating it (old cannon.js habit)
+  // turned the capsule's middle into a 1.1 m horizontal bar along world Z,
+  // which snagged on door jambs and made the player wider than a doorway.
   body.addShape(new CANNON.Sphere(radius), new CANNON.Vec3(0, -hh, 0));
-  body.addShape(new CANNON.Cylinder(radius, radius, height, 12), new CANNON.Vec3(0, 0, 0), q);
+  body.addShape(new CANNON.Cylinder(radius, radius, height, 12), new CANNON.Vec3(0, 0, 0));
   body.addShape(new CANNON.Sphere(radius), new CANNON.Vec3(0,  hh, 0));
 }
 
 // ─── Ground ───────────────────────────────────────────────────────────────────
 const textureLoader = new THREE.TextureLoader();
-const grassTexture  = textureLoader.load("/texture/grass2.jpg");
+// Prefer the downsized copy from `npm run optimize-assets`, fall back to the original
+const grassTexture  = textureLoader.load("/texture/grass2.opt.jpg", undefined, undefined, () => {
+  textureLoader.load("/texture/grass2.jpg", img => { grassTexture.image = img.image; grassTexture.needsUpdate = true; });
+});
 grassTexture.wrapS = THREE.RepeatWrapping;
 grassTexture.wrapT = THREE.RepeatWrapping;
 grassTexture.repeat.set(GROUND_CHUNK_SIZE / GRASS_TILE_SIZE, GROUND_CHUNK_SIZE / GRASS_TILE_SIZE);
@@ -246,6 +542,7 @@ function createGroundChunk(cx, cz) {
   mesh.rotation.x = -Math.PI / 2;
   mesh.position.set(cx * GROUND_CHUNK_SIZE + GROUND_CHUNK_SIZE * 0.5, 0, cz * GROUND_CHUNK_SIZE + GROUND_CHUNK_SIZE * 0.5);
   mesh.receiveShadow = true;
+  freezeStatic(mesh);
   scene.add(mesh);
   groundChunks.set(key, mesh);
 }
@@ -281,8 +578,9 @@ world.addBody(groundBody);
 updateGroundChunks(0, 0);
 
 // ─── Lighting ─────────────────────────────────────────────────────────────────
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const sun = new THREE.DirectionalLight(0xfff2d6, 1.1);
+scene.add(new THREE.HemisphereLight(0x9fb4d8, 0x4a3a2c, 0.9));
+scene.add(new THREE.AmbientLight(0xffe2c8, 0.25));
+const sun = new THREE.DirectionalLight(0xffc48a, 2.4);
 sun.position.set(6, 12, 4);
 sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024);
@@ -294,6 +592,14 @@ sun.shadow.camera.top    =  SHADOW_FRUSTUM_SIZE;
 sun.shadow.camera.bottom = -SHADOW_FRUSTUM_SIZE;
 sun.shadow.bias          = -0.0003;
 sun.shadow.normalBias    = 0.05;
+// Soft fill from the camera side so the player and zombies don't turn into pure
+// silhouettes when looking away from the low sun
+const fillLight = new THREE.DirectionalLight(0xc8d4ff, 0.55);
+camera.add(fillLight);
+fillLight.position.set(0, 1, 1);
+fillLight.target.position.set(0, 0, -1);
+camera.add(fillLight.target);
+scene.add(camera);
 const sunTarget = new THREE.Object3D();
 scene.add(sunTarget);
 sun.target = sunTarget;
@@ -308,48 +614,70 @@ const characterBody = new CANNON.Body({
   linearDamping: 0.08, angularDamping: 1,
   fixedRotation: true,
   sleepSpeedLimit: 0.1, sleepTimeLimit: 0.5,
+  collisionFilterGroup: GROUP_PLAYER,
 });
 addCapsuleToBody(characterBody, CHARACTER_RADIUS, CAPSULE_HEIGHT);
 characterBody.position.set(0, FEET_OFFSET + 0.02, 0);
 world.addBody(characterBody);
 
-// ─── Camera ───────────────────────────────────────────────────────────────────
-const cameraPivot  = new THREE.Vector3();
-const cameraTarget = new THREE.Vector3();
-const cameraRight  = new THREE.Vector3();
-let cameraYaw   = Math.PI;
-let cameraPitch = 0.25;
-let onGround    = false;
-let jumpQueued  = false;
+const soldier = new Soldier();
+characterRoot.add(soldier.root);
 
+let bodyYaw       = 0;     // facing of the character mesh (rad); 0 faces +Z
+let turningInPlace = false;
+let onGround      = false;
+let jumpQueued    = false;
+let sprinting     = false;
+
+// ─── Camera Rig (over-the-shoulder) ───────────────────────────────────────────
+// Aim direction = (sin yaw·cos pitch, sin pitch, cos yaw·cos pitch); +pitch looks up.
 const cameraRig = {
-  distance: 2.7, offsetX: -0.15, offsetY: 0.18,
-  lookAtY: 0.86, smooth: 1.0, fov: 58,
-  pitchMin: -0.35, pitchMax: 1.1,
+  pivotHeight: 1.55,
+  hip:    { distance: 2.6,  shoulder: 0.55, height: 0.12, fov: 62 },
+  aim:    { distance: 1.25, shoulder: 0.5,  height: 0.06, fov: 42 },
+  sprint: { distance: 3.0,  shoulder: 0.45, height: 0.15, fov: 70 },
+  followXZ: 16, followY: 9,
+  pitchMin: -1.2, pitchMax: 1.0,
+  sensitivity: 0.0022, aimSensitivity: 0.0012,
 };
+let aimYaw = 0, aimPitch = -0.12;
+let aimBlend = 0, sprintBlend = 0;
+let camFrac = 1;                 // 0..1 of the desired boom length after collision
+let recoilPitch = 0, recoilYaw = 0;
+const camPivot     = new THREE.Vector3(0, cameraRig.pivotHeight, 0);
+const camOffset    = new THREE.Vector3();
+const camLook      = new THREE.Vector3();
+const camRight     = new THREE.Vector3();
+const camRayFrom   = new CANNON.Vec3();
+const camRayTo     = new CANNON.Vec3();
+const camRayResult = new CANNON.RaycastResult();
+const camRayOpts   = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
 
 // ─── Movement Helpers ─────────────────────────────────────────────────────────
-const movement                  = new THREE.Vector3();
-const forward                   = new THREE.Vector3();
-const right                     = new THREE.Vector3();
-const desiredVelocity           = new THREE.Vector3();
-const currentHorizontalVelocity = new CANNON.Vec3();
+const moveVelocity              = new CANNON.Vec3(); // input-driven, excludes knockback
 const groundContactNormal       = new CANNON.Vec3(0, 1, 0);
+const groundStickForce          = new CANNON.Vec3();
 const rayOrigin                 = new CANNON.Vec3();
 const rayTo                     = new CANNON.Vec3();
 const rayResult                 = new CANNON.RaycastResult();
+const groundRayOpts             = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
 
-// ─── Animation ────────────────────────────────────────────────────────────────
-let mixer      = null;
-let jumpActive = false;
-const actions      = {};
-const animWeights  = { idle: 1, walk: 0, run: 0 };
-const LOCOMOTION_CLIPS    = ["idle", "walk", "run"];
-const ANIM_BLEND_SPEED    = 7.5;
-const WALK_RUN_BLEND_SPEED = 5.5;
+const _doorPull = { x: 0, z: 0 };
+
+function angleDiff(a, b) {
+  let d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  else if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
 
 // ─── Input ────────────────────────────────────────────────────────────────────
-function setKey(code, pressed) {
+const input = { fire: false, aim: false, firePressed: false };
+const isLocked = () => document.pointerLockElement === canvas;
+
+const SLOT_KEYS = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4, Digit5: 5 };
+
+function setKey(code, pressed, repeat) {
   switch (code) {
     case "KeyW": case "ArrowUp":    keys.forward   = pressed; break;
     case "KeyS": case "ArrowDown":  keys.backward  = pressed; break;
@@ -361,81 +689,82 @@ function setKey(code, pressed) {
       break;
     case "ShiftLeft": case "ShiftRight": keys.run = pressed; break;
   }
+  if (repeat) return;
+
+  // One-shot actions
+  const playing = isLocked() && playerHealth > 0;
+  if (pressed) {
+    if (code === "Tab" || code === "KeyI") { setInventoryOpen(!inventoryOpen); return; }
+    if (code === "Escape" && inventoryOpen) { setInventoryOpen(false); return; }
+    if (!playing) return;
+    if (code in SLOT_KEYS) {
+      const id = WEAPON_ORDER.find(w => WEAPONS[w].slot === SLOT_KEYS[code]);
+      if (inventory.has(id)) equipWeapon(id);
+      else inventoryUI.feed(`${WEAPONS[id].name} not found yet`, "info");
+    }
+    switch (code) {
+      case "KeyR": startReload(); break;
+      case "KeyE": interact(); break;
+      case "KeyG": beginThrow(); break;
+      case "KeyQ": cycleThrowable(); break;
+      case "KeyH": useMedkit(); break;
+      case "KeyO": useDoor(true); break;
+      case "KeyC": useDoor(false); break;
+      case "KeyL": useLightSwitch(); break;
+    }
+  } else if (code === "KeyG") {
+    releaseThrow();
+  }
 }
-window.addEventListener("keydown", e => setKey(e.code, true));
-window.addEventListener("keyup",   e => setKey(e.code, false));
-canvas.addEventListener("click",   () => canvas.requestPointerLock());
-document.addEventListener("mousemove", e => {
-  if (document.pointerLockElement !== canvas) return;
-  cameraYaw   -= e.movementX * MOUSE_SENSITIVITY;
-  cameraPitch -= e.movementY * MOUSE_SENSITIVITY;
-  cameraPitch  = THREE.MathUtils.clamp(cameraPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+window.addEventListener("keydown", e => {
+  if (e.code === "Tab") e.preventDefault(); // keep focus from jumping around the page
+  setKey(e.code, true, e.repeat);
 });
-
-// ─── Animation Helpers ────────────────────────────────────────────────────────
-function isMovingInput() { return keys.forward || keys.backward || keys.left || keys.right; }
-
-function setActionWeight(action, weight) {
-  if (!action) return;
-  const w = THREE.MathUtils.clamp(weight, 0, 1);
-  action.enabled = true;
-  action.setEffectiveWeight(w);
-  if (w > 0.001) action.play();
-}
-
-function updateCharacterAnimation(delta) {
-  if (!mixer || !actions.idle) return;
-  const hSpeed     = Math.hypot(characterBody.velocity.x, characterBody.velocity.z);
-  const movingInput = isMovingInput();
-
-  if (onGround) jumpActive = false;
-
-  if (jumpActive && actions.jump && !onGround) {
-    setActionWeight(actions.jump, 1);
-    setActionWeight(actions.idle, 0);
-    setActionWeight(actions.walk, 0);
-    setActionWeight(actions.run,  0);
-    return;
-  }
-  if (actions.jump) setActionWeight(actions.jump, 0);
-
-  let tIdle = 0, tWalk = 0, tRun = 0;
-  if (!movingInput)  tIdle = 1;
-  else if (keys.run) tRun  = 1;
-  else               tWalk = 1;
-
-  const ib = 1 - Math.exp(-ANIM_BLEND_SPEED     * delta);
-  const gb = 1 - Math.exp(-WALK_RUN_BLEND_SPEED * delta);
-  animWeights.idle = THREE.MathUtils.lerp(animWeights.idle, tIdle, ib);
-  animWeights.walk = THREE.MathUtils.lerp(animWeights.walk, tWalk, gb);
-  animWeights.run  = THREE.MathUtils.lerp(animWeights.run,  tRun,  gb);
-
-  const sum    = animWeights.idle + animWeights.walk + animWeights.run || 1;
-  const iW     = animWeights.idle / sum;
-  const wW     = animWeights.walk / sum;
-  const rW     = animWeights.run  / sum;
-
-  setActionWeight(actions.idle, iW);
-  setActionWeight(actions.walk, wW);
-  setActionWeight(actions.run,  rW);
-
-  if (actions.walk && actions.run && wW > 0.05 && rW > 0.05) {
-    const wc = actions.walk.getClip(), rc = actions.run.getClip();
-    if (wc.duration > 0 && rc.duration > 0)
-      actions.run.time = ((actions.walk.time / wc.duration) * rc.duration) % rc.duration;
-  }
-  if (actions.walk && wW > 0.05)
-    actions.walk.setEffectiveTimeScale(THREE.MathUtils.clamp(hSpeed / WALK_SPEED, 0.85, 1.25));
-  if (actions.run  && rW > 0.05)
-    actions.run.setEffectiveTimeScale (THREE.MathUtils.clamp(hSpeed / RUN_SPEED,  0.85, 1.25));
-}
+window.addEventListener("keyup", e => setKey(e.code, false, false));
+canvas.addEventListener("click", () => {
+  sfx.unlock();
+  if (playerHealth > 0 && !inventoryOpen) requestLock();
+});
+let wheelCooldown = 0;
+window.addEventListener("wheel", e => {
+  if (!isLocked() || playerHealth <= 0 || e.deltaY === 0) return;
+  const now = performance.now();
+  if (now < wheelCooldown) return;
+  wheelCooldown = now + 120;
+  const prev = inventory.current;
+  inventory.cycle(e.deltaY > 0 ? 1 : -1);
+  if (inventory.current !== prev) onWeaponChanged();
+}, { passive: true });
+canvas.addEventListener("mousedown", e => {
+  if (!isLocked()) return;
+  if (e.button === 0) { input.fire = true; input.firePressed = true; }
+  if (e.button === 2) input.aim = true;
+});
+window.addEventListener("mouseup", e => {
+  if (e.button === 0) input.fire = false;
+  if (e.button === 2) input.aim = false;
+});
+window.addEventListener("contextmenu", e => e.preventDefault());
+document.addEventListener("pointerlockchange", () => {
+  if (!isLocked()) { input.fire = false; input.aim = false; }
+  hud.paused = !isLocked();
+  // The first level starts when you first click into the game
+  if (isLocked() && director && director.state === "idle") director.start(1);
+});
+document.addEventListener("mousemove", e => {
+  if (!isLocked()) return;
+  const s = THREE.MathUtils.lerp(cameraRig.sensitivity, cameraRig.aimSensitivity, aimBlend);
+  aimYaw   -= e.movementX * s;
+  aimPitch -= e.movementY * s;
+  aimPitch  = THREE.MathUtils.clamp(aimPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+});
 
 // ─── Ground Check ─────────────────────────────────────────────────────────────
 function checkGrounded() {
   onGround = false;
   rayOrigin.set(characterBody.position.x, characterBody.position.y + 0.05,          characterBody.position.z);
   rayTo    .set(characterBody.position.x, characterBody.position.y - FEET_OFFSET - 0.45, characterBody.position.z);
-  const hit = world.raycastClosest(rayOrigin, rayTo, { skipBackfaces: true }, rayResult);
+  const hit = world.raycastClosest(rayOrigin, rayTo, groundRayOpts, rayResult);
   if (!hit) return;
   const dist = rayResult.distance - FEET_OFFSET;
   if (dist <= GROUND_SNAP_DISTANCE && characterBody.velocity.y <= 0.75) {
@@ -448,16 +777,15 @@ function applyGroundStickForce(delta) {
   if (!onGround) return;
   if (characterBody.velocity.y < 0) characterBody.velocity.y = 0;
   const f = 70 * characterBody.mass * delta;
-  characterBody.applyForce(new CANNON.Vec3(
-    -groundContactNormal.x * f, -groundContactNormal.y * f, -groundContactNormal.z * f
-  ));
+  groundStickForce.set(-groundContactNormal.x * f, -groundContactNormal.y * f, -groundContactNormal.z * f);
+  characterBody.applyForce(groundStickForce);
 }
 
 function snapCharacterToGround() {
   if (!onGround) return;
   rayOrigin.set(characterBody.position.x, characterBody.position.y + 0.05,          characterBody.position.z);
   rayTo    .set(characterBody.position.x, characterBody.position.y - FEET_OFFSET - 0.45, characterBody.position.z);
-  if (world.raycastClosest(rayOrigin, rayTo, { skipBackfaces: true }, rayResult)) {
+  if (world.raycastClosest(rayOrigin, rayTo, groundRayOpts, rayResult)) {
     const d = rayResult.distance - FEET_OFFSET;
     if (Math.abs(d) < GROUND_SNAP_DISTANCE) characterBody.position.y -= d;
   }
@@ -465,83 +793,811 @@ function snapCharacterToGround() {
 }
 
 // ─── Movement ─────────────────────────────────────────────────────────────────
-const _targetVelocity = new CANNON.Vec3();
-
+// WASD is camera-relative; the body turns to face the aim direction (strafe mode)
 function updateCharacterMovement(delta) {
-  forward.set(Math.sin(cameraYaw), 0, Math.cos(cameraYaw)).normalize();
-  right.set(forward.z, 0, -forward.x).normalize();
+  const alive = playerHealth > 0;
+  let ix = 0, iz = 0; // ix: +right, iz: +forward
+  if (alive && !inventoryOpen) {
+    if (keys.forward)  iz += 1;
+    if (keys.backward) iz -= 1;
+    if (keys.right)    ix += 1;
+    if (keys.left)     ix -= 1;
+  }
+  const len = Math.hypot(ix, iz);
+  const movingInput = len > 0;
+  if (movingInput) { ix /= len; iz /= len; }
 
-  movement.set(0, 0, 0);
-  if (keys.forward)  movement.add(forward);
-  if (keys.backward) movement.sub(forward);
-  if (keys.left)     movement.sub(right);
-  if (keys.right)    movement.add(right);
+  sprinting = alive && keys.run && iz > 0.5 && !input.fire && !input.aim;
 
-  const movingInput = movement.lengthSq() > 0.001;
-  if (movingInput) movement.normalize();
+  let speed = 0;
+  if (sprinting) {
+    speed = SPRINT_SPEED;
+  } else if (movingInput) {
+    const ax = Math.abs(ix), az = Math.abs(iz);
+    speed = (az * (iz >= 0 ? JOG_SPEED : BACKPEDAL_SPEED) + ax * STRAFE_SPEED) / (ax + az);
+    if (input.aim) speed *= AIM_MOVE_MULTIPLIER;
+  }
 
-  const speed = keys.run ? RUN_SPEED : WALK_SPEED;
-  desiredVelocity.copy(movement).multiplyScalar(speed);
+  // forward = (sin yaw, cos yaw), right = (−cos yaw, sin yaw)
+  const sy = Math.sin(aimYaw), cy = Math.cos(aimYaw);
+  const targetX = (iz * sy - ix * cy) * speed;
+  const targetZ = (iz * cy + ix * sy) * speed;
 
-  currentHorizontalVelocity.set(characterBody.velocity.x, 0, characterBody.velocity.z);
-  _targetVelocity.set(desiredVelocity.x, 0, desiredVelocity.z);
+  // Knockback rides on top of the input-driven velocity and decays on its own
+  const rate = onGround ? (movingInput ? MOVE_ACCEL : MOVE_DECEL) : AIR_CONTROL;
+  const blend = 1 - Math.exp(-rate * delta);
+  moveVelocity.x += (targetX - moveVelocity.x) * blend;
+  moveVelocity.z += (targetZ - moveVelocity.z) * blend;
+  if (!movingInput && moveVelocity.lengthSquared() < 0.01)
+    moveVelocity.set(0, 0, 0);
 
-  const blend = 1 - Math.exp(-(movingInput ? MOVE_ACCEL : MOVE_DECEL) * delta);
-  currentHorizontalVelocity.x += (_targetVelocity.x - currentHorizontalVelocity.x) * blend;
-  currentHorizontalVelocity.z += (_targetVelocity.z - currentHorizontalVelocity.z) * blend;
-  if (!movingInput && currentHorizontalVelocity.lengthSquared() < 0.04)
-    currentHorizontalVelocity.set(0, 0, 0);
+  const knockDecay = Math.exp(-9 * delta);
+  knockbackVel.x *= knockDecay;
+  knockbackVel.z *= knockDecay;
+  characterBody.velocity.x = moveVelocity.x + knockbackVel.x;
+  characterBody.velocity.z = moveVelocity.z + knockbackVel.z;
+  // Guide the player through doorways instead of snagging on the jamb
+  if (houses?.doorAssist(characterBody.position.x, characterBody.position.z, moveVelocity.x, moveVelocity.z, _doorPull)) {
+    characterBody.velocity.x += _doorPull.x;
+    characterBody.velocity.z += _doorPull.z;
+  }
 
-  characterBody.velocity.x = currentHorizontalVelocity.x;
-  characterBody.velocity.z = currentHorizontalVelocity.z;
-
-  if (jumpQueued && onGround) {
+  if (jumpQueued && onGround && alive) {
     characterBody.velocity.y = JUMP_VELOCITY;
-    onGround   = false;
-    jumpActive = true;
-    if (actions.jump) {
-      actions.jump.reset();
-      actions.jump.setLoop(THREE.LoopOnce, 1);
-      actions.jump.clampWhenFinished = true;
-      actions.jump.enabled = true;
-      actions.jump.setEffectiveWeight(1);
-      actions.jump.play();
-    }
+    onGround = false;
   }
   jumpQueued = false;
 
-  if (movingInput) {
-    const tRot    = Math.atan2(movement.x, movement.z);
-    const tBlend  = 1 - Math.exp(-ROTATION_SPEED * delta);
-    characterRoot.rotation.y = THREE.MathUtils.lerp(characterRoot.rotation.y, tRot, tBlend);
+  // Facing: lock to the camera while moving or using the gun; when standing
+  // still, only turn in place once the camera swings well past the shoulder.
+  if (!alive) return;
+  const engaged = movingInput || input.aim || input.fire || throwAiming || timeSinceShot < 0.6;
+  const diff = angleDiff(aimYaw, bodyYaw);
+  if (!engaged && Math.abs(diff) > 1.4) turningInPlace = true;
+  if (turningInPlace && Math.abs(diff) < 0.05) turningInPlace = false;
+  if (engaged || turningInPlace) {
+    const turnRate = engaged ? ROTATION_SPEED : ROTATION_SPEED * 0.5;
+    bodyYaw += diff * (1 - Math.exp(-turnRate * delta));
   }
+  characterRoot.rotation.y = bodyYaw;
+}
+
+function updateSoldier(delta) {
+  characterRoot.updateMatrixWorld(true);
+  const vx = characterBody.velocity.x - knockbackVel.x;
+  const vz = characterBody.velocity.z - knockbackVel.z;
+  const sy = Math.sin(bodyYaw), cy = Math.cos(bodyYaw);
+  const alive = playerHealth > 0;
+  soldier.update(delta, {
+    localForward: onGround ? vx * sy + vz * cy : 0,
+    localRight:   onGround ? -vx * cy + vz * sy : 0,
+    aiming: alive && !sprinting && (input.aim || input.fire || timeSinceShot < 0.5),
+    firing: timeSinceShot < 0.12,
+    aimYawOffset: angleDiff(aimYaw + recoilYaw, bodyYaw),
+    aimPitch: aimPitch + recoilPitch,
+  });
 }
 
 // ─── Shadow / Camera ──────────────────────────────────────────────────────────
 function updateSunShadow() {
   const fx = characterBody.position.x, fz = characterBody.position.z;
   sunTarget.position.set(fx, 0, fz);
-  sun.position.set(fx + 24, 34, fz + 16);
+  sun.position.set(fx + 30, 22, fz + 18); // low evening sun → longer shadows
   sun.shadow.camera.updateProjectionMatrix();
 }
 
-function updateThirdPersonCamera() {
-  cameraPivot.set(characterBody.position.x, characterBody.position.y + cameraRig.lookAtY, characterBody.position.z);
-  const cosPitch = Math.cos(cameraPitch);
-  cameraRight.set(Math.cos(cameraYaw), 0, -Math.sin(cameraYaw)).normalize();
-  cameraTarget.set(
-    cameraPivot.x + Math.sin(cameraYaw) * cosPitch          * cameraRig.distance + cameraRight.x * cameraRig.offsetX,
-    cameraPivot.y + Math.sin(cameraPitch)                    * cameraRig.distance + cameraRig.offsetY,
-    cameraPivot.z + Math.cos(cameraYaw) * cosPitch           * cameraRig.distance + cameraRight.z * cameraRig.offsetX
-  );
-  camera.position.copy(cameraTarget);
-  camera.lookAt(cameraPivot);
+function rigValue(key) {
+  const { hip, aim, sprint } = cameraRig;
+  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(hip[key], aim[key], aimBlend), sprint[key], sprintBlend);
 }
+
+function updateThirdPersonCamera(delta) {
+  const alive = playerHealth > 0;
+  aimBlend    += ((input.aim && alive && !sprinting ? 1 : 0) - aimBlend) * (1 - Math.exp(-12 * delta));
+  sprintBlend += ((sprinting ? 1 : 0) - sprintBlend) * (1 - Math.exp(-4 * delta));
+
+  // Critically-damped style follow: tight on XZ, softer on Y so jumps/steps don't jolt
+  const kxz = 1 - Math.exp(-cameraRig.followXZ * delta);
+  const ky  = 1 - Math.exp(-cameraRig.followY * delta);
+  camPivot.x += (characterBody.position.x - camPivot.x) * kxz;
+  camPivot.z += (characterBody.position.z - camPivot.z) * kxz;
+  camPivot.y += (characterBody.position.y - FEET_OFFSET + cameraRig.pivotHeight - camPivot.y) * ky;
+
+  recoilPitch *= Math.exp(-10 * delta);
+  recoilYaw   *= Math.exp(-12 * delta);
+  const yaw   = aimYaw + recoilYaw;
+  const pitch = THREE.MathUtils.clamp(aimPitch + recoilPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+  const cp = Math.cos(pitch);
+  camLook.set(Math.sin(yaw) * cp, Math.sin(pitch), Math.cos(yaw) * cp);
+  camRight.set(-Math.cos(yaw), 0, Math.sin(yaw));
+
+  // Boom: pivot → shoulder → back along the aim direction
+  camOffset.copy(camRight).multiplyScalar(rigValue("shoulder"));
+  camOffset.y += rigValue("height");
+  camOffset.addScaledVector(camLook, -rigValue("distance"));
+
+  // Pull in instantly when something blocks the boom, ease back out when clear
+  const boom = camOffset.length();
+  camRayFrom.set(camPivot.x, camPivot.y, camPivot.z);
+  camRayTo.set(camPivot.x + camOffset.x, camPivot.y + camOffset.y, camPivot.z + camOffset.z);
+  let targetFrac = 1;
+  if (world.raycastClosest(camRayFrom, camRayTo, camRayOpts, camRayResult)) {
+    targetFrac = Math.max(0.1, (camRayResult.distance - 0.25) / boom);
+  }
+  if (targetFrac < camFrac) camFrac = targetFrac;
+  else camFrac += (targetFrac - camFrac) * (1 - Math.exp(-5 * delta));
+
+  camera.position.copy(camPivot).addScaledVector(camOffset, camFrac);
+  camera.rotation.order = "YXZ";
+  camera.rotation.set(pitch, yaw + Math.PI, 0);
+
+  // Trauma-based shake: squared falloff feels punchy on a hit, then settles fast
+  if (cameraTrauma > 0.001) {
+    const t = clock.elapsedTime * 38;
+    const s = cameraTrauma * cameraTrauma;
+    camera.rotation.z += Math.sin(t * 1.3) * 0.035 * s;
+    camera.rotation.x += Math.sin(t * 0.9 + 1.7) * 0.025 * s;
+    camera.rotation.y += Math.sin(t * 1.1 + 4.2) * 0.025 * s;
+  }
+
+  const fov = rigValue("fov");
+  if (Math.abs(camera.fov - fov) > 0.01) {
+    camera.fov = fov;
+    camera.updateProjectionMatrix();
+  }
+  camera.updateMatrixWorld();
+}
+
+// ─── Weapon ───────────────────────────────────────────────────────────────────
+const weapon = { cooldown: 0, reloading: false, reloadTimer: 0, bloom: 0, switchTimer: 0, triggerLatched: false };
+let timeSinceShot = 99;
+let killsThisLife = 0;
+let dryFireNotice = 0;
+
+const _shotDir    = new THREE.Vector3();
+const _aimDir     = new THREE.Vector3();
+const _muzzle     = new THREE.Vector3();
+const _hitPoint   = new THREE.Vector3();
+const _shotFrom   = new CANNON.Vec3();
+const _shotTo     = new CANNON.Vec3();
+const _shotResult = new CANNON.RaycastResult();
+const shotOpts    = { collisionFilterMask: GROUP_WORLD | GROUP_ZOMBIE, skipBackfaces: true };
+
+function startReload() {
+  if (weapon.reloading || weapon.switchTimer > 0 || playerHealth <= 0 || !inventory.canReload()) return;
+  const def = currentDef();
+  weapon.reloading = true;
+  weapon.reloadTimer = def.reloadTime;
+  sfx.reload(def.reloadTime);
+}
+
+function equipWeapon(id) {
+  if (inventory.equip(id)) onWeaponChanged();
+}
+
+/** Syncs the held model, camera zoom and weapon timers to inventory.current. */
+function onWeaponChanged(withSound = true) {
+  const def = currentDef();
+  soldier.setWeapon(inventory.current);
+  cameraRig.aim.fov = def.aimFov;
+  weapon.reloading = false;
+  weapon.bloom = 0;
+  weapon.cooldown = 0;
+  weapon.switchTimer = withSound ? SWITCH_TIME : 0;
+  if (withSound) sfx.equip();
+}
+
+function currentSpread() {
+  const def = currentDef();
+  const hSpeed = Math.hypot(characterBody.velocity.x, characterBody.velocity.z);
+  const moving = THREE.MathUtils.clamp(hSpeed / JOG_SPEED, 0, 1);
+  return THREE.MathUtils.lerp(def.spreadHip, def.spreadAim, aimBlend)
+    + def.spreadMove * moving * (1 - aimBlend * 0.6)
+    + (onGround ? 0 : def.spreadAir)
+    + weapon.bloom;
+}
+
+function updateWeapon(delta) {
+  const def = currentDef();
+  weapon.cooldown = Math.max(0, weapon.cooldown - delta);
+  weapon.switchTimer = Math.max(0, weapon.switchTimer - delta);
+  weapon.bloom = Math.max(0, weapon.bloom - delta * def.bloomRecovery);
+  timeSinceShot += delta;
+
+  if (weapon.reloading) {
+    weapon.reloadTimer -= delta;
+    if (weapon.reloadTimer <= 0) {
+      weapon.reloading = false;
+      inventory.finishReload();
+    }
+  }
+
+  const pressed = input.firePressed;
+  input.firePressed = false;
+  if (!input.fire) weapon.triggerLatched = false;
+  if (!input.fire || playerHealth <= 0 || !isLocked() || sprinting || weapon.reloading
+      || weapon.switchTimer > 0 || throwAiming) return;
+
+  const slot = inventory.currentSlot;
+  if (slot.ammo <= 0) {
+    if (pressed) {
+      sfx.click();
+      if (slot.reserve <= 0 && clock.elapsedTime > dryFireNotice) {
+        dryFireNotice = clock.elapsedTime + 2;
+        inventoryUI.feed(`${def.short} out of ammo — switch weapons`, "info");
+      }
+    }
+    startReload();
+    return;
+  }
+  // Semi-auto guns need a fresh trigger pull per shot
+  if (!def.auto && weapon.triggerLatched) return;
+  // Wait for the gun to come up so the first tracer leaves the barrel, not the hip
+  if (soldier.aimWeight < 0.55 || weapon.cooldown > 0) return;
+
+  fireShot(def);
+  weapon.cooldown = 1 / def.fireRate;
+  weapon.triggerLatched = true;
+}
+
+function fireShot(def) {
+  inventory.consumeRound();
+  timeSinceShot = 0;
+
+  const spread = currentSpread();
+  weapon.bloom = Math.min(def.bloomMax, weapon.bloom + def.bloomPerShot);
+
+  camera.getWorldDirection(_aimDir);
+  // Start the trace level with the player so nothing between camera and player gets hit
+  const startT = Math.max(0,
+    (camPivot.x - camera.position.x) * _aimDir.x +
+    (camPivot.y - camera.position.y) * _aimDir.y +
+    (camPivot.z - camera.position.z) * _aimDir.z);
+  soldier.getMuzzleWorldPosition(_muzzle);
+  effects.muzzleFlash(_muzzle);
+  sfx.gunshot(def.sound);
+
+  let anyHit = false, anyHead = false, anyKill = false;
+  for (let i = 0; i < def.pellets; i++) {
+    _shotDir.copy(_aimDir);
+    _shotDir.x += (Math.random() - 0.5) * 2 * spread;
+    _shotDir.y += (Math.random() - 0.5) * 2 * spread;
+    _shotDir.z += (Math.random() - 0.5) * 2 * spread;
+    _shotDir.normalize();
+
+    _shotFrom.set(
+      camera.position.x + _aimDir.x * startT,
+      camera.position.y + _aimDir.y * startT,
+      camera.position.z + _aimDir.z * startT);
+    _shotTo.set(
+      _shotFrom.x + _shotDir.x * def.range,
+      _shotFrom.y + _shotDir.y * def.range,
+      _shotFrom.z + _shotDir.z * def.range);
+
+    _shotResult.reset();
+    const hit = world.raycastClosest(_shotFrom, _shotTo, shotOpts, _shotResult);
+    if (hit) _hitPoint.copy(_shotResult.hitPointWorld);
+    else _hitPoint.set(_shotTo.x, _shotTo.y, _shotTo.z);
+
+    if (i < def.tracersPerShot) effects.tracer(_muzzle, _hitPoint);
+    if (!hit) continue;
+
+    const zombie = _shotResult.body.zombie;
+    if (zombie && zombieManager) {
+      const headshot = _hitPoint.y > zombie.height - HEAD_HEIGHT * (zombie.height / 2.43);
+      const damage = def.damage * (headshot ? def.headshotMultiplier : 1);
+      const killed = zombieManager.damage(zombie, damage, _shotDir.x * def.push, _shotDir.z * def.push);
+      const blood = def.pellets > 1 ? 4 : headshot ? 22 : 10;
+      effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", blood);
+      anyHit = true;
+      anyHead ||= headshot;
+      anyKill ||= killed;
+    } else {
+      const n = _shotResult.hitNormalWorld;
+      effects.impact(_hitPoint, n.x, n.y, n.z, "dust", def.pellets > 1 ? 3 : 7);
+    }
+  }
+
+  if (anyHit) {
+    showHitMarker(anyHead, anyKill);
+    sfx.hit(anyHead);
+    if (anyKill) sfx.kill();
+  }
+
+  // Recoil: kick that recovers, plus a little permanent climb to manage
+  const kick = def.recoilPitch * (1 - aimBlend * 0.45);
+  recoilPitch += kick;
+  recoilYaw   += (Math.random() - 0.5) * 2 * def.recoilYaw;
+  aimPitch     = Math.min(cameraRig.pitchMax, aimPitch + kick * 0.25);
+  cameraTrauma = Math.min(1, cameraTrauma + (def.pellets > 1 || def.damage > 100 ? 0.18 : 0.05));
+
+  zombieManager?.noise(characterBody.position.x, characterBody.position.z, def.alertRadius, "shot");
+}
+
+// ─── Throwables (grenade / molotov) ───────────────────────────────────────────
+let throwAiming   = false;
+let throwCooldown = 0;
+const _throwFrom  = new THREE.Vector3();
+const _throwVel   = new THREE.Vector3();
+
+function computeThrow() {
+  // From the right shoulder, along the camera aim with some loft
+  _throwFrom.set(characterBody.position.x, characterBody.position.y - FEET_OFFSET + 1.55, characterBody.position.z)
+    .addScaledVector(camRight, 0.3)
+    .addScaledVector(camLook, 0.35);
+  _throwVel.copy(camLook).multiplyScalar(THROW_SPEED);
+  _throwVel.y += THROW_LOFT;
+  _throwVel.x += moveVelocity.x * 0.5;
+  _throwVel.z += moveVelocity.z * 0.5;
+}
+
+function beginThrow() {
+  if (throwCooldown > 0 || throwAiming) return;
+  const kind = inventory.selectedThrowable;
+  if (inventory.throwables[kind] <= 0) {
+    inventoryUI.feed(`No ${THROWABLES[kind].name}s — press Q to switch`, "info", kind);
+    return;
+  }
+  throwAiming = true;
+  weapon.reloading = false;
+}
+
+function releaseThrow() {
+  if (!throwAiming) return;
+  throwAiming = false;
+  throwables.hidePreview();
+  if (playerHealth <= 0) return;
+  const kind = inventory.takeThrowable();
+  if (!kind) return;
+  computeThrow();
+  throwables.throw(kind, _throwFrom, _throwVel);
+  throwCooldown = THROW_COOLDOWN;
+}
+
+function cancelThrow() {
+  throwAiming = false;
+  throwables.hidePreview();
+}
+
+function cycleThrowable() {
+  const kind = inventory.cycleThrowable();
+  sfx.click();
+  inventoryUI.feed(`${THROWABLES[kind].name} ready (${inventory.throwables[kind]})`, "throwable", kind);
+}
+
+function updateThrowAim(delta) {
+  throwCooldown = Math.max(0, throwCooldown - delta);
+  if (!throwAiming) return;
+  if (playerHealth <= 0 || !isLocked()) { cancelThrow(); return; }
+  computeThrow();
+  throwables.showPreview(inventory.selectedThrowable, _throwFrom, _throwVel);
+}
+
+// Walls and closed doors shield the blast (world geometry only; glass doesn't)
+const _blastFrom = new CANNON.Vec3();
+const _blastTo = new CANNON.Vec3();
+const _blastResult = new CANNON.RaycastResult();
+const blastRayOpts = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
+function blastShielded(pos, x, y, z) {
+  _blastFrom.set(pos.x, pos.y + 0.3, pos.z);
+  _blastTo.set(x, y, z);
+  _blastResult.reset();
+  return world.raycastClosest(_blastFrom, _blastTo, blastRayOpts, _blastResult);
+}
+
+function onGrenadeExplode(pos) {
+  const R = GRENADE.radius;
+  let anyHit = false, anyKill = false;
+  for (const z of zombieManager?.active ?? []) {
+    if (z.dying) continue;
+    const dx = z.body.position.x - pos.x, dz = z.body.position.z - pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d >= R) continue;
+    const shield = blastShielded(pos, z.body.position.x, 1.2, z.body.position.z) ? 0.15 : 1;
+    const f = (1 - d / R) * shield;
+    const dmg = THREE.MathUtils.lerp(GRENADE.minDamage, GRENADE.maxDamage, f) * shield;
+    const inv = d > 1e-3 ? 1 / d : 0;
+    const killed = zombieManager.damage(z, dmg, dx * inv * GRENADE.push * f, dz * inv * GRENADE.push * f);
+    anyHit = true;
+    anyKill ||= killed;
+  }
+  if (anyHit) showHitMarker(false, anyKill);
+  if (anyKill) sfx.kill();
+
+  const px = characterBody.position.x - pos.x, pz = characterBody.position.z - pos.z;
+  const pd = Math.hypot(px, pz);
+  if (pd < GRENADE.playerRadius) {
+    const shield = blastShielded(pos, characterBody.position.x, characterBody.position.y + 0.4, characterBody.position.z) ? 0.15 : 1;
+    const f = (1 - pd / GRENADE.playerRadius) * shield;
+    const k = pd > 1e-3 ? 8 * f / pd : 0;
+    dealDamageToPlayer(GRENADE.playerMaxDamage * f, px * k, pz * k, 0.6);
+  }
+  cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - pd / 35, 0, 1) * 0.8);
+  sfx.explosion(pd);
+  zombieManager?.noise(pos.x, pos.z, GRENADE.alertRadius, "explosion");
+}
+
+// Zombies that walk through the flames catch fire and keep burning after they
+// leave (ZombieManager.ignite); the ground fire itself adds a little on top.
+const BURN_TIME_TOUCH  = 6;
+const BURN_TIME_DIRECT = 9;
+
+function onFireTick(x, z, r, dt) {
+  const r2 = r * r;
+  for (const zb of zombieManager?.active ?? []) {
+    if (zb.dying) continue;
+    const dx = zb.body.position.x - x, dz = zb.body.position.z - z;
+    if (dx * dx + dz * dz < r2) {
+      zombieManager.ignite(zb, BURN_TIME_TOUCH);
+      zombieManager.damage(zb, MOLOTOV.zombieDps * dt * 0.35);
+    }
+  }
+  const px = characterBody.position.x - x, pz = characterBody.position.z - z;
+  const pr = r + CHARACTER_RADIUS;
+  if (px * px + pz * pz < pr * pr && characterBody.position.y - FEET_OFFSET < 1) {
+    dealDamageToPlayer(MOLOTOV.playerDps * dt, 0, 0, 0.08);
+  }
+}
+
+// ─── Medkits ──────────────────────────────────────────────────────────────────
+function useMedkit() {
+  if (playerHealth <= 0) return;
+  if (playerHealth >= MAX_HEALTH) { inventoryUI.feed("Health already full", "info"); return; }
+  if (!inventory.takeMedkit()) { inventoryUI.feed("No medkits", "info"); return; }
+  playerHealth = Math.min(MAX_HEALTH, playerHealth + MEDKIT.heal);
+  sfx.heal();
+  inventoryUI.feed(`+${MEDKIT.heal} health`, "medkit");
+}
+
+// ─── Pickups ──────────────────────────────────────────────────────────────────
+function pickupData(kind) {
+  const def = WEAPONS[kind];
+  if (def) return { ammo: def.magSize, reserve: def.pickupReserve };
+  return null;
+}
+
+/** Tries to move a world pickup into the inventory. Returns true if it was taken. */
+function collectPickup(entry) {
+  const { kind, def } = entry;
+  let res = null;
+  switch (def.category) {
+    case "weapon": {
+      res = inventory.addWeapon(kind, entry.data.ammo, entry.data.reserve);
+      if (!res) { inventoryUI.feed(`${def.label}: ammo full`, "info", kind); return false; }
+      if (res.isNew) {
+        equipWeapon(kind);
+        res.msg = `Picked up ${def.label}`;
+      }
+      break;
+    }
+    case "ammo":      res = inventory.addAmmoCrate(); break;
+    case "throwable": res = inventory.addThrowable(kind, entry.data?.count ?? 1); break;
+    case "medkit":    res = inventory.addMedkit(); break;
+  }
+  if (!res) return false;
+  pickups.release(entry);
+  sfx.pickup(def.category === "weapon");
+  inventoryUI.feed(res.msg, def.category, kind);
+  return true;
+}
+
+function interact() {
+  if (pickups.nearestWeapon) collectPickup(pickups.nearestWeapon);
+}
+
+function updatePickups(delta) {
+  pickups.update(delta, characterBody.position.x, characterBody.position.z);
+  if (playerHealth > 0) {
+    for (let i = pickups.touching.length - 1; i >= 0; i--) collectPickup(pickups.touching[i]);
+  }
+
+  // Context prompts: weapon pickup, door, light switch
+  let n = 0;
+  if (playerHealth > 0) {
+    const e = pickups.nearestWeapon;
+    if (e) {
+      promptRows[n++] = "E";
+      promptRows[n++] = inventory.has(e.kind) ? `Take ammo · ${e.def.label}` : `Pick up ${e.def.label}`;
+    }
+    const near = houses?.interaction(characterBody.position.x, characterBody.position.z);
+    nearDoor = near?.door ?? null;
+    nearSwitch = near?.sw ?? null;
+    if (nearDoor) {
+      promptRows[n++] = nearDoor.doorOpen ? "C" : "O";
+      promptRows[n++] = nearDoor.doorOpen ? "Close door" : "Open door";
+    }
+    if (nearSwitch) {
+      promptRows[n++] = "L";
+      promptRows[n++] = nearSwitch.lightOn ? "Turn lights off" : "Turn lights on";
+    }
+  } else {
+    nearDoor = nearSwitch = null;
+  }
+  inventoryUI.setPrompts(promptRows, n);
+}
+
+// ─── Doors & lights ───────────────────────────────────────────────────────────
+const promptRows = [];
+let nearDoor = null;
+let nearSwitch = null;
+
+function useDoor(open) {
+  if (nearDoor && houses.setDoor(nearDoor, open)) {
+    zombieManager?.noise(nearDoor.doorWorld.x, nearDoor.doorWorld.z, open ? 9 : 12, "door");
+  }
+}
+
+function useLightSwitch() {
+  if (nearSwitch) houses.toggleLight(nearSwitch);
+}
+
+function dropWeapon(id) {
+  const prev = inventory.current;
+  const slot = inventory.removeWeapon(id);
+  if (!slot) return;
+  pickups.spawn(id,
+    characterBody.position.x + Math.sin(bodyYaw) * 1.3,
+    characterBody.position.z + Math.cos(bodyYaw) * 1.3,
+    { ammo: slot.ammo, reserve: slot.reserve });
+  inventoryUI.feed(`Dropped ${WEAPONS[id].name}`, "info", id);
+  if (inventory.current !== prev) onWeaponChanged();
+}
+
+// Zombie loot: one roll per kill
+const DROP_TABLE = [
+  ["ammo", 0.16],
+  ["grenade", 0.05],
+  ["molotov", 0.05],
+  ["medkit", 0.045],
+  ["gun", 0.025],
+];
+const DROP_GUNS = ["shotgun", "rifle", "sniper", "smg"];
+
+function rollZombieDrop(zombie) {
+  const p0 = zombie.body.position;
+  if (zombie.def.boss) {
+    // The Warlord drops a stash
+    ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov"].forEach((k, i) => {
+      const a = (i / 8) * Math.PI * 2;
+      pickups.spawn(k, p0.x + Math.cos(a) * 2.2, p0.z + Math.sin(a) * 2.2, pickupData(k), DROP_LIFETIME * 2);
+    });
+    return;
+  }
+  // Tougher monsters drop more often
+  let r = Math.random() / (zombie.def.bigBody ? 3 : zombie.gun ? 1.6 : 1);
+  for (const [kind, chance] of DROP_TABLE) {
+    if (r < chance) {
+      const k = kind === "gun" ? DROP_GUNS[(Math.random() * DROP_GUNS.length) | 0] : kind;
+      const p = zombie.body.position;
+      pickups.spawn(k, p.x, p.z, pickupData(k), DROP_LIFETIME);
+      return;
+    }
+    r -= chance;
+  }
+}
+
+// Placed world loot: deterministic, like the rest of the scatter
+const STARTER_LOOT = [
+  ["shotgun", -2.5, 7], ["rifle", 2.5, 7],
+  ["grenade", -1.5, 10], ["molotov", 1.5, 10], ["ammo", 0, 12],
+];
+const WORLD_LOOT = {
+  pistol: 1, smg: 2, shotgun: 3, rifle: 3, sniper: 3,
+  ammo: 14, grenade: 10, molotov: 10, medkit: 8,
+};
+const _lootFrom = new CANNON.Vec3();
+const _lootTo = new CANNON.Vec3();
+const _lootResult = new CANNON.RaycastResult();
+const lootRayOpts = { collisionFilterMask: GROUP_WORLD };
+
+// True if nothing but bare ground is under (x, z) — keeps loot out of houses/trees
+function isOpenGround(x, z) {
+  for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    _lootFrom.set(x + ox, 40, z + oz);
+    _lootTo.set(x + ox, -1, z + oz);
+    _lootResult.reset();
+    if (!world.raycastClosest(_lootFrom, _lootTo, lootRayOpts, _lootResult)) return false;
+    if (_lootResult.hitPointWorld.y > 0.05) return false;
+  }
+  return true;
+}
+
+const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun"];
+
+function spawnWorldLoot() {
+  const lootRng = makeLCG(0x10070bad);
+  // A little something inside every house
+  const spot = new THREE.Vector3();
+  houses?.houses.forEach((h, i) => {
+    for (const [lx, lz] of HOUSE_LOOT_SPOTS) {
+      if (lootRng() < 0.35) continue;
+      const kind = HOUSE_LOOT[(i * 3 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
+      houses._toWorld(h, lx, lz, spot);
+      pickups.spawn(kind, spot.x, spot.z, pickupData(kind));
+    }
+  });
+  for (const [kind, x, z] of STARTER_LOOT) pickups.spawn(kind, x, z, pickupData(kind));
+  for (const [kind, count] of Object.entries(WORLD_LOOT)) {
+    for (let n = 0; n < count; n++) {
+      for (let attempt = 0; attempt < 25; attempt++) {
+        const a = lootRng() * Math.PI * 2;
+        const r = 14 + Math.sqrt(lootRng()) * 76;
+        const x = Math.cos(a) * r, z = Math.sin(a) * r;
+        if (!isOpenGround(x, z)) continue;
+        pickups.spawn(kind, x, z, pickupData(kind));
+        break;
+      }
+    }
+  }
+}
+
+// ─── Inventory screen ─────────────────────────────────────────────────────────
+let inventoryOpen = false;
+
+function setInventoryOpen(open) {
+  if (open === inventoryOpen) return;
+  if (open && playerHealth <= 0) return;
+  inventoryOpen = open;
+  inventoryUI.setOpen(open);
+  if (open) {
+    input.fire = false;
+    input.aim = false;
+    cancelThrow();
+    if (document.pointerLockElement) document.exitPointerLock();
+  } else if (playerHealth > 0) {
+    requestLock();
+  }
+}
+
+// Item icons are rendered from the same 3D models once at startup
+const itemIcons = {};
+for (const id of WEAPON_ORDER) itemIcons[id] = renderItemIcon(renderer, id, { width: 160, height: 56 });
+itemIcons.grenade = renderItemIcon(renderer, "grenade", { width: 64, height: 64, yaw: 0.4 });
+itemIcons.molotov = renderItemIcon(renderer, "molotov", { width: 64, height: 64, yaw: 0.4 });
+itemIcons.ammo    = renderItemIcon(renderer, "ammo",    { width: 64, height: 64, yaw: 0.6, pitch: 0.35 });
+
+const inventoryUI = new InventoryUI({
+  inventory,
+  icons: itemIcons,
+  onEquip: id => equipWeapon(id),
+  onDrop: id => dropWeapon(id),
+  onSelectThrowable: kind => { inventory.selectThrowable(kind); sfx.click(); },
+  onUseMedkit: () => useMedkit(),
+  onClose: () => setInventoryOpen(false),
+});
+
+const pickups = new Pickups(scene);
+
+const fireFX = new FireFX(scene);
+const gameHud = new GameHUD();
+
+// Monster gunfire (gunners, Warlord plasma). Walls block it; windows don't.
+const enemyFire = new EnemyFire({
+  scene,
+  world,
+  effects,
+  sfx,
+  getPlayerBody: () => characterBody,
+  onHitPlayer: (dmg, sx, sz) => dealDamageToPlayer(dmg, 0, 0, 0.18, sx, sz),
+});
+
+// ─── Player noise & visibility (what the monsters sense) ──────────────────────
+let stepTimer = 0;
+const STEP_NOISE = {          // radius (m) and seconds between footstep noises
+  sprint: [17, 0.28],
+  jog:    [8, 0.36],
+  sneak:  [3.5, 0.5],         // aiming / walking slowly
+};
+
+function updatePlayerNoise(delta) {
+  const speed = Math.hypot(moveVelocity.x, moveVelocity.z);
+  let level = 0, step = null;
+  if (playerHealth > 0 && onGround && speed > 0.6) {
+    if (sprinting) { level = 3; step = STEP_NOISE.sprint; }
+    else if (input.aim || speed < 3.6) { level = 1; step = STEP_NOISE.sneak; }
+    else { level = 2; step = STEP_NOISE.jog; }
+  }
+  if (timeSinceShot < 0.5) level = 3;
+  gameHud.setNoise(level);
+  if (!step) { stepTimer = Math.min(stepTimer, 0.1); return; }
+  stepTimer -= delta;
+  if (stepTimer <= 0) {
+    stepTimer = step[1];
+    zombieManager?.noise(characterBody.position.x, characterBody.position.z, step[0], "step");
+  }
+}
+
+/** Sight multiplier for monsters: sprinting stands out, a dark house hides you. */
+function playerVisibility() {
+  let v = 1;
+  if (sprinting) v *= 1.25;
+  else if (Math.hypot(moveVelocity.x, moveVelocity.z) < 0.5) v *= 0.85;
+  const h = houses?.houseAt(characterBody.position.x, characterBody.position.z);
+  if (h && !h.lightOn) v *= 0.45;
+  return v;
+}
+
+// ─── Levels ───────────────────────────────────────────────────────────────────
+let director = null;
+
+function onLevelStart(level) {
+  const def = level.introduces ? MONSTER_TYPES[level.introduces] : null;
+  gameHud.showBanner({
+    title: `LEVEL ${level.n}`,
+    sub: level.name,
+    text: def ? `New threat: ${def.label}. ${def.blurb}` : "They're tougher now, and there are more of them.",
+    color: def?.color ?? "#e2a42b",
+    duration: 5.5,
+  });
+  sfx.levelStart();
+}
+
+function onLevelCleared(level) {
+  gameHud.showBanner({
+    title: `LEVEL ${level.n} CLEARED`,
+    sub: "Supplies dropped nearby",
+    foot: "",
+    color: "#4dff88",
+    duration: 0,
+  });
+  sfx.levelCleared();
+  // Reward: patch up and resupply around the player
+  playerHealth = Math.min(MAX_HEALTH, playerHealth + 30);
+  const supplies = ["ammo", "ammo", "medkit", level.n % 2 ? "grenade" : "molotov"];
+  const unlockGun = ["shotgun", "rifle", "sniper"][level.n - 1];
+  if (unlockGun && !inventory.has(unlockGun)) supplies.push(unlockGun);
+  supplies.forEach((k, i) => {
+    const a = (i / supplies.length) * Math.PI * 2 + 0.4;
+    pickups.spawn(k, characterBody.position.x + Math.cos(a) * 3, characterBody.position.z + Math.sin(a) * 3, pickupData(k), 60);
+  });
+}
+
+function onBossSpawn(boss) {
+  gameHud.showBanner({ title: "THE WARLORD", sub: "has entered the fight", color: boss.def.color, duration: 3.5 });
+  sfx.growl(0, true);
+}
+
+function updateLevelHud() {
+  if (!director?.level) return;
+  gameHud.setLevel(director.level.n, director.level.name, director.killed, director.total);
+  if (director.state === "cleared") gameHud.setBannerFoot(`Next level in ${director.countdown}`);
+  const boss = zombieManager?.boss;
+  gameHud.setBoss(boss?.def.label.toUpperCase(), boss ? Math.max(0, boss.health / boss.maxHealth) : null);
+}
+
+const throwables = new Throwables({
+  scene,
+  world,
+  material: projectileMaterial,
+  effects,
+  fireFX,
+  sfx,
+  onExplode: onGrenadeExplode,
+  onIgnite: (x, z, hitZombie) => {
+    // A direct hit drenches the zombie: it burns longer
+    if (hitZombie) zombieManager?.ignite(hitZombie, BURN_TIME_DIRECT);
+    zombieManager?.noise(x, z, MOLOTOV.alertRadius, "explosion");
+  },
+  onFireTick,
+});
+
+const minimap = new Minimap(document.getElementById("minimap"), {
+  zombies: () => zombieManager?.active ?? [],
+  pickups: () => pickups.active,
+  fires: () => throwables.fires,
+  obstacles: () => mapObstacles,
+});
 
 // ─── Model Registry & Lil-GUI Controls ────────────────────────────────────────
 const editableModels = {};
 
-function createEditableModel({ id, name, object3D, initialParams, customUpdate = null }) {
+/**
+ * perMeshColliders: one static box per mesh (fitted per wall/part, e.g. the WRL
+ * house) instead of a single box around the whole model.
+ */
+function createEditableModel({
+  id, name, object3D, initialParams, customUpdate = null, perMeshColliders = false, trunkCollider = false,
+}) {
   object3D.traverse(child => {
     if (child.isMesh) {
       child.castShadow = true;
@@ -562,14 +1618,36 @@ function createEditableModel({ id, name, object3D, initialParams, customUpdate =
   object3D.position.set(0, -minY, 0); // snap bottom base of model to root local Y=0
   root.add(object3D);
   scene.add(root);
+  root.updateMatrixWorld(true);
 
-  // Static Cannon box body
+  // Collider boxes in root space at scale 1: { c: centre, h: half extents }
+  const boxes = [];
+  const tmpBox = new THREE.Box3();
+  if (perMeshColliders) {
+    object3D.traverse(child => {
+      if (!child.isMesh) return;
+      tmpBox.setFromObject(child);
+      if (tmpBox.isEmpty()) return;
+      const h = tmpBox.getSize(new THREE.Vector3()).multiplyScalar(0.5);
+      if (Math.max(h.x, h.y, h.z) < 0.08) return; // door knobs, trim
+      boxes.push({ c: tmpBox.getCenter(new THREE.Vector3()), h });
+    });
+  }
+  if (trunkCollider) {
+    // Trees: only the trunk is solid, so you can walk under the canopy
+    tmpBox.setFromObject(root);
+    const c = tmpBox.getCenter(new THREE.Vector3());
+    const sz = tmpBox.getSize(new THREE.Vector3());
+    boxes.push({ c: new THREE.Vector3(c.x, sz.y * 0.3, c.z), h: new THREE.Vector3(sz.x * 0.06, sz.y * 0.3, sz.z * 0.06) });
+  }
+  if (!boxes.length) {
+    tmpBox.setFromObject(root);
+    boxes.push({ c: tmpBox.getCenter(new THREE.Vector3()), h: tmpBox.getSize(new THREE.Vector3()).multiplyScalar(0.5) });
+  }
+  const modelCenter = new THREE.Box3().setFromObject(root).getCenter(new THREE.Vector3());
+
   const body = new CANNON.Body({ mass: 0, material: staticMaterial });
-  const halfX = Math.max(0.2, (size.x || 1) / 2);
-  const halfY = Math.max(0.2, (size.y || 1) / 2);
-  const halfZ = Math.max(0.2, (size.z || 1) / 2);
-  const shape = new CANNON.Box(new CANNON.Vec3(halfX, halfY, halfZ));
-  body.addShape(shape, new CANNON.Vec3(0, halfY, 0));
+  for (const b of boxes) body.addShape(new CANNON.Box(new CANNON.Vec3(b.h.x, b.h.y, b.h.z)), new CANNON.Vec3(b.c.x, b.c.y, b.c.z));
   world.addBody(body);
 
   const params = {
@@ -589,30 +1667,59 @@ function createEditableModel({ id, name, object3D, initialParams, customUpdate =
 
     if (customUpdate) {
       customUpdate(params);
-    } else {
-      const curSX = Math.max(0.1, halfX * params.scale);
-      const curSY = Math.max(0.1, halfY * params.scale);
-      const curSZ = Math.max(0.1, halfZ * params.scale);
-
-      body.position.set(params.posX, params.posY + curSY, params.posZ);
-      body.quaternion.setFromEuler(0, THREE.MathUtils.degToRad(params.rotY), 0);
-      if (body.shapes[0]) {
-        body.shapes[0].halfExtents.set(curSX, curSY, curSZ);
-        body.shapes[0].updateBoundingSphereRadius();
-        body.updateBoundingRadius();
-      }
+      return;
     }
+    const sc = params.scale;
+    body.position.set(params.posX, params.posY, params.posZ);
+    body.quaternion.setFromEuler(0, THREE.MathUtils.degToRad(params.rotY), 0);
+    boxes.forEach((b, i) => {
+      const shape = body.shapes[i];
+      // Thin parts get a minimum thickness so nothing tunnels through them
+      shape.halfExtents.set(Math.max(0.15, b.h.x * sc), Math.max(0.15, b.h.y * sc), Math.max(0.15, b.h.z * sc));
+      // cannon collides against the convex polyhedron, not halfExtents: rebuild it
+      shape.updateConvexPolyhedronRepresentation();
+      shape.updateBoundingSphereRadius();
+      body.shapeOffsets[i].set(b.c.x * sc, b.c.y * sc, b.c.z * sc);
+    });
+    body.updateBoundingRadius();
+    body.aabbNeedsUpdate = true;
+    body.collisionFilterGroup = params.visible ? GROUP_WORLD : 0;
   }
 
   updateTransform();
 
   const record = { id, name, root, body, params, updateTransform, size };
+  // Live footprint for the minimap and zombie pathing; follows lil-gui edits
+  const footprint = {
+    type: "box",
+    get rot() { return THREE.MathUtils.degToRad(params.rotY); },
+    get x() {
+      if (!params.visible) return 1e6;
+      const r = this.rot;
+      return params.posX + (modelCenter.x * Math.cos(r) + modelCenter.z * Math.sin(r)) * params.scale;
+    },
+    get z() {
+      const r = this.rot;
+      return params.posZ + (-modelCenter.x * Math.sin(r) + modelCenter.z * Math.cos(r)) * params.scale;
+    },
+    get w() { return size.x * params.scale; },
+    get d() { return size.z * params.scale; },
+    get hw() { return size.x * params.scale / 2; },
+    get hd() { return size.z * params.scale / 2; },
+  };
+  if (trunkCollider) {
+    mapObstacles.push({ type: "circle", get x() { return footprint.x; }, get z() { return footprint.z; }, get r() { return footprint.hw * 0.5; } });
+  } else {
+    mapObstacles.push(footprint);
+    navObstacles.push(footprint);
+  }
   editableModels[id] = record;
   return record;
 }
 
 function setupGui() {
   const gui = new GUI({ title: "🎯 Scene Assets & Locations" });
+  gui.close();
 
   const actions = {
     logCoordinates() {
@@ -657,14 +1764,12 @@ function setupGui() {
   }
 
   if (zombieManager) {
-    const zFolder = gui.addFolder("👹 Zombie AI (Global)");
+    const zFolder = gui.addFolder("👹 Monsters & Levels");
     zFolder.close();
     zFolder.add(zombieManager.settings, "enableAI").name("🤖 Enable AI Behavior");
-    zFolder.add(zombieManager.settings, "detectionRadius", 1, 30, 0.5).name("🟡 Aggro Radius");
-    zFolder.add(zombieManager.settings, "deaggroRadius", 3, 50, 0.5).name("🔵 Deaggro Radius");
-    zFolder.add(zombieManager.settings, "chaseSpeed", 0.5, 10, 0.5).name("⚡ Chase Speed (m/s)");
-    zFolder.add(zombieManager.settings, "attackSpeed", 0.5, 10, 0.5).name("⚔️ Attack Speed (m/s)");
-    zFolder.add(zombieManager.settings, "maxHealth", 10, 500, 10).name("❤️ Max Health");
+    const jump = { level: 1, go() { director.start(Math.max(1, Math.round(jump.level))); } };
+    zFolder.add(jump, "level", 1, 20, 1).name("Level");
+    zFolder.add(jump, "go").name("▶ Start that level");
   }
 
   // Prevent pointer lock while interacting with lil-gui
@@ -674,125 +1779,89 @@ function setupGui() {
 
 // ─── Zombie Manager (Pooled MD2 Instances) ────────────────────────────────────
 let zombieManager = null;
+let houses = null;
 
 // ─── Character GLTF Load ──────────────────────────────────────────────────────
 async function loadCharacter() {
-  const loader = new GLTFLoader();
-  const gltf   = await loader.loadAsync("/models/model_all.glb");
-  const model  = gltf.scene;
-
-  model.traverse(child => {
-    if (child.isMesh) { child.castShadow = true; child.receiveShadow = false; }
-  });
-
-  const bounds = new THREE.Box3().setFromObject(model);
-  const size   = new THREE.Vector3();
-  bounds.getSize(size);
-  model.scale.setScalar(CHARACTER_HEIGHT / size.y);
-  bounds.setFromObject(model);
-  model.position.y = -bounds.min.y;
-  characterRoot.add(model);
-
-  mixer = new THREE.AnimationMixer(model);
-  for (const clip of gltf.animations) {
-    const action = mixer.clipAction(clip);
-    action.enabled = false;
-    action.setEffectiveWeight(0);
-    action.setEffectiveTimeScale(1);
-    if (clip.name === "jump") { action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; }
-    else                      { action.setLoop(THREE.LoopRepeat, Infinity); }
-    actions[clip.name] = action;
-  }
-  for (const name of LOCOMOTION_CLIPS) {
-    const a = actions[name]; if (!a) continue;
-    a.enabled = true; a.play();
-  }
-  if (actions.idle) actions.idle.setEffectiveWeight(1);
-  animWeights.idle = 1; animWeights.walk = 0; animWeights.run = 0;
+  await soldier.load(gltfLoader);
 }
 
 // ─── World Assets Load ────────────────────────────────────────────────────────
-let _houseRawSize = null;
+// One GLTF loader for everything, with meshopt decoding for the optimized assets
+const gltfLoader = new GLTFLoader();
+gltfLoader.setMeshoptDecoder(MeshoptDecoder);
 
-function placeHouse(template, x, z, rotY) {
-  const clone = template.clone(true);
-  clone.position.set(x, 0, z);
-  clone.rotation.y = rotY;
-  clone.scale.setScalar(HOUSE_SCALE);
-  scene.add(clone);
-
-  clone.updateWorldMatrix(true, false);
-  const bounds  = new THREE.Box3().setFromObject(clone);
-  const groundY = -bounds.min.y;
-  clone.position.y = groundY;
-
-  const s = _houseRawSize;
-  addBoxCollider(x, groundY, z, rotY, HOUSE_SCALE, s.x, s.y, s.z, s.y / 2);
+/**
+ * Loads "<name>.opt.glb" (written by `npm run optimize-assets`) when present,
+ * otherwise the original file. Missing files come back as Vite's index.html,
+ * which fails to parse, so a failed load of the .opt file is the fallback signal.
+ */
+async function loadGLB(url) {
+  const opt = url.replace(/\.glb$/, ".opt.glb");
+  try {
+    return await gltfLoader.loadAsync(opt);
+  } catch {
+    return gltfLoader.loadAsync(url);
+  }
 }
 
 async function loadWorld() {
-  const gltfLoader = new GLTFLoader();
   const vrmlLoader = new VRMLLoader();
+  const settle = p => p.then(v => v, err => { console.warn(err); return null; });
 
-  // 1. Load Gold Dragon GLB
-  try {
-    const dragonGltf = await gltfLoader.loadAsync("/models/dragon_gold.glb");
+  // Fetch and parse everything at once instead of one model after another
+  const [dragonGltf, autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf] = await Promise.all([
+    settle(loadGLB("/models/dragon_gold.glb")),
+    settle(loadGLB("/models/autorickshaw_3d_model_free.glb")),
+    settle(vrmlLoader.loadAsync("/models/house.wrl")),
+    gltfLoader.loadAsync("/models/house/house-kit.glb"),
+    loadGLB("/trees/old_tree_with_vine_3d_model_free.glb"),
+    loadGLB("/trees/dreftwood tree.glb"),
+  ]);
+
+  if (dragonGltf) {
     createEditableModel({
       id: "dragon",
       name: "🐉 Gold Dragon",
       object3D: dragonGltf.scene,
       initialParams: { posX: 20, posY: 0, posZ: -20, rotY: 45, scale: 1.5 },
     });
-  } catch (err) {
-    console.warn("Could not load dragon_gold.glb:", err);
   }
-
-  // 2. Load Autorickshaw GLB
-  try {
-    const autoGltf = await gltfLoader.loadAsync("/models/autorickshaw_3d_model_free.glb");
+  if (autoGltf) {
     createEditableModel({
       id: "autorickshaw",
       name: "🛺 Autorickshaw",
       object3D: autoGltf.scene,
       initialParams: { posX: -18, posY: 0, posZ: -18, rotY: 120, scale: 1.2 },
     });
-  } catch (err) {
-    console.warn("Could not load autorickshaw_3d_model_free.glb:", err);
   }
-
-  // 3. Load WRL House
-  try {
-    const wrlScene = await vrmlLoader.loadAsync("/models/house.wrl");
+  if (wrlScene) {
+    // VRMLLoader turns the file's Background node into 10 km sky/ground spheres.
+    // They showed up as a pale wedge on the horizon and blew the collider up to 20 km.
+    const sky = [];
+    wrlScene.traverse(o => { if (o.isMesh && o.geometry?.parameters?.radius >= 5000) sky.push(o); });
+    for (const o of sky) o.parent.remove(o);
     createEditableModel({
       id: "wrlHouse",
       name: "🏠 WRL House",
       object3D: wrlScene,
       initialParams: { posX: -35, posY: 0, posZ: -35, rotY: 0, scale: 1.0 },
+      perMeshColliders: true, // a box per wall, floor and stair so it's solid like a real building
     });
-  } catch (err) {
-    console.warn("Could not load house.wrl:", err);
   }
 
-  // 4. Load Wooden House & Trees (Scatter Templates)
-  const [houseGltf, treeAGltf, treeBGltf] = await Promise.all([
-    gltfLoader.loadAsync("/models/rusty_roof_wooden_house_1_3d_model_free.glb"),
-    gltfLoader.loadAsync("/trees/old_tree_with_vine_3d_model_free.glb"),
-    gltfLoader.loadAsync("/trees/dreftwood tree.glb"),
-  ]);
-
-  // Create editable primary instances for tweaking
-  createEditableModel({
-    id: "woodenHouse",
-    name: "🏡 Wooden House Primary",
-    object3D: houseGltf.scene.clone(true),
-    initialParams: { posX: 35, posY: 0, posZ: -35, rotY: 30, scale: HOUSE_SCALE },
-  });
+  // Enterable houses (Kenney kits): per-wall colliders, animated doors, light switches
+  houses = new Houses({ scene, world, gltf: houseKit, sfx, material: staticMaterial, obstacles: navObstacles });
+  houses.add(35, -35, THREE.MathUtils.degToRad(30));
+  // One close to spawn with its door facing the start
+  houses.add(-13, 20, Math.atan2(13, -20));
 
   createEditableModel({
     id: "treeA",
     name: "🌳 Old Tree (Vine)",
     object3D: treeAGltf.scene.clone(true),
     initialParams: { posX: -12, posY: 0, posZ: -30, rotY: 0, scale: 2.0 },
+    trunkCollider: true,
   });
 
   createEditableModel({
@@ -800,24 +1869,18 @@ async function loadWorld() {
     name: "🪵 Driftwood Tree",
     object3D: treeBGltf.scene.clone(true),
     initialParams: { posX: 14, posY: 0, posZ: -32, rotY: 90, scale: 2.0 },
+    trunkCollider: true,
   });
 
   // Enable shadows on templates
-  [houseGltf.scene, treeAGltf.scene, treeBGltf.scene].forEach(root => {
+  [treeAGltf.scene, treeBGltf.scene].forEach(root => {
     root.traverse(child => {
       if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }
     });
   });
 
-  const houseTemplate = houseGltf.scene;
   const treeATemplate = treeAGltf.scene;
   const treeBTemplate = treeBGltf.scene;
-
-  houseTemplate.scale.setScalar(1);
-  houseTemplate.updateWorldMatrix(true, false);
-  const houseRawBounds = new THREE.Box3().setFromObject(houseTemplate);
-  _houseRawSize = new THREE.Vector3();
-  houseRawBounds.getSize(_houseRawSize);
 
   treeATemplate.scale.setScalar(1);
   treeATemplate.updateWorldMatrix(true, false);
@@ -841,8 +1904,9 @@ async function loadWorld() {
   const treeBPositions = scatterPositions(TREE_B_COUNT, rng, SCATTER_RADIUS_MIN,      SCATTER_RADIUS_MAX, 5);
 
   for (const { x, z } of housePositions) {
-    placeHouse(houseTemplate, x, z, rng() * Math.PI * 2);
+    houses.add(x, z, rng() * Math.PI * 2);
   }
+  mapObstacles.push(...houses.mapObstacles());
 
   for (const { x, z } of treeAPositions) {
     const scale = rngRange(rng, treeAScaleMin, treeAScaleMax);
@@ -853,6 +1917,7 @@ async function loadWorld() {
     clone.rotation.y = rotY;
     clone.scale.setScalar(scale);
     scene.add(clone);
+    freezeStatic(clone);
     addTreeCollider(x, snapY, z, rotY, scale, 0.18, 5.0, 2.8, 6.0);
   }
 
@@ -865,6 +1930,7 @@ async function loadWorld() {
     clone.rotation.y = rotY;
     clone.scale.setScalar(scale);
     scene.add(clone);
+    freezeStatic(clone);
     addTreeCollider(x, snapY, z, rotY, scale, 0.22, 4.0, 2.2, 5.0);
   }
 }
@@ -876,7 +1942,9 @@ const clock = new THREE.Clock();
 function animate() {
   if (!_animRunning) return;
   requestAnimationFrame(animate);
-  const delta = Math.min(clock.getDelta(), 0.05);
+  const rawDelta = clock.getDelta();
+  const frameMs = rawDelta * 1000;
+  const delta = Math.min(rawDelta, 0.05);
 
   updateCharacterMovement(delta);
   applyGroundStickForce(delta);
@@ -885,7 +1953,6 @@ function animate() {
 
   checkGrounded();
   snapCharacterToGround();
-  updateCharacterAnimation(delta);
 
   characterRoot.position.set(
     characterBody.position.x,
@@ -893,13 +1960,37 @@ function animate() {
     characterBody.position.z
   );
 
-  if (mixer) mixer.update(delta);
+  houses?.update(delta, characterBody.position.x, characterBody.position.z);
+  director?.update(delta);
   if (zombieManager) zombieManager.update(delta);
+  enemyFire.update(delta);
+
+  updateThirdPersonCamera(delta);
+  updateSoldier(delta);
+  updateWeapon(delta);
+  updateThrowAim(delta);
+  throwables.update(delta);
+  if (zombieManager) fireFX.syncBodies(zombieManager.active, characterBody.position.x, characterBody.position.z);
+  fireFX.update(delta);
+  effects.update(delta);
+  updatePickups(delta);
+  inventoryUI.update();
+
+  timeSinceHit += delta;
+  cameraTrauma = Math.max(0, cameraTrauma - delta * 1.6);
+  updatePlayerHealthUI(delta);
+  updateThreatUI();
+  updatePlayerNoise(delta);
+  updateLevelHud();
+  gameHud.update(delta);
+  updateCombatHUD(delta);
+
+  minimap.update(performance.now(), characterBody.position.x, characterBody.position.z, aimYaw);
 
   updateGroundChunks(characterBody.position.x, characterBody.position.z);
   updateSunShadow();
-  updateThirdPersonCamera();
   renderer.render(scene, camera);
+  updateDynamicResolution(frameMs);
 }
 
 window.addEventListener("resize", () => {
@@ -914,31 +2005,93 @@ const loadingMsg    = document.getElementById("loading-message");
 
 function setLoadMsg(text) { if (loadingMsg) loadingMsg.textContent = text; }
 
+// Progress counts files across every loader (GLTF, MD2, textures, VRML)
+const loadingBarEl = document.getElementById("loading-bar");
+THREE.DefaultLoadingManager.onProgress = (_url, loaded, total) => {
+  if (loadingBarEl) loadingBarEl.style.transform = `scaleX(${Math.min(1, loaded / Math.max(1, total))})`;
+  setLoadMsg(`Loading assets… ${loaded} / ${total}`);
+};
+
+/**
+ * Compiles every shader the game can need and uploads GPU resources while the
+ * loading screen is still up, so the first muzzle flash, hit flash, burning
+ * zombie or molotov doesn't stall a frame mid-fight.
+ */
+async function warmUpGpu() {
+  const hidden = [];
+  scene.traverse(o => { if (!o.visible) { hidden.push(o); o.visible = true; } });
+  fireFX.setWarmup(true);
+  const compile = () => (renderer.compileAsync ? renderer.compileAsync(scene, camera) : renderer.compile(scene, camera));
+  await compile();
+  // Monster hit / burn materials only appear on demand: compile them on one of each type
+  for (const t of Object.values(zombieManager?.pool.types ?? {})) {
+    const m = zombieManager.pool.all.find(x => x.type === t.type);
+    if (!m) continue;
+    for (const mat of [t.skinMats[0].hit, t.skinMats[0].burn]) {
+      m.mesh.material = mat;
+      await compile();
+    }
+    m.mesh.material = t.skinMats[0].base;
+  }
+  renderer.render(scene, camera); // uploads textures + buffers
+  for (const o of hidden) o.visible = false;
+  fireFX.setWarmup(false);
+}
+
 async function boot() {
   try {
-    setLoadMsg("Loading character…");
-    await loadCharacter();
-
-    setLoadMsg("Loading zombies…");
     zombieManager = new ZombieManager({
       scene,
       world,
       monsterMaterial,
-      targetHeight: MONSTER_TARGET_HEIGHT,
-      mass: MONSTER_MASS,
       linDamping: MONSTER_LIN_DAMPING,
       angDamping: MONSTER_ANG_DAMPING,
+      playerRadius: CHARACTER_RADIUS,
       getPlayerBody: () => characterBody,
+      canAttackPlayer: () => playerHealth > 0,
       dealDamageToPlayer,
       regenPlayerHealth,
+      enemyFire,
+      sfx,
+      getVisibility: playerVisibility,
     });
-    await zombieManager.init(ZOMBIE_PREWARM_COUNT);
-    zombieManager.spawnRing(ZOMBIE_INITIAL_SPAWN, -6.43, 127.8, 8, 35);
 
-    setLoadMsg("Loading world & 3D models…");
-    await loadWorld();
+    // Soldier, zombies and the world download + parse in parallel
+    await Promise.all([
+      loadCharacter(),
+      zombieManager.init(),
+      loadWorld(),
+    ]);
+    onWeaponChanged(false);
 
-    setLoadMsg("Starting scene…");
+    director = new LevelDirector({
+      manager: zombieManager,
+      getPlayerPos: () => characterBody.position,
+      onLevelStart,
+      onLevelCleared,
+      onBossSpawn,
+    });
+    zombieManager.onKill = zombie => {
+      killsThisLife++;
+      rollZombieDrop(zombie);
+      director.onKill(zombie);
+    };
+    zombieManager.onSpotted = () => {
+      // Sting only when the first monster notices you
+      if (zombieManager.chasingCount === 0) sfx.spotted();
+    };
+    // Monsters walk around buildings, use doorways, and can't get through closed doors
+    zombieManager.navigate = (zx, zz, tx, tz, out, big) => houses.navigate(zx, zz, tx, tz, out, big);
+    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z);
+    zombieManager.onDoorBang = (x, z) => {
+      sfx.doorBang(Math.hypot(x - characterBody.position.x, z - characterBody.position.z));
+    };
+    spawnWorldLoot();
+
+    setLoadMsg("Preparing shaders…");
+    updateThirdPersonCamera(1 / 60);
+    await warmUpGpu();
+
     clock.getDelta();
     _animRunning = true;
     animate();
@@ -946,6 +2099,8 @@ async function boot() {
     setupGui();
 
     window.zombieManager = zombieManager;
+    window.inventory = inventory;
+    deathScreenEl?.addEventListener("click", respawnPlayer);
 
     loadingScreen.classList.add("hidden");
     loadingScreen.addEventListener("transitionend", () => loadingScreen.remove(), { once: true });
