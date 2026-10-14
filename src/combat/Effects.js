@@ -1,10 +1,13 @@
 import * as THREE from "three";
 
-const TRACER_POOL     = 16;
+const TRACER_POOL     = 32;
+const ENEMY_FLASHES   = 8;
 const TRACER_LIFE     = 0.06;
 const PARTICLE_COUNT  = 400;
 const PARTICLE_HIDE_Y = -1000;
 const FLASH_LIFE      = 0.05;
+const FLAME_COUNT     = 200; // only the flying molotov rag uses these now
+const BLAST_LIFE      = 0.35;
 
 const BLOOD = [new THREE.Color(0x7a0606), new THREE.Color(0xa00d0d), new THREE.Color(0x4a0303)];
 const DUST  = [new THREE.Color(0x8a7a5c), new THREE.Color(0x6b5c45), new THREE.Color(0xb5a27c)];
@@ -32,6 +35,22 @@ function makeFlashTexture() {
     g.lineTo(size / 2 + Math.cos(a) * size * 0.48, size / 2 + Math.sin(a) * size * 0.48);
     g.stroke();
   }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeSoftTexture() {
+  const size = 64;
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.4, "rgba(255,255,255,0.6)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
@@ -93,6 +112,101 @@ export class Effects {
     this.pLife = new Float32Array(PARTICLE_COUNT);
     this.pNext = 0;
     this.pAlive = 0;
+
+    // ── Flames: additive soft points that rise and cool from yellow to red to nothing.
+    // Shared by molotov fires, flying molotov rags and grenade fireballs.
+    const fPos = new Float32Array(FLAME_COUNT * 3);
+    const fCol = new Float32Array(FLAME_COUNT * 3);
+    for (let i = 0; i < FLAME_COUNT; i++) fPos[i * 3 + 1] = PARTICLE_HIDE_Y;
+    const fGeo = new THREE.BufferGeometry();
+    fGeo.setAttribute("position", new THREE.BufferAttribute(fPos, 3).setUsage(THREE.DynamicDrawUsage));
+    fGeo.setAttribute("color", new THREE.BufferAttribute(fCol, 3).setUsage(THREE.DynamicDrawUsage));
+    this.flames = new THREE.Points(fGeo, new THREE.PointsMaterial({
+      size: 0.6,
+      map: makeSoftTexture(),
+      vertexColors: true,
+      sizeAttenuation: true,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+    }));
+    this.flames.frustumCulled = false;
+    scene.add(this.flames);
+    this.fPos = fPos;
+    this.fCol = fCol;
+    this.fVel = new Float32Array(FLAME_COUNT * 3);
+    this.fLife = new Float32Array(FLAME_COUNT);
+    this.fMax = new Float32Array(FLAME_COUNT);
+    this.fNext = 0;
+    this.fAlive = false;
+
+    // ── Explosion: big flash sprite + one persistent light
+    this.blast = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: this.flash.material.map,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      transparent: true,
+      fog: false,
+    }));
+    this.blast.visible = false;
+    scene.add(this.blast);
+    // Enemy muzzle flashes: sprites only (no lights → no per-pixel cost)
+    this.enemyFlashes = [];
+    for (let i = 0; i < ENEMY_FLASHES; i++) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: this.flash.material.map, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false,
+      }));
+      s.visible = false;
+      scene.add(s);
+      this.enemyFlashes.push({ sprite: s, life: 0 });
+    }
+    this.enemyFlashIndex = 0;
+
+    this.blastLight = new THREE.PointLight(0xff9a40, 0, 28, 1.6);
+    scene.add(this.blastLight);
+    this.blastTimer = 0;
+  }
+
+  flame(x, y, z, vx, vy, vz, life) {
+    const i = this.fNext;
+    this.fNext = (this.fNext + 1) % FLAME_COUNT;
+    const i3 = i * 3;
+    this.fPos[i3] = x;
+    this.fPos[i3 + 1] = y;
+    this.fPos[i3 + 2] = z;
+    this.fVel[i3] = vx;
+    this.fVel[i3 + 1] = vy;
+    this.fVel[i3 + 2] = vz;
+    this.fLife[i] = life;
+    this.fMax[i] = life;
+    this.fAlive = true;
+  }
+
+  enemyFlash(pos, color = 0xffb060) {
+    const f = this.enemyFlashes[this.enemyFlashIndex];
+    this.enemyFlashIndex = (this.enemyFlashIndex + 1) % ENEMY_FLASHES;
+    f.sprite.position.copy(pos);
+    f.sprite.material.color.setHex(color);
+    f.sprite.material.rotation = Math.random() * Math.PI * 2;
+    const s = 0.35 + Math.random() * 0.2;
+    f.sprite.scale.set(s, s, s);
+    f.sprite.visible = true;
+    f.life = FLASH_LIFE * 1.4;
+  }
+
+  /** Flash, light and debris. The fireball + smoke column come from FireFX. */
+  explosion(pos) {
+    this.blast.position.copy(pos);
+    this.blast.position.y += 0.6;
+    this.blast.material.rotation = Math.random() * Math.PI * 2;
+    this.blast.visible = true;
+    this.blastLight.position.copy(this.blast.position);
+    this.blastLight.position.y += 1;
+    this.blastTimer = BLAST_LIFE;
+
+    for (let n = 0; n < 30; n++) this._emit(pos, 0, 1, 0, 9, DUST, 0.8 + Math.random() * 0.6);
+    for (let n = 0; n < 24; n++) this._emit(pos, 0, 1, 0, 12, SPARK, 0.4 + Math.random() * 0.4);
   }
 
   muzzleFlash(pos) {
@@ -106,9 +220,10 @@ export class Effects {
     this.flashTimer = FLASH_LIFE;
   }
 
-  tracer(from, to) {
+  tracer(from, to, color = 0xffe0a0) {
     const t = this.tracers[this.tracerIndex];
     this.tracerIndex = (this.tracerIndex + 1) % TRACER_POOL;
+    t.mesh.material.color.setHex(color);
     t.mesh.position.copy(from);
     t.mesh.lookAt(to);
     t.mesh.scale.set(1, 1, from.distanceTo(to));
@@ -155,6 +270,27 @@ export class Effects {
       }
     }
 
+    for (const f of this.enemyFlashes) {
+      if (f.life <= 0) continue;
+      f.life -= delta;
+      if (f.life <= 0) f.sprite.visible = false;
+    }
+
+    if (this.blastTimer > 0) {
+      this.blastTimer -= delta;
+      const t = Math.max(0, this.blastTimer / BLAST_LIFE);
+      const s = 7 - t * 4;
+      this.blast.scale.set(s, s, s);
+      this.blast.material.opacity = t;
+      this.blastLight.intensity = 60 * t * t;
+      if (this.blastTimer <= 0) {
+        this.blast.visible = false;
+        this.blastLight.intensity = 0;
+      }
+    }
+
+    if (this.fAlive) this._updateFlames(delta);
+
     for (const t of this.tracers) {
       if (t.life <= 0) continue;
       t.life -= delta;
@@ -188,5 +324,37 @@ export class Effects {
     geo.attributes.position.needsUpdate = true;
     geo.attributes.color.needsUpdate = true;
     if (!anyAlive) this.pAlive = 0;
+  }
+
+  _updateFlames(delta) {
+    const pos = this.fPos, vel = this.fVel, col = this.fCol, life = this.fLife, max = this.fMax;
+    const damp = Math.exp(-2.5 * delta);
+    let any = false;
+    for (let i = 0; i < FLAME_COUNT; i++) {
+      if (life[i] <= 0) continue;
+      const i3 = i * 3;
+      life[i] -= delta;
+      if (life[i] <= 0) {
+        pos[i3 + 1] = PARTICLE_HIDE_Y;
+        col[i3] = col[i3 + 1] = col[i3 + 2] = 0;
+        continue;
+      }
+      any = true;
+      vel[i3] *= damp;
+      vel[i3 + 1] = vel[i3 + 1] * damp + 4 * delta; // hot air rises
+      vel[i3 + 2] *= damp;
+      pos[i3]     += vel[i3] * delta;
+      pos[i3 + 1] += vel[i3 + 1] * delta;
+      pos[i3 + 2] += vel[i3 + 2] * delta;
+      // Additive blending: fading to black is fading out
+      const t = life[i] / max[i];
+      col[i3]     = Math.min(1, t * 1.6);
+      col[i3 + 1] = t * t * 0.7;
+      col[i3 + 2] = t * t * t * 0.15;
+    }
+    const geo = this.flames.geometry;
+    geo.attributes.position.needsUpdate = true;
+    geo.attributes.color.needsUpdate = true;
+    if (!any) this.fAlive = false;
   }
 }

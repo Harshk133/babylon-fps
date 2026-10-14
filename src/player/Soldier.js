@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { cloneItem } from "../items/ItemModels.js";
+import { WEAPON_ORDER } from "../combat/weapons.js";
 
 // Quaternius "Soldier" + "Submachine Gun" (both CC0, via poly.pizza)
 const SOLDIER_URL = "/models/soldier/soldier.glb";
@@ -57,6 +59,8 @@ export class Soldier {
     this.root = new THREE.Group();
     this.model = null;
     this.weapon = null;
+    this.guns = {};              // id → { model, muzzle } in the hand-holder frame
+    this.currentGun = "smg";
     this.muzzle = new THREE.Object3D();
     this.mixer = null;
 
@@ -149,6 +153,19 @@ export class Soldier {
     const muzzleLocal = WEAPON_MUZZLE.clone().multiplyScalar(scale);
     this.muzzle.position.copy(muzzleLocal);
     holder.add(this.muzzle);
+    this.guns.smg = { model: gun, muzzle: muzzleLocal };
+
+    // Every other gun is a procedural model built in a grip-origin frame
+    // (+X barrel, +Y up), so it only needs moving onto the SMG's grip point.
+    const gripLocal = WEAPON_GRIP.clone().multiplyScalar(scale);
+    for (const id of WEAPON_ORDER) {
+      if (id === "smg") continue;
+      const model = cloneItem(id);
+      model.position.copy(gripLocal);
+      model.visible = false;
+      holder.add(model);
+      this.guns[id] = { model, muzzle: gripLocal.clone().add(model.userData.muzzle) };
+    }
 
     // Pose the skeleton in the pointing clip at t=0 with the root at identity
     const tmpMixer = new THREE.AnimationMixer(this.model);
@@ -177,6 +194,14 @@ export class Soldier {
 
     tmpMixer.stopAllAction();
     tmpMixer.uncacheRoot(this.model);
+  }
+
+  /** Shows the gun model for a weapon id and moves the muzzle to its barrel tip. */
+  setWeapon(id) {
+    if (!this.guns[id]) return;
+    this.currentGun = id;
+    for (const [gid, g] of Object.entries(this.guns)) g.model.visible = gid === id;
+    this.muzzle.position.copy(this.guns[id].muzzle);
   }
 
   getMuzzleWorldPosition(out) {
