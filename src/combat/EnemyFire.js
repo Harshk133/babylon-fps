@@ -38,14 +38,15 @@ function makeGlowTexture() {
 
 export class EnemyFire {
   /**
-   * getPlayerBody(): the player's CANNON body (feet at y − 0.9).
-   * onHitPlayer(damage, fromX, fromZ): apply damage + hit direction.
+   * getTargets(): players [{ pos (body centre, feet at y − 0.9), alive, local }].
+   * Player bodies carry body.playerTarget so hitscan rays know who they hit.
+   * onHitPlayer(target, damage, fromX, fromZ): apply damage + hit direction.
    */
-  constructor({ scene, world, effects, sfx, getPlayerBody, onHitPlayer }) {
+  constructor({ scene, world, effects, sfx, getTargets, onHitPlayer }) {
     this.world = world;
     this.effects = effects;
     this.sfx = sfx;
-    this.getPlayerBody = getPlayerBody;
+    this.getTargets = getTargets;
     this.onHitPlayer = onHitPlayer;
 
     const glow = makeGlowTexture();
@@ -72,11 +73,14 @@ export class EnemyFire {
     }
     this._laserUsed = 0;
     this._time = 0;
+    this._visual = false;
+    this.onFire = null;
   }
 
+  /** Distance from the local player (for sound volume). */
   _playerFeetDist(x, z) {
-    const p = this.getPlayerBody().position;
-    return Math.hypot(p.x - x, p.z - z);
+    const t = this.getTargets().find(q => q.local);
+    return t ? Math.hypot(t.pos.x - x, t.pos.z - z) : 30;
   }
 
   // ── Lasers ──────────────────────────────────────────────────────────────────
@@ -104,8 +108,15 @@ export class EnemyFire {
    * Fires one trigger pull of `gun` from `from` toward `target` (THREE.Vector3s).
    * spreadMul widens the cone (distance, target movement).
    */
-  fire(gun, from, target, spreadMul, srcX, srcZ, damageMul = 1) {
+  /**
+   * visualOnly: co-op clients replay the host's shots for looks; the host has
+   * already applied the damage. onFire(gun, from, target, spreadMul, srcX, srcZ)
+   * lets the host broadcast real shots.
+   */
+  fire(gun, from, target, spreadMul, srcX, srcZ, damageMul = 1, visualOnly = false) {
     this._dmgMul = damageMul;
+    this._visual = visualOnly;
+    if (!visualOnly) this.onFire?.(gun, from, target, spreadMul, srcX, srcZ);
     const dist = this._playerFeetDist(srcX, srcZ);
     this.sfx.gunshot(gun.sound, Math.max(0.12, 0.85 / (1 + dist * 0.06)));
     this.effects.enemyFlash(from, gun.tracer ?? gun.color);
@@ -133,11 +144,11 @@ export class EnemyFire {
     _from.set(from.x, from.y, from.z);
     _to.set(from.x + dir.x * gun.range, from.y + dir.y * gun.range, from.z + dir.z * gun.range);
     _res.reset();
-    const player = this.getPlayerBody();
     if (this.world.raycastClosest(_from, _to, shotOpts, _res)) {
       _hit.set(_res.hitPointWorld.x, _res.hitPointWorld.y, _res.hitPointWorld.z);
-      if (_res.body === player) {
-        this.onHitPlayer(gun.damage * this._dmgMul, srcX, srcZ);
+      const target = _res.body.playerTarget;
+      if (target) {
+        if (target.alive && !this._visual) this.onHitPlayer(target, gun.damage * this._dmgMul, srcX, srcZ);
       } else {
         const n = _res.hitNormalWorld;
         this.effects.impact(_hit, n.x, n.y, n.z, "dust", 4);
@@ -158,6 +169,8 @@ export class EnemyFire {
     b.srcX = srcX;
     b.srcZ = srcZ;
     b.dmgMul = this._dmgMul;
+    b.direct = false;
+    b.visual = this._visual;
     b.sprite.material.color.setHex(gun.color);
     b.sprite.scale.setScalar(gun.radius * 5);
     b.sprite.position.copy(from);
@@ -170,11 +183,14 @@ export class EnemyFire {
     if (!explode) return;
     this.effects.impact(b.pos, 0, 1, 0, "dust", 8);
     const g = b.gun;
-    if (g.splash > 0) {
-      const p = this.getPlayerBody().position;
-      const d = Math.hypot(p.x - b.pos.x, p.z - b.pos.z);
-      const dy = Math.abs((p.y - 0.9 + PLAYER_H / 2) - b.pos.y);
-      if (d < g.splash && dy < 2) this.onHitPlayer(g.damage * b.dmgMul * 0.5 * (1 - d / g.splash), b.srcX, b.srcZ);
+    if (g.splash > 0 && !b.direct && !b.visual) {
+      for (const t of this.getTargets()) {
+        if (!t.alive) continue;
+        const p = t.pos;
+        const d = Math.hypot(p.x - b.pos.x, p.z - b.pos.z);
+        const dy = Math.abs((p.y - 0.9 + PLAYER_H / 2) - b.pos.y);
+        if (d < g.splash && dy < 2) this.onHitPlayer(t, g.damage * b.dmgMul * 0.5 * (1 - d / g.splash), b.srcX, b.srcZ);
+      }
     }
   }
 
@@ -185,9 +201,7 @@ export class EnemyFire {
 
   update(delta) {
     this._time += delta;
-    const player = this.getPlayerBody();
-    const pp = player.position;
-    const feet = pp.y - 0.9;
+    const targets = this.getTargets();
     for (const b of this.bolts) {
       if (!b.active) continue;
       b.life -= delta;
@@ -196,15 +210,24 @@ export class EnemyFire {
       b.pos.addScaledVector(b.vel, delta);
       _b.copy(b.pos);
 
-      // Player: closest approach of this step's segment to the player's axis
+      // Players: closest approach of this step's segment to each player's axis
+      let hitPlayer = false;
       const sx = _b.x - _a.x, sz = _b.z - _a.z;
       const len2 = sx * sx + sz * sz || 1e-6;
-      const t = THREE.MathUtils.clamp(((pp.x - _a.x) * sx + (pp.z - _a.z) * sz) / len2, 0, 1);
-      const cx = _a.x + sx * t, cz = _a.z + sz * t, cy = _a.y + (_b.y - _a.y) * t;
-      if (Math.hypot(pp.x - cx, pp.z - cz) < PLAYER_R + b.gun.radius && cy > feet && cy < feet + PLAYER_H) {
-        b.pos.set(cx, cy, cz);
-        this.onHitPlayer(b.gun.damage * b.dmgMul, b.srcX, b.srcZ);
-        b.gun = { ...b.gun, splash: 0 }; // direct hit: no extra splash on top
+      for (const tg of targets) {
+        if (!tg.alive) continue;
+        const pp = tg.pos, feet = pp.y - 0.9;
+        const t = THREE.MathUtils.clamp(((pp.x - _a.x) * sx + (pp.z - _a.z) * sz) / len2, 0, 1);
+        const cx = _a.x + sx * t, cz = _a.z + sz * t, cy = _a.y + (_b.y - _a.y) * t;
+        if (Math.hypot(pp.x - cx, pp.z - cz) < PLAYER_R + b.gun.radius && cy > feet && cy < feet + PLAYER_H) {
+          b.pos.set(cx, cy, cz);
+          if (!b.visual) this.onHitPlayer(tg, b.gun.damage * b.dmgMul, b.srcX, b.srcZ);
+          hitPlayer = true;
+          break;
+        }
+      }
+      if (hitPlayer) {
+        b.direct = true; // no extra splash on top of a direct hit
         this._endBolt(b, true);
         continue;
       }

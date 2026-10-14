@@ -56,7 +56,7 @@ export const MONSTER_TYPES = {
     height: 2.43, radius: 0.15, mass: 120, hp: 100, speed: 2.8,
     melee: { damage: 6, knock: 5.5, rate: 1 },
     sight: { range: 24, fov: 120 }, hearing: 1.0,
-    pool: 30, color: "#d9c39a",
+    pool: 42, color: "#d9c39a",
     blurb: "Hunts by sight. Break line of sight to lose it.",
   },
   runner: {
@@ -64,7 +64,7 @@ export const MONSTER_TYPES = {
     height: 2.3, radius: 0.15, mass: 100, hp: 60, speed: 5.4,
     melee: { damage: 4, knock: 3, rate: 1.5 },
     sight: { range: 30, fov: 150 }, hearing: 0.9,
-    pool: 18, color: "#ffb347",
+    pool: 26, color: "#ffb347",
     blurb: "Fast and fragile, with sharp eyes. Keep moving.",
   },
   listener: {
@@ -72,7 +72,7 @@ export const MONSTER_TYPES = {
     height: 2.43, radius: 0.15, mass: 120, hp: 130, speed: 3.6,
     melee: { damage: 8, knock: 6, rate: 1 },
     sight: { range: 7, fov: 70 }, hearing: 2.4, hunter: true,
-    pool: 18, color: "#6fb7ff",
+    pool: 24, color: "#6fb7ff",
     blurb: "Nearly blind, but hears footsteps and gunfire from far away. Walk, don't sprint.",
   },
   gunner: {
@@ -82,7 +82,7 @@ export const MONSTER_TYPES = {
     melee: { damage: 5, knock: 4, rate: 1 },
     sight: { range: 36, fov: 120 }, hearing: 1.1,
     ranged: { min: 8, max: 17 },
-    pool: 14, color: "#ff5a4a",
+    pool: 18, color: "#ff5a4a",
     blurb: "Shoots back. Watch for the red laser and get behind walls; bullets don't go through them.",
   },
   brute: {
@@ -90,7 +90,7 @@ export const MONSTER_TYPES = {
     height: 2.8, radius: 0.17, mass: 320, hp: 480, speed: 2.1,
     melee: { damage: 20, knock: 11, rate: 0.8 },
     sight: { range: 22, fov: 110 }, hearing: 0.8, bigBody: true,
-    pool: 8, color: "#b06a3a",
+    pool: 12, color: "#b06a3a",
     blurb: "Soaks up bullets and hits like a truck. Too big for doorways. Fire works.",
   },
   boss: {
@@ -99,7 +99,7 @@ export const MONSTER_TYPES = {
     melee: { damage: 32, knock: 14, rate: 0.7 },
     sight: { range: 48, fov: 170 }, hearing: 1.6, bigBody: true, boss: true,
     ranged: { gun: "plasma", min: 6, max: 22 },
-    pool: 2, color: "#7fd4ff",
+    pool: 3, color: "#7fd4ff",
     blurb: "The horde's leader. Dodge its plasma and keep your distance.",
   },
 };

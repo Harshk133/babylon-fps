@@ -1354,3 +1354,202 @@ kbd {
 #noise-meter[data-level="2"] .nb:nth-of-type(-n+3) { background: #ffcf4a; }
 #noise-meter[data-level="3"] .nb { background: #ff5a3a; }
 #noise-meter[data-level="3"] .noise-label { color: #ff7a5a; }
+
+/* ── Lobby ────────────────────────────────────────────────────────────────── */
+#lobby {
+  position: fixed;
+  inset: 0;
+  z-index: 1700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: radial-gradient(ellipse at center, rgba(30, 14, 8, 0.6), rgba(5, 2, 0, 0.92));
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  color: #fff;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+
+#lobby.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.lobby-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(420px, 100%);
+  padding: 26px 26px 22px;
+  background: linear-gradient(160deg, rgba(34, 22, 16, 0.96), rgba(16, 10, 8, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 3px solid #e2a42b;
+  border-radius: 6px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+.lobby-panel h1 {
+  font-size: 26px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-align: center;
+  color: #f2e6d8;
+  text-shadow: 0 0 24px rgba(226, 52, 43, 0.5);
+}
+
+.lobby-sub {
+  margin-top: -6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  text-align: center;
+  text-transform: uppercase;
+  color: #e2a42b;
+}
+
+.lobby-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.lobby-field span {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(255, 220, 200, 0.75);
+}
+
+.lobby-field input {
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  outline: none;
+}
+
+.lobby-field input:focus { border-color: #e2a42b; }
+
+.lobby-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.lobby-buttons button {
+  flex: 1;
+  padding: 11px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #1a0f08;
+  background: #e2a42b;
+  border: 1px solid #e2a42b;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.lobby-buttons button.ghost {
+  color: #fff;
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.lobby-buttons button:hover:not(:disabled) { filter: brightness(1.12); }
+.lobby-buttons button:disabled { opacity: 0.5; cursor: default; }
+
+#lobby-status {
+  min-height: 18px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  color: #9fd36a;
+}
+
+#lobby-status.error { color: #ff6a5a; }
+
+.lobby-hint {
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* ── Squad panel ──────────────────────────────────────────────────────────── */
+#squad {
+  position: fixed;
+  top: 52px;
+  left: 16px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  pointer-events: none;
+  user-select: none;
+}
+
+#squad:empty { display: none; }
+
+.squad-head {
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.3em;
+  color: rgba(255, 220, 200, 0.7);
+}
+
+.squad-row {
+  display: grid;
+  grid-template-columns: 10px 110px 70px 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(20, 12, 10, 0.62);
+  border-radius: 3px;
+}
+
+.squad-row.down { opacity: 0.55; }
+.squad-row.me { box-shadow: inset 2px 0 0 #e2a42b; }
+
+.squad-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.squad-name {
+  overflow: hidden !important;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.squad-hp {
+  height: 5px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+}
+
+.squad-hp i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+}
+
+.squad-kills {
+  font-size: 11px;
+  text-align: right;
+  color: rgba(255, 220, 200, 0.8);
+  font-variant-numeric: tabular-nums;
+}

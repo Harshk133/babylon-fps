@@ -194,6 +194,33 @@ export class Minimap {
       ctx.globalAlpha = 1;
     }
 
+    // ── Teammates: arrows in their colour (grey when down)
+    for (const t of this.sources.players?.() ?? []) {
+      const dx = t.x - px, dz = t.z - pz;
+      let tx = mx(t.x, t.z), ty = my(t.x, t.z);
+      const off = dx * dx + dz * dz > R2;
+      if (off) {
+        // Pin to the rim so you always know which way your squad is
+        const a = Math.atan2(ty - c, tx - c);
+        tx = c + Math.cos(a) * (R - 6); ty = c + Math.sin(a) * (R - 6);
+      }
+      ctx.save();
+      ctx.translate(tx, ty);
+      ctx.rotate(yaw - t.yaw); // world yaw → screen, same frame as the player arrow
+      ctx.fillStyle = t.dead ? "#777" : t.color;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, -6);
+      ctx.lineTo(4.5, 5);
+      ctx.lineTo(0, 2.5);
+      ctx.lineTo(-4.5, 5);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fill();
+      ctx.restore();
+    }
+
     // ── View cone + player arrow
     const cone = ctx.createRadialGradient(c, c, 0, c, c, R);
     cone.addColorStop(0, "rgba(255, 236, 200, 0.22)");

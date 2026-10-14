@@ -1,0 +1,15 @@
+{
+  "name": "babylon-fps-relay",
+  "private": true,
+  "type": "module",
+  "description": "Co-op WebSocket relay for Babylon FPS",
+  "scripts": {
+    "start": "node relay.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}

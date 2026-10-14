@@ -1,0 +1,15 @@
+# Render blueprint for the co-op relay (Vercel can't host WebSocket servers).
+# Render → New → Blueprint → pick this repo. Then set ALLOWED_ORIGINS to your
+# Vercel URL and use wss://<service>.onrender.com/ws as VITE_RELAY_URL on Vercel.
+services:
+  - type: web
+    name: babylon-fps-relay
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install --omit=dev
+    startCommand: node relay.mjs
+    healthCheckPath: /
+    envVars:
+      - key: ALLOWED_ORIGINS
+        sync: false # e.g. https://your-game.vercel.app
