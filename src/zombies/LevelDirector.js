@@ -23,6 +23,7 @@ export class LevelDirector {
     this.cb = { onLevelStart, onFight, onLevelCleared, onBossSpawn };
     this.state = "idle";
     this.level = null;
+    this.playerCount = 1;       // co-op: bigger hordes for more players
     this.levelId = 0;
     this.killed = 0;
     this.spawned = 0;
@@ -47,7 +48,15 @@ export class LevelDirector {
 
   start(n) {
     this.manager.clearAll();
-    this.level = getLevel(n);
+    // Co-op scaling: ~65% more monsters per extra player, more at once, extra Warlords
+    const base = getLevel(n);
+    const k = Math.max(1, this.playerCount);
+    this.level = {
+      ...base,
+      total: Math.round(base.total * (1 + 0.65 * (k - 1))),
+      maxAlive: Math.min(40, Math.round(base.maxAlive * (1 + 0.55 * (k - 1)))),
+      boss: base.boss ? base.boss + (k >= 3 ? 1 : 0) : 0,
+    };
     this.levelId++;
     this.killed = 0;
     this.spawned = 0;

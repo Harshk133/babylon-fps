@@ -111,6 +111,25 @@
     <!-- Inventory screen (Tab) -->
     <div id="inventory"></div>
 
+    <!-- Squad (co-op teammates) -->
+    <div id="squad"></div>
+
+    <!-- Lobby: name + room, solo or co-op -->
+    <div id="lobby">
+      <div class="lobby-panel">
+        <h1>SURVIVE THE HORDE</h1>
+        <p class="lobby-sub">Co-op zombie survival</p>
+        <label class="lobby-field"><span>Your name</span><input id="lobby-name" maxlength="16" placeholder="Survivor" autocomplete="off" spellcheck="false"></label>
+        <label class="lobby-field"><span>Room code</span><input id="lobby-room" maxlength="24" placeholder="horde" autocomplete="off" spellcheck="false"></label>
+        <div class="lobby-buttons">
+          <button id="lobby-coop">Join co-op</button>
+          <button id="lobby-solo" class="ghost">Play solo</button>
+        </div>
+        <div id="lobby-status"></div>
+        <p class="lobby-hint">Friends open this same page address and type the same room code. Everyone in a room fights the same horde, and the horde gets bigger with every player.</p>
+      </div>
+    </div>
+
     <!-- Start / pause screen -->
     <div id="start-screen" class="visible">
       <h1>SURVIVE THE HORDE</h1>

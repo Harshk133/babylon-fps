@@ -62,22 +62,26 @@ const _laserEnd = new THREE.Vector3();
  * doesn't) and builds an awareness meter. Hearing reacts to noise() events:
  * footsteps, gunfire, explosions, doors. "hunter" types (Listeners) charge
  * straight at what they hear. Gunners and the Warlord fight at range.
+ *
+ * Co-op: monsters choose among several targets (getTargets()), each
+ *   { id, pos:{x,y,z}, vel:{x,z}, alive, vis, local }
+ * and report hits through onPlayerHit(target, damage, kx, kz, shake, srcX, srcZ).
  */
 export class ZombieManager {
   constructor({
     scene, world, monsterMaterial, linDamping, angDamping,
-    playerRadius, getPlayerBody, canAttackPlayer, dealDamageToPlayer, regenPlayerHealth,
-    enemyFire, sfx, getVisibility,
+    playerRadius, getTargets, onPlayerHit, regenPlayerHealth,
+    enemyFire, sfx,
   }) {
     this.world = world;
     this.playerRadius = playerRadius;
-    this.getPlayerBody = getPlayerBody;
-    this.canAttackPlayer = canAttackPlayer ?? (() => true);
-    this.dealDamageToPlayer = dealDamageToPlayer;
+    this.getTargets = getTargets;
+    this.onPlayerHit = onPlayerHit;
     this.regenPlayerHealth = regenPlayerHealth;
     this.enemyFire = enemyFire;
     this.sfx = sfx;
-    this.getVisibility = getVisibility ?? (() => 1);
+    this._targets = [];
+    this._netId = 0;
 
     this.pool = new MonsterPools({ scene, world, monsterMaterial, linDamping, angDamping });
     this.settings = { enableAI: true };
@@ -95,7 +99,20 @@ export class ZombieManager {
 
     this._chasers = [];
     this._roleTimer = 0;
-    this._visibility = 1;
+  }
+
+  _nearestTarget(x, z, onlyAlive = true) {
+    let best = null, bd = Infinity;
+    for (const t of this._targets) {
+      if (onlyAlive && !t.alive) continue;
+      const d = (t.pos.x - x) ** 2 + (t.pos.z - z) ** 2;
+      if (d < bd) { bd = d; best = t; }
+    }
+    return best;
+  }
+
+  _localTarget() {
+    return this._targets.find(t => t.local) ?? this._targets[0];
   }
 
   async init() {
@@ -118,6 +135,9 @@ export class ZombieManager {
     const m = this.pool.acquire(type, x, z, hp);
     if (!m) return null;
 
+    m.netId = ++this._netId;
+    m.target = null;
+    m.lastHitBy = null;
     m.damageMul = opts.damageMul ?? 1;
     m.speed = def.speed * (opts.speedMul ?? 1) * (0.88 + Math.random() * 0.24);
     m.attackTimer = Math.random() * m.attackInterval;
@@ -166,17 +186,19 @@ export class ZombieManager {
 
   // ── Damage ──────────────────────────────────────────────────────────────────
 
-  /** Returns true if this hit killed the monster. */
-  damage(m, amount, pushX = 0, pushZ = 0) {
+  /** Returns true if this hit killed the monster. byId: the player who did it (kill credit + aggro). */
+  damage(m, amount, pushX = 0, pushZ = 0, byId = null) {
     if (!m?.active || m.dying) return false;
     m.health = Math.max(0, m.health - amount);
     m.flashTimer = HIT_FLASH_TIME;
     m.mesh.material = m.mats.hit;
+    if (byId !== null) m.lastHitBy = byId;
 
-    // Getting shot gives you away
+    // Getting shot gives the shooter away
     if (m.state !== "chase" && m.state !== "alert") {
-      const p = this.getPlayerBody().position;
-      this._spot(m, p.x, p.z);
+      const t = this._targets.find(x => x.id === m.lastHitBy && x.alive)
+        ?? this._nearestTarget(m.body.position.x, m.body.position.z);
+      if (t) this._spot(m, t.pos.x, t.pos.z, t);
     }
 
     if (m.health <= 0) {
@@ -198,11 +220,11 @@ export class ZombieManager {
   }
 
   /** Sets a monster on fire for `duration` seconds (refreshes, never shortens). */
-  ignite(m, duration) {
+  ignite(m, duration, byId = null) {
     if (!m?.active) return;
     const wasBurning = m.burnTimer > 0;
     m.burnTimer = Math.max(m.burnTimer ?? 0, duration);
-    if (!wasBurning && !m.dying) this.damage(m, 1);
+    if (!wasBurning && !m.dying) this.damage(m, 1, 0, 0, byId);
   }
 
   kill(m) {
@@ -262,8 +284,9 @@ export class ZombieManager {
     m.boredTimer = 0;
   }
 
-  _spot(m, x, z) {
+  _spot(m, x, z, target = null) {
     if (m.state === "chase" || m.state === "alert" || m.dying) return;
+    m.target = target ?? this._nearestTarget(x, z);
     m.state = "alert";
     m.stateTimer = m.def.boss ? 1.2 : SPOT_TIME;
     m.lastX = x; m.lastZ = z;
@@ -272,17 +295,20 @@ export class ZombieManager {
     m.markerTimer = 1.6;
     m.animLockTimer = 0;
     if (m.actions.point && Math.random() < 0.6) this._setAnimation(m, "point", m.stateTimer);
-    const pp = this.getPlayerBody().position;
-    this.sfx?.growl(Math.hypot(pp.x - m.body.position.x, pp.z - m.body.position.z), !!m.def.bigBody);
+    const me = this._localTarget();
+    if (me) this.sfx?.growl(Math.hypot(me.pos.x - m.body.position.x, me.pos.z - m.body.position.z), !!m.def.bigBody);
     this.onSpotted?.(m);
   }
 
-  _canSee(m, pp, engaged) {
+  /** t: a target. Returns 0 if unseen, else how clearly (0..1.5). */
+  _canSee(m, t, engaged) {
+    if (!t?.alive) return 0;
+    const pp = t.pos;
     const def = m.def;
     const p = m.body.position;
     const dx = pp.x - p.x, dz = pp.z - p.z;
     const dist = Math.hypot(dx, dz);
-    const range = def.sight.range * (engaged ? 1.6 : 1) * this._visibility;
+    const range = def.sight.range * (engaged ? 1.6 : 1) * (t.vis ?? 1);
     if (dist > range) return 0;
     let peripheral = 1;
     if (!engaged && dist > 0.1) {
@@ -300,10 +326,23 @@ export class ZombieManager {
     return peripheral * (1.5 - dist / range);
   }
 
-  _sense(m, pp, tick) {
-    const dist = m.distXZ;
+  _sense(m, tick) {
+    const p = m.body.position;
     if (m.state === "chase") {
-      m.hasLOS = this._canSee(m, pp, true) > 0;
+      let t = m.target;
+      if (!t?.alive || !this._targets.includes(t)) {
+        t = m.target = this._nearestTarget(p.x, p.z);
+        if (!t) { m.state = "search"; m.goalX = m.lastX; m.goalZ = m.lastZ; m.stateTimer = 0; return; }
+      }
+      // Switch to a much closer teammate if one is in plain view
+      const dCur = Math.hypot(t.pos.x - p.x, t.pos.z - p.z);
+      for (const o of this._targets) {
+        if (o === t || !o.alive) continue;
+        if (Math.hypot(o.pos.x - p.x, o.pos.z - p.z) < dCur * 0.6 && this._canSee(m, o, true) > 0) { t = m.target = o; break; }
+      }
+      const pp = t.pos;
+      const dist = Math.hypot(pp.x - p.x, pp.z - p.z);
+      m.hasLOS = this._canSee(m, t, true) > 0;
       if (m.hasLOS || dist < TOUCH_RADIUS) {
         m.lastX = pp.x; m.lastZ = pp.z;
         m.lostTimer = 0;
@@ -320,11 +359,18 @@ export class ZombieManager {
     }
     if (m.state === "alert") return;
     m.hasLOS = false;
-    if (dist < TOUCH_RADIUS) { this._spot(m, pp.x, pp.z); return; }
-    const seen = this._canSee(m, pp, false);
+    // Whoever is closest or most visible
+    let seen = 0, best = null;
+    for (const t of this._targets) {
+      if (!t.alive) continue;
+      if (Math.hypot(t.pos.x - p.x, t.pos.z - p.z) < TOUCH_RADIUS) { this._spot(m, t.pos.x, t.pos.z, t); return; }
+      const v = this._canSee(m, t, false);
+      if (v > seen) { seen = v; best = t; }
+    }
     if (seen > 0) {
+      const pp = best.pos;
       m.awareness += seen * 2.2 * tick;
-      if (m.awareness >= 1) { this._spot(m, pp.x, pp.z); return; }
+      if (m.awareness >= 1) { this._spot(m, pp.x, pp.z, best); return; }
       if (m.awareness > 0.4 && m.state === "wander") this._investigate(m, pp.x, pp.z);
       else if (m.state !== "wander") { m.goalX = pp.x; m.goalZ = pp.z; }
     } else {
@@ -439,9 +485,9 @@ export class ZombieManager {
   _updateWander(m, delta) {
     m.boredTimer += delta;
     if (m.boredTimer > BORED_TIME) {
-      const pp = this.getPlayerBody().position;
-      this._investigate(m, pp.x, pp.z); // smells you out eventually
-      return;
+      const t = this._nearestTarget(m.body.position.x, m.body.position.z);
+      if (t) { this._investigate(m, t.pos.x, t.pos.z); return; } // smells you out eventually
+      m.boredTimer = 0;
     }
     m.wanderTimer -= delta;
     if (m.wanderTimer <= 0) {
@@ -480,7 +526,7 @@ export class ZombieManager {
     if (m.goalDist < 1.4 || nav === 2) m.stateTimer = 0.001;
   }
 
-  _updateAlert(m, delta, pp) {
+  _updateAlert(m, delta) {
     m.stateTimer -= delta;
     const p = m.body.position;
     this._steer(m, m.sepX * 0.3, m.sepZ * 0.3, delta);
@@ -488,13 +534,13 @@ export class ZombieManager {
     if (m.stateTimer <= 0) {
       m.state = "chase";
       m.lostTimer = 0;
-      m.hasLOS = this._canSee(m, pp, true) > 0;
+      m.hasLOS = this._canSee(m, m.target, true) > 0;
       m.animLockTimer = 0;
     }
   }
 
   _meleeAttack(m, delta, dist, nx, nz) {
-    const inRange = dist <= m.attackRange && m.staggerTimer <= 0 && this.canAttackPlayer();
+    const inRange = dist <= m.attackRange && m.staggerTimer <= 0 && m.target?.alive;
     if (!inRange) {
       m.attackTimer = Math.min(m.attackTimer, m.attackInterval * 0.3);
       return false;
@@ -507,13 +553,14 @@ export class ZombieManager {
     if (prev < hitTime && m.attackTimer >= hitTime) {
       const mel = m.def.melee;
       const p = m.body.position;
-      this.dealDamageToPlayer(mel.damage * m.damageMul, nx * mel.knock, nz * mel.knock, m.def.bigBody ? 0.7 : 0.45, p.x, p.z);
+      this.onPlayerHit(m.target, mel.damage * m.damageMul, nx * mel.knock, nz * mel.knock, m.def.bigBody ? 0.7 : 0.45, p.x, p.z);
     }
     if (m.attackTimer >= m.attackInterval) m.attackTimer -= m.attackInterval;
     return true;
   }
 
-  _updateChaseMelee(m, delta, pp) {
+  _updateChaseMelee(m, delta) {
+    const pp = m.target.pos;
     const tracking = m.hasLOS || m.lostTimer < 1.5;
     const tx = tracking ? pp.x : m.lastX;
     const tz = tracking ? pp.z : m.lastZ;
@@ -571,12 +618,14 @@ export class ZombieManager {
     return out.set(p.x + fx * 0.55 * s - fz * 0.22 * s, m.height * 0.6, p.z + fz * 0.55 * s + fx * 0.22 * s);
   }
 
-  _updateChaseRanged(m, delta, pp, playerSpeed) {
+  _updateChaseRanged(m, delta) {
     const def = m.def;
     const gun = m.gun;
+    const pp = m.target.pos;
+    const playerSpeed = Math.hypot(m.target.vel.x, m.target.vel.z);
     const p = m.body.position;
-    const dist = m.distXZ;
     const dx = pp.x - p.x, dz = pp.z - p.z;
+    const dist = Math.hypot(dx, dz);
     const nx = dist > 1e-4 ? dx / dist : 0, nz = dist > 1e-4 ? dz / dist : 0;
 
     // Bosses still swing when you get close
@@ -721,11 +770,8 @@ export class ZombieManager {
   }
 
   update(delta) {
-    const playerBody = this.getPlayerBody();
-    if (!playerBody) return;
-    const pp = playerBody.position;
-    const playerSpeed = Math.hypot(playerBody.velocity.x, playerBody.velocity.z);
-    this._visibility = this.getVisibility();
+    const targets = this._targets = this.getTargets();
+    if (!targets.length) return;
     this.enemyFire?.beginFrame();
 
     // 0. Corpses (iterate backwards: finished ones go back to the pool)
@@ -746,7 +792,10 @@ export class ZombieManager {
     for (const m of active) {
       if (m.dying) continue;
       const p = m.body.position;
-      m.distXZ = Math.hypot(pp.x - p.x, pp.z - p.z);
+      // Distance to the nearest player drives level-of-detail, markers and leashing
+      let nd = Infinity;
+      for (const t of targets) nd = Math.min(nd, (t.pos.x - p.x) ** 2 + (t.pos.z - p.z) ** 2);
+      m.distXZ = Math.sqrt(nd);
       m.engageRadius = this.playerRadius + m.capRadius + ENGAGE_GAP;
       m.attackRange = m.engageRadius + ATTACK_REACH * (m.def.bigBody ? 1.8 : 1);
       if (!this.settings.enableAI) continue;
@@ -754,7 +803,7 @@ export class ZombieManager {
       if (m.senseTimer <= 0) {
         const tick = m.distXZ > 45 ? SENSE_INTERVAL * 2.5 : SENSE_INTERVAL;
         m.senseTimer = tick;
-        if (m.distXZ < FAR_TIER) this._sense(m, pp, tick);
+        if (m.distXZ < FAR_TIER) this._sense(m, tick);
       }
       if (m.state === "chase" || m.state === "alert") chasers.push(m);
     }
@@ -795,10 +844,12 @@ export class ZombieManager {
           case "wander": this._updateWander(m, delta); break;
           case "investigate": this._updateInvestigate(m, delta, INVESTIGATE_SPEED, LOOK_TIME); break;
           case "search": this._updateInvestigate(m, delta, SEARCH_SPEED, LOOK_TIME + 1.5); break;
-          case "alert": this._updateAlert(m, delta, pp); break;
+          case "alert": this._updateAlert(m, delta); break;
           case "chase":
-            if (m.gun) this._updateChaseRanged(m, delta, pp, playerSpeed);
-            else this._updateChaseMelee(m, delta, pp);
+            if (!m.target?.alive) { m.target = this._nearestTarget(m.body.position.x, m.body.position.z); }
+            if (!m.target) { m.state = "search"; m.stateTimer = 0; m.goalX = m.lastX; m.goalZ = m.lastZ; break; }
+            if (m.gun) this._updateChaseRanged(m, delta);
+            else this._updateChaseMelee(m, delta);
             break;
         }
       }

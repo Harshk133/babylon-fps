@@ -9,10 +9,19 @@ build/
 # Environment
 .env
 .env.*
+!.env.example
 
-# Large tree assets
-public/
+# Assets: commit only what the game loads (~10 MB, optimized). The heavy
+# originals stay local; regenerate the .opt files with `npm run optimize-assets`.
+public/models/*.glb
+!public/models/*.opt.glb
+public/models/rusty_roof_wooden_house_1_3d_model_free.opt.glb
+public/models/monster.md2
 public/trees/*.glb
+!public/trees/*.opt.glb
+public/models/soldier/soldier.glb
+public/texture/grass2.jpg
+public/texture/ratamahatta.png
 
 # Logs
 logs

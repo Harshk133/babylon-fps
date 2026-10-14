@@ -224,15 +224,36 @@ export class MonsterPools {
     return m;
   }
 
+  /**
+   * Co-op clients only mirror the host's monsters: bodies become kinematic
+   * (moved by snapshots, never pushed) but still block players and bullets.
+   */
+  setPuppetMode(on) {
+    for (const m of this.all) {
+      const b = m.body;
+      b.type = on ? CANNON.Body.KINEMATIC : CANNON.Body.DYNAMIC;
+      b.mass = on ? 0 : m.def.mass;
+      b.updateMassProperties();
+      b.velocity.set(0, 0, 0);
+    }
+  }
+
   /** Free slots for a type. */
   available(type) {
     return this.inactive[type]?.length ?? 0;
   }
 
-  acquire(type, x, z, health) {
-    const m = this.inactive[type]?.pop();
-    if (!m) return null;
-    this._activate(m, x, z, health);
+  /** weaponId / skinIndex: match a specific look (co-op clients mirroring the host). */
+  acquire(type, x, z, health, weaponId = null, skinIndex = null) {
+    const list = this.inactive[type];
+    if (!list?.length) return null;
+    let i = list.length - 1;
+    if (weaponId !== null) {
+      const j = list.findIndex(q => q.weaponId === weaponId);
+      if (j >= 0) i = j;
+    }
+    const m = list.splice(i, 1)[0];
+    this._activate(m, x, z, health, skinIndex);
     this.active.push(m);
     return m;
   }
@@ -253,7 +274,7 @@ export class MonsterPools {
     m.wActions?.stand?.play();
   }
 
-  _activate(m, x, z, health) {
+  _activate(m, x, z, health, skinIndex = null) {
     const t = m.kind;
     m.active = true;
     m.health = health;
@@ -263,7 +284,8 @@ export class MonsterPools {
     m.staggerTimer = 0;
     m.flashTimer = 0;
     m.burnTimer = 0;
-    m.mats = t.skinMats[(Math.random() * t.skinMats.length) | 0];
+    m.skinIndex = skinIndex ?? ((Math.random() * t.skinMats.length) | 0);
+    m.mats = t.skinMats[m.skinIndex % t.skinMats.length];
     m.mesh.material = m.mats.base;
     m.body.collisionFilterGroup = GROUP_ZOMBIE;
     m.rotY = Math.random() * 360;

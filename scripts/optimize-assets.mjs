@@ -24,6 +24,11 @@ const MODELS = [
   { src: "public/models/autorickshaw_3d_model_free.glb",      ratio: 0.1,  error: 0.01, tex: 1024 },
   { src: "public/models/rusty_roof_wooden_house_1_3d_model_free.glb", ratio: 0.5, error: 0.004, tex: 1024 },
   { src: "public/models/dragon_gold.glb",                     ratio: 0.5,  error: 0.004, tex: 1024 },
+  // Player: keep only the clips Soldier.js plays (24 → 8), no simplification
+  {
+    src: "public/models/soldier/soldier.glb", ratio: 1, error: 0, tex: 1024,
+    keepAnimations: ["Idle_Gun", "Run", "Run_Back", "Run_Left", "Run_Right", "Idle_Gun_Pointing", "Idle_Gun_Shoot", "Death"],
+  },
 ];
 const TEXTURES = [
   { src: "public/texture/grass2.jpg", size: 1024, quality: 82 },
@@ -100,6 +105,12 @@ for (const m of MODELS) {
   const t0 = performance.now();
   const doc = await io.read(m.src);
   const before = countVerts(doc);
+  if (m.keepAnimations) {
+    for (const anim of doc.getRoot().listAnimations()) {
+      const name = anim.getName().split("|").pop();
+      if (!m.keepAnimations.includes(name)) anim.dispose();
+    }
+  }
   const steps = [stripUnusedAttributes(), dedup(), prune()];
   if (m.prune) {
     steps.push(weld(), simplifyPrune(m.ratio, m.error));

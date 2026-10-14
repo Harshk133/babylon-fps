@@ -78,7 +78,8 @@ export class Soldier {
 
   async load(loader = new GLTFLoader()) {
     const [soldier, weapon] = await Promise.all([
-      loader.loadAsync(SOLDIER_URL),
+      // Optimized copy from `npm run optimize-assets` (8 clips, meshopt), else the original
+      loader.loadAsync(SOLDIER_URL.replace(/\.glb$/, ".opt.glb")).catch(() => loader.loadAsync(SOLDIER_URL)),
       loader.loadAsync(WEAPON_URL),
     ]);
 

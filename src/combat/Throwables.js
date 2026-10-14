@@ -119,8 +119,8 @@ export class Throwables {
     scene.add(this.marker);
   }
 
-  /** origin / velocity: THREE.Vector3 (copied). */
-  throw(kind, origin, velocity) {
+  /** origin / velocity: THREE.Vector3-likes (copied). owner: thrower's player id (kill credit). */
+  throw(kind, origin, velocity, owner = null) {
     const p = this.projectiles.find(q => !q.active)
       ?? this.projectiles.reduce((a, b) => (a.age > b.age ? a : b));
     if (p.active) this._deactivate(p);
@@ -130,6 +130,7 @@ export class Throwables {
     p.age = 0;
     p.shatter = false;
     p.hitZombie = null;
+    p.owner = owner;
     p.meshes.grenade.visible = kind === "grenade";
     p.meshes.molotov.visible = kind === "molotov";
     p.holder.visible = true;
@@ -157,7 +158,7 @@ export class Throwables {
     b.sleep();
   }
 
-  _ignite(x, z, hitZombie) {
+  _ignite(x, z, hitZombie, owner) {
     const f = this.fires.find(q => !q.active) ?? this.fires.reduce((a, b) => (a.time < b.time ? a : b));
     if (f.active) this._endFire(f);
     f.active = true;
@@ -166,6 +167,7 @@ export class Throwables {
     f.time = MOLOTOV.duration;
     f.tick = 0;
     f.born = performance.now();
+    f.owner = owner;
     f.scorch.position.set(x, 0.02, z);
     f.scorch.material.opacity = 0.4;
     this.fireFX.ground(x, z, MOLOTOV.radius, MOLOTOV.duration);
@@ -181,7 +183,7 @@ export class Throwables {
     light.position.set(x, 1.2, z);
 
     this.sfx.glassBreak();
-    this.onIgnite?.(x, z, hitZombie);
+    this.onIgnite?.(x, z, hitZombie, owner);
   }
 
   _endFire(f) {
@@ -211,16 +213,17 @@ export class Throwables {
         _v.set(0, 0.18 * ITEM_SCALE, 0).applyQuaternion(p.holder.quaternion).add(p.holder.position);
         this.effects.flame(_v.x, _v.y, _v.z, (Math.random() - 0.5) * 0.4, 0.6, (Math.random() - 0.5) * 0.4, 0.25);
         if (p.shatter || p.age > MOLOTOV.maxFlight || b.position.y < -1) {
-          const x = b.position.x, z = b.position.z, hit = p.hitZombie;
+          const x = b.position.x, z = b.position.z, hit = p.hitZombie, owner = p.owner;
           this._deactivate(p);
-          this._ignite(x, z, hit);
+          this._ignite(x, z, hit, owner);
         }
       } else if (p.age >= GRENADE.fuse) {
         _v.set(b.position.x, Math.max(0.1, b.position.y), b.position.z);
+        const owner = p.owner;
         this._deactivate(p);
         this.effects.explosion(_v);
         this.fireFX.blast(_v.x, _v.y, _v.z);
-        this.onExplode?.(_v);
+        this.onExplode?.(_v, owner);
       }
     }
 
@@ -238,7 +241,7 @@ export class Throwables {
       f.tick -= delta;
       while (f.tick <= 0) {
         f.tick += MOLOTOV.tick;
-        this.onFireTick?.(f.x, f.z, MOLOTOV.radius, MOLOTOV.tick);
+        this.onFireTick?.(f.x, f.z, MOLOTOV.radius, MOLOTOV.tick, f.owner);
       }
     }
   }

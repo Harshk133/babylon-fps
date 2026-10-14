@@ -1,0 +1,13 @@
+# Uploaded by `vercel` CLI deploys: keep the heavy source assets out.
+node_modules
+dist
+.env
+public/models/*.glb
+!public/models/*.opt.glb
+public/models/rusty_roof_wooden_house_1_3d_model_free.opt.glb
+public/models/monster.md2
+public/trees/*.glb
+!public/trees/*.opt.glb
+public/models/soldier/soldier.glb
+public/texture/grass2.jpg
+public/texture/ratamahatta.png

@@ -15,6 +15,9 @@ npm run preview   # Preview the production build locally
 npm run optimize-assets            # Build *.opt.glb / *.opt.jpg next to heavy assets in public/
 npm run optimize-assets -- --force # Rebuild them all
 npm run build-house-kit            # Pack public/models/house/source/** into house-kit.glb
+npm run coop                       # Dev server on the LAN (vite --host); co-op relay at /ws
+npm run coop:preview               # Same, but a production build
+npm run relay                      # Standalone relay (PORT, default 8787) for hosting elsewhere
 ```
 
 No test runner is configured.
@@ -31,7 +34,7 @@ Monsters are the Quake 2 MD2 player models from the three.js examples (`webgl_lo
 
 - **`MonsterTypes.js`** holds pure data: `MONSTER_TYPES` (walker, runner, listener, gunner, brute, boss), with model, skins, weapons, height, HP, speed, melee, `sight` {range, fov}, `hearing` multiplier, `hunter`, `ranged`, `bigBody`, and pool size. It also defines `ENEMY_GUNS` (hitscan machinegun/shotgun, bolt blaster/plasma) and `getLevel(n)` (6 hand-made levels, then scaling).
 - **`MonsterPool.js` (`MonsterPools`)** loads every body, skin and weapon once and prewarms one pool per type. Each instance has body mesh + mixer, an optional weapon mesh + mixer playing the same clip names (as `MD2Character` does), a capsule body, a "?"/"!" marker sprite, and per-skin `mats` {base, hit, burn}. `acquire(type, …)` / `release(m)`, with no scene add/remove.
-- **`ZombieManager`** runs a state machine per monster: wander → investigate ("?") → alert ("!", point animation and growl) → chase → search (last known position) → wander.
+- **`ZombieManager`** (targets come from `getTargets()`; see Co-op) runs a state machine per monster: wander → investigate ("?") → alert ("!", point animation and growl) → chase → search (last known position) → wander.
   - Sight: range × player visibility, FOV cone, and a line-of-sight raycast on `GROUP_WORLD` (glass doesn't block it). It builds an awareness meter and is throttled to `SENSE_INTERVAL`.
   - Hearing: `noise(x, z, radius, kind)` for `"step" | "shot" | "explosion" | "door"`. Hunter types (Listeners) charge at noises; others investigate them.
   - Ranged types hold a distance band, strafe, and fire in phases: cool → aim (red laser via `EnemyFire.laser`) → burst. Their aim lags the target.
@@ -40,6 +43,19 @@ Monsters are the Quake 2 MD2 player models from the three.js examples (`webgl_lo
 - **`LevelDirector.js`** runs intro → fight → cleared (intermission) → next level. It handles opening wave, spawn pacing, type mix from availability, the boss at `bossAt`, re-centring wanderer homes on the player, and recycling wanderers past 115 m. Kills are counted per `levelId`. The first level starts on first pointer lock, and death restarts the level.
 - **`src/combat/EnemyFire.js`** holds pooled bolts (dodgeable, wall-checked, optional splash), hitscan rays on `GROUP_WORLD | GROUP_PLAYER` with coloured tracers, and aiming lasers (`beginFrame` / `laser` / `endFrame`).
 - **`src/ui/GameHUD.js`** draws the level bar, banners, boss bar, damage-direction arcs (`dealDamageToPlayer(..., srcX, srcZ)`) and the noise meter. In `main.js`, `updatePlayerNoise()` emits footsteps (sprint 17 m, jog 8 m, sneak/aim 3.5 m) and `playerVisibility()` (sprint ×1.25, still ×0.85, dark house ×0.45).
+
+### Co-op multiplayer (`server/`, `src/net/`)
+
+- **`server/relay.mjs`** is a dumb WebSocket relay: rooms (max 8), names and colours, host election (the longest-connected player takes over if the host leaves), and forwarding (`to: id | "host"`, or everyone else). It's attached to the Vite dev/preview server at `/ws` by the plugin in `vite.config.js`, so the game and the relay share one origin. It can also run standalone.
+- **`Net`** is the client (`on(type, fn)`, `send(msg)`, `isHost` / `isClient`). **`Lobby`** handles name and room entry (`?room=` prefills it), solo or co-op.
+- **Authority:** the host runs `ZombieManager` + `LevelDirector` and streams `mon` snapshots (`MonsterSync`, 12 Hz: 12 numbers per monster) plus `lvl` (2 Hz) and `lev` events. Clients turn their pools into kinematic puppets (`pool.setPuppetMode(true)`), never run AI, and send `hit` / `noise` to the host. Every player streams `st` (20 Hz). `RemotePlayers` renders teammates (Soldier + name-tag sprite + kinematic capsule whose `body.playerTarget` makes them targetable).
+- **Targets:** `ZombieManager` / `EnemyFire` take `getTargets()` (local + remote players) and report hits through `onPlayerHit(target, …)`, which sends `hurt` to a remote target. Monsters pick the seen/nearest player and switch to a much closer visible one.
+- **Shared events:** `shot` (teammate tracers and sound), `throw` (every client simulates it; only the host's copy damages monsters, each client damages its own player), `door` / `light` / `world` (state for late joiners), `drop` (host-rolled loot), `kill` (credit to `lastHitBy`), `ef` (host's monster gunfire replayed as `visualOnly`), `wipe`.
+- **Horde scaling:** `LevelDirector.playerCount` multiplies totals (+65% per extra player), max alive (+55%, cap 40) and Warlords (+1 at 3+ players). In co-op, death respawns you next to a teammate; the level restarts only when the whole squad is down for 4 s.
+
+### Deployment
+
+See `DEPLOY.md`. The game goes on Vercel (`vercel.json`) and the relay on Render (`render.yaml`, `server/package.json`), because Vercel can't hold WebSockets. `VITE_RELAY_URL` (build-time) points the client at the relay; unset, it uses the dev server's `/ws`. The relay's `ALLOWED_ORIGINS` limits which sites may connect. Only optimized runtime assets are committed (see `.gitignore` / `.vercelignore`), about 8 MB. `Soldier.js` and `loadGLB()` load `*.opt.glb` first.
 
 ### Physics (`cannon-es`)
 

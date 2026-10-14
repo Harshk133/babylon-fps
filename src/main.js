@@ -17,6 +17,11 @@ import { EnemyFire } from "./combat/EnemyFire.js";
 import { LevelDirector } from "./zombies/LevelDirector.js";
 import { MONSTER_TYPES } from "./zombies/MonsterTypes.js";
 import { GameHUD } from "./ui/GameHUD.js";
+import { Net } from "./net/Net.js";
+import { RemotePlayers } from "./net/RemotePlayers.js";
+import { MonsterSync } from "./net/MonsterSync.js";
+import { Lobby } from "./net/Lobby.js";
+import { ENEMY_GUNS, getLevel } from "./zombies/MonsterTypes.js";
 import {
   WEAPONS, WEAPON_ORDER, HEAD_HEIGHT, GRENADE, MOLOTOV, MEDKIT, THROWABLES,
 } from "./combat/weapons.js";
@@ -182,10 +187,13 @@ function respawnPlayer() {
   healthTrail  = MAX_HEALTH;
   timeSinceHit = 99;
   knockbackVel.set(0, 0, 0);
-  characterBody.position.set(0, FEET_OFFSET + 0.02, 0);
+  // Co-op: come back next to a living teammate
+  const mate = net.connected ? remotePlayers.targets().find(t => t.alive) : null;
+  const sx = mate ? mate.pos.x + 2 : 0, sz = mate ? mate.pos.z + 2 : 0;
+  characterBody.position.set(sx, FEET_OFFSET + 0.02, sz);
   characterBody.velocity.set(0, 0, 0);
   moveVelocity.set(0, 0, 0);
-  camPivot.set(0, cameraRig.pivotHeight, 0);
+  camPivot.set(sx, cameraRig.pivotHeight, sz);
   inventory.reset();
   onWeaponChanged(false);
   throwables.clear();
@@ -193,7 +201,7 @@ function respawnPlayer() {
   enemyFire.clear();
   killsThisLife = 0;
   soldier.revive();
-  director?.restart(); // same level, from the top
+  if (!net.connected) director?.restart(); // solo: same level, from the top
   if (deathScreenEl) deathScreenEl.classList.remove("visible");
   requestLock();
 }
@@ -288,7 +296,7 @@ function updateCombatHUD(delta) {
     if (killsEl) killsEl.textContent = `${killsThisLife}`;
   }
 
-  const showStart = hud.paused && playerHealth > 0 && !inventoryOpen;
+  const showStart = hud.paused && playerHealth > 0 && !inventoryOpen && !lobby?.open;
   if (showStart !== hud.shownPaused) {
     hud.shownPaused = showStart;
     startScreenEl?.classList.toggle("visible", showStart);
@@ -723,7 +731,7 @@ window.addEventListener("keydown", e => {
 window.addEventListener("keyup", e => setKey(e.code, false, false));
 canvas.addEventListener("click", () => {
   sfx.unlock();
-  if (playerHealth > 0 && !inventoryOpen) requestLock();
+  if (playerHealth > 0 && !inventoryOpen && !lobby?.open) requestLock();
 });
 let wheelCooldown = 0;
 window.addEventListener("wheel", e => {
@@ -749,7 +757,8 @@ document.addEventListener("pointerlockchange", () => {
   if (!isLocked()) { input.fire = false; input.aim = false; }
   hud.paused = !isLocked();
   // The first level starts when you first click into the game
-  if (isLocked() && director && director.state === "idle") director.start(1);
+  // (co-op clients follow the host's levels instead)
+  if (isLocked() && director && director.state === "idle" && !net.isClient) director.start(1);
 });
 document.addEventListener("mousemove", e => {
   if (!isLocked()) return;
@@ -1040,6 +1049,8 @@ function updateWeapon(delta) {
   weapon.triggerLatched = true;
 }
 
+const shotPoints = [];
+
 function fireShot(def) {
   inventory.consumeRound();
   timeSinceShot = 0;
@@ -1058,6 +1069,7 @@ function fireShot(def) {
   sfx.gunshot(def.sound);
 
   let anyHit = false, anyHead = false, anyKill = false;
+  shotPoints.length = 0;
   for (let i = 0; i < def.pellets; i++) {
     _shotDir.copy(_aimDir);
     _shotDir.x += (Math.random() - 0.5) * 2 * spread;
@@ -1079,14 +1091,17 @@ function fireShot(def) {
     if (hit) _hitPoint.copy(_shotResult.hitPointWorld);
     else _hitPoint.set(_shotTo.x, _shotTo.y, _shotTo.z);
 
-    if (i < def.tracersPerShot) effects.tracer(_muzzle, _hitPoint);
+    if (i < def.tracersPerShot) {
+      effects.tracer(_muzzle, _hitPoint);
+      shotPoints.push(+_hitPoint.x.toFixed(2), +_hitPoint.y.toFixed(2), +_hitPoint.z.toFixed(2));
+    }
     if (!hit) continue;
 
     const zombie = _shotResult.body.zombie;
     if (zombie && zombieManager) {
       const headshot = _hitPoint.y > zombie.height - HEAD_HEIGHT * (zombie.height / 2.43);
       const damage = def.damage * (headshot ? def.headshotMultiplier : 1);
-      const killed = zombieManager.damage(zombie, damage, _shotDir.x * def.push, _shotDir.z * def.push);
+      const killed = hitMonster(zombie, damage, _shotDir.x * def.push, _shotDir.z * def.push);
       const blood = def.pellets > 1 ? 4 : headshot ? 22 : 10;
       effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", blood);
       anyHit = true;
@@ -1111,7 +1126,10 @@ function fireShot(def) {
   aimPitch     = Math.min(cameraRig.pitchMax, aimPitch + kick * 0.25);
   cameraTrauma = Math.min(1, cameraTrauma + (def.pellets > 1 || def.damage > 100 ? 0.18 : 0.05));
 
-  zombieManager?.noise(characterBody.position.x, characterBody.position.z, def.alertRadius, "shot");
+  makeNoise(characterBody.position.x, characterBody.position.z, def.alertRadius, "shot");
+  if (net.connected) {
+    net.send({ t: "shot", w: def.sound, f: [+_muzzle.x.toFixed(2), +_muzzle.y.toFixed(2), +_muzzle.z.toFixed(2)], h: shotPoints });
+  }
 }
 
 // ─── Throwables (grenade / molotov) ───────────────────────────────────────────
@@ -1150,7 +1168,14 @@ function releaseThrow() {
   const kind = inventory.takeThrowable();
   if (!kind) return;
   computeThrow();
-  throwables.throw(kind, _throwFrom, _throwVel);
+  throwables.throw(kind, _throwFrom, _throwVel, localTarget.id);
+  if (net.connected) {
+    net.send({
+      t: "throw", k: kind,
+      o: [_throwFrom.x, _throwFrom.y, _throwFrom.z].map(v => +v.toFixed(3)),
+      v: [_throwVel.x, _throwVel.y, _throwVel.z].map(v => +v.toFixed(3)),
+    });
+  }
   throwCooldown = THROW_COOLDOWN;
 }
 
@@ -1185,10 +1210,11 @@ function blastShielded(pos, x, y, z) {
   return world.raycastClosest(_blastFrom, _blastTo, blastRayOpts, _blastResult);
 }
 
-function onGrenadeExplode(pos) {
+function onGrenadeExplode(pos, owner = null) {
   const R = GRENADE.radius;
   let anyHit = false, anyKill = false;
-  for (const z of zombieManager?.active ?? []) {
+  const by = owner ?? localTarget.id;
+  for (const z of net.isClient ? [] : zombieManager?.active ?? []) {
     if (z.dying) continue;
     const dx = z.body.position.x - pos.x, dz = z.body.position.z - pos.z;
     const d = Math.hypot(dx, dz);
@@ -1197,12 +1223,14 @@ function onGrenadeExplode(pos) {
     const f = (1 - d / R) * shield;
     const dmg = THREE.MathUtils.lerp(GRENADE.minDamage, GRENADE.maxDamage, f) * shield;
     const inv = d > 1e-3 ? 1 / d : 0;
-    const killed = zombieManager.damage(z, dmg, dx * inv * GRENADE.push * f, dz * inv * GRENADE.push * f);
+    const killed = zombieManager.damage(z, dmg, dx * inv * GRENADE.push * f, dz * inv * GRENADE.push * f, by);
     anyHit = true;
     anyKill ||= killed;
   }
-  if (anyHit) showHitMarker(false, anyKill);
-  if (anyKill) sfx.kill();
+  if (by === localTarget.id) {
+    if (anyHit) showHitMarker(false, anyKill);
+    if (anyKill) sfx.kill();
+  }
 
   const px = characterBody.position.x - pos.x, pz = characterBody.position.z - pos.z;
   const pd = Math.hypot(px, pz);
@@ -1214,7 +1242,7 @@ function onGrenadeExplode(pos) {
   }
   cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - pd / 35, 0, 1) * 0.8);
   sfx.explosion(pd);
-  zombieManager?.noise(pos.x, pos.z, GRENADE.alertRadius, "explosion");
+  if (!net.isClient) zombieManager?.noise(pos.x, pos.z, GRENADE.alertRadius, "explosion");
 }
 
 // Zombies that walk through the flames catch fire and keep burning after they
@@ -1222,14 +1250,15 @@ function onGrenadeExplode(pos) {
 const BURN_TIME_TOUCH  = 6;
 const BURN_TIME_DIRECT = 9;
 
-function onFireTick(x, z, r, dt) {
+function onFireTick(x, z, r, dt, owner = null) {
   const r2 = r * r;
-  for (const zb of zombieManager?.active ?? []) {
+  const by = owner ?? localTarget.id;
+  for (const zb of net.isClient ? [] : zombieManager?.active ?? []) {
     if (zb.dying) continue;
     const dx = zb.body.position.x - x, dz = zb.body.position.z - z;
     if (dx * dx + dz * dz < r2) {
-      zombieManager.ignite(zb, BURN_TIME_TOUCH);
-      zombieManager.damage(zb, MOLOTOV.zombieDps * dt * 0.35);
+      zombieManager.ignite(zb, BURN_TIME_TOUCH, by);
+      zombieManager.damage(zb, MOLOTOV.zombieDps * dt * 0.35, 0, 0, by);
     }
   }
   const px = characterBody.position.x - x, pz = characterBody.position.z - z;
@@ -1323,12 +1352,15 @@ let nearSwitch = null;
 
 function useDoor(open) {
   if (nearDoor && houses.setDoor(nearDoor, open)) {
-    zombieManager?.noise(nearDoor.doorWorld.x, nearDoor.doorWorld.z, open ? 9 : 12, "door");
+    makeNoise(nearDoor.doorWorld.x, nearDoor.doorWorld.z, open ? 9 : 12, "door");
+    net.send({ t: "door", h: houses.houses.indexOf(nearDoor), o: open });
   }
 }
 
 function useLightSwitch() {
-  if (nearSwitch) houses.toggleLight(nearSwitch);
+  if (!nearSwitch) return;
+  houses.toggleLight(nearSwitch);
+  net.send({ t: "light", h: houses.houses.indexOf(nearSwitch), on: nearSwitch.lightOn });
 }
 
 function dropWeapon(id) {
@@ -1353,13 +1385,18 @@ const DROP_TABLE = [
 ];
 const DROP_GUNS = ["shotgun", "rifle", "sniper", "smg"];
 
+function spawnDrop(k, x, z, life) {
+  pickups.spawn(k, x, z, pickupData(k), life);
+  net.send({ t: "drop", k, x: +x.toFixed(2), z: +z.toFixed(2), l: life });
+}
+
 function rollZombieDrop(zombie) {
   const p0 = zombie.body.position;
   if (zombie.def.boss) {
     // The Warlord drops a stash
     ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov"].forEach((k, i) => {
       const a = (i / 8) * Math.PI * 2;
-      pickups.spawn(k, p0.x + Math.cos(a) * 2.2, p0.z + Math.sin(a) * 2.2, pickupData(k), DROP_LIFETIME * 2);
+      spawnDrop(k, p0.x + Math.cos(a) * 2.2, p0.z + Math.sin(a) * 2.2, DROP_LIFETIME * 2);
     });
     return;
   }
@@ -1369,7 +1406,7 @@ function rollZombieDrop(zombie) {
     if (r < chance) {
       const k = kind === "gun" ? DROP_GUNS[(Math.random() * DROP_GUNS.length) | 0] : kind;
       const p = zombie.body.position;
-      pickups.spawn(k, p.x, p.z, pickupData(k), DROP_LIFETIME);
+      spawnDrop(k, p.x, p.z, DROP_LIFETIME);
       return;
     }
     r -= chance;
@@ -1477,8 +1514,8 @@ const enemyFire = new EnemyFire({
   world,
   effects,
   sfx,
-  getPlayerBody: () => characterBody,
-  onHitPlayer: (dmg, sx, sz) => dealDamageToPlayer(dmg, 0, 0, 0.18, sx, sz),
+  getTargets,
+  onHitPlayer: (target, dmg, sx, sz) => onPlayerHit(target, dmg, 0, 0, 0.18, sx, sz),
 });
 
 // ─── Player noise & visibility (what the monsters sense) ──────────────────────
@@ -1503,7 +1540,7 @@ function updatePlayerNoise(delta) {
   stepTimer -= delta;
   if (stepTimer <= 0) {
     stepTimer = step[1];
-    zombieManager?.noise(characterBody.position.x, characterBody.position.z, step[0], "step");
+    makeNoise(characterBody.position.x, characterBody.position.z, step[0], "step");
   }
 }
 
@@ -1521,6 +1558,7 @@ function playerVisibility() {
 let director = null;
 
 function onLevelStart(level) {
+  if (net.isHost) net.send({ t: "lev", e: "start", n: level.n });
   const def = level.introduces ? MONSTER_TYPES[level.introduces] : null;
   gameHud.showBanner({
     title: `LEVEL ${level.n}`,
@@ -1533,6 +1571,7 @@ function onLevelStart(level) {
 }
 
 function onLevelCleared(level) {
+  if (net.isHost) net.send({ t: "lev", e: "clear", n: level.n });
   gameHud.showBanner({
     title: `LEVEL ${level.n} CLEARED`,
     sub: "Supplies dropped nearby",
@@ -1553,6 +1592,7 @@ function onLevelCleared(level) {
 }
 
 function onBossSpawn(boss) {
+  if (net.isHost) net.send({ t: "lev", e: "boss", n: director.level.n });
   gameHud.showBanner({ title: "THE WARLORD", sub: "has entered the fight", color: boss.def.color, duration: 3.5 });
   sfx.growl(0, true);
 }
@@ -1573,9 +1613,10 @@ const throwables = new Throwables({
   fireFX,
   sfx,
   onExplode: onGrenadeExplode,
-  onIgnite: (x, z, hitZombie) => {
+  onIgnite: (x, z, hitZombie, owner) => {
+    if (net.isClient) return; // the host's copy of this throw does the damage
     // A direct hit drenches the zombie: it burns longer
-    if (hitZombie) zombieManager?.ignite(hitZombie, BURN_TIME_DIRECT);
+    if (hitZombie) zombieManager?.ignite(hitZombie, BURN_TIME_DIRECT, owner ?? localTarget.id);
     zombieManager?.noise(x, z, MOLOTOV.alertRadius, "explosion");
   },
   onFireTick,
@@ -1586,6 +1627,7 @@ const minimap = new Minimap(document.getElementById("minimap"), {
   pickups: () => pickups.active,
   fires: () => throwables.fires,
   obstacles: () => mapObstacles,
+  players: () => remotePlayers.mapList(),
 });
 
 // ─── Model Registry & Lil-GUI Controls ────────────────────────────────────────
@@ -1935,6 +1977,270 @@ async function loadWorld() {
   }
 }
 
+// ─── Co-op multiplayer ────────────────────────────────────────────────────────
+// One player in a room is the host: it runs the monsters + level director and
+// streams them to the others. Everyone streams their own player state.
+const net = new Net();
+const NET_STATE_HZ = 20;
+const NET_MONSTER_HZ = 12;
+const NET_LEVEL_HZ = 2;
+let netStateTimer = 0, netMonsterTimer = 0, netLevelTimer = 0, squadTimer = 0, wipeTimer = 0;
+let myName = "Survivor";
+let monsterSync = null;
+
+const remotePlayers = new RemotePlayers({
+  scene, world, loader: gltfLoader, effects, sfx, material: characterMaterial,
+  capsule: { radius: CHARACTER_RADIUS, height: CAPSULE_HEIGHT },
+  addCapsule: addCapsuleToBody,
+});
+
+// What the monsters can target: you + every teammate
+const localTarget = { id: 0, pos: characterBody.position, vel: characterBody.velocity, alive: true, vis: 1, local: true };
+characterBody.playerTarget = localTarget;
+const _allTargets = [];
+
+function getTargets() {
+  localTarget.alive = playerHealth > 0;
+  localTarget.vis = playerVisibility();
+  _allTargets.length = 0;
+  _allTargets.push(localTarget);
+  for (const t of remotePlayers.targets()) _allTargets.push(t);
+  return _allTargets;
+}
+
+/** A monster hit a player: you take it directly, teammates get a message. */
+function onPlayerHit(target, dmg, kx, kz, shake, sx, sz) {
+  if (target.local) dealDamageToPlayer(dmg, kx, kz, shake, sx, sz);
+  else net.send({ t: "hurt", to: target.id, d: +dmg.toFixed(1), kx: +kx.toFixed(2), kz: +kz.toFixed(2), sh: shake, sx: +sx.toFixed(2), sz: +sz.toFixed(2) });
+}
+
+/** Footsteps, gunfire, doors: the host's monsters hear everyone. */
+function makeNoise(x, z, r, kind) {
+  if (net.isClient) net.send({ t: "noise", to: "host", x: +x.toFixed(2), z: +z.toFixed(2), r, k: kind });
+  else zombieManager?.noise(x, z, r, kind);
+}
+
+/** Your bullet hit a monster: host/solo apply it, clients ask the host. */
+function hitMonster(m, dmg, px, pz) {
+  if (net.isClient) {
+    net.send({ t: "hit", to: "host", n: m.netId, d: +dmg.toFixed(1), px: +px.toFixed(2), pz: +pz.toFixed(2) });
+    m.flashTimer = 0.07;
+    m.mesh.material = m.mats.hit;
+    return false;
+  }
+  return zombieManager.damage(m, dmg, px, pz, localTarget.id);
+}
+
+const _gunNames = new Map(Object.entries(ENEMY_GUNS).map(([k, v]) => [v, k]));
+const _efFrom = new THREE.Vector3();
+const _efTo = new THREE.Vector3();
+const _vecA = new THREE.Vector3();
+const _vecB = new THREE.Vector3();
+
+// Host: replay monster gunfire on the clients
+enemyFire.onFire = (gun, from, target, spread, sx, sz) => {
+  if (!net.isHost || remotePlayers.count === 0) return;
+  net.send({
+    t: "ef", g: _gunNames.get(gun), s: +spread.toFixed(2), sx: +sx.toFixed(1), sz: +sz.toFixed(1),
+    f: [+from.x.toFixed(2), +from.y.toFixed(2), +from.z.toFixed(2)],
+    a: [+target.x.toFixed(2), +target.y.toFixed(2), +target.z.toFixed(2)],
+  });
+};
+
+function updateSquadPlayerCount() {
+  if (director) director.playerCount = 1 + remotePlayers.count;
+}
+
+function onConnected(welcome) {
+  localTarget.id = net.id;
+  for (const p of welcome.players) if (p.id !== net.id) remotePlayers.add(p);
+  if (net.isClient) {
+    // The host owns the monsters; ours become puppets of its snapshots
+    zombieManager.clearAll();
+    zombieManager.pool.setPuppetMode(true);
+    inventoryUI.feed(`Joined room "${net.room}" · host: ${net.players.get(net.hostId)?.name ?? "?"}`, "info");
+  } else {
+    inventoryUI.feed(`Hosting room "${net.room}". Friends join with the same code.`, "info");
+  }
+  updateSquadPlayerCount();
+}
+
+function becomeHost() {
+  monsterSync?.becomeHost();
+  updateSquadPlayerCount();
+  // Pick the fight back up from the current level
+  director.start(director.level?.n ?? 1);
+  inventoryUI.feed("You're hosting the horde now", "info");
+}
+
+net.on("joined", msg => {
+  remotePlayers.add(msg.p);
+  inventoryUI.feed(`${msg.p.name} joined the fight`, "weapon");
+  updateSquadPlayerCount();
+  if (net.isHost) {
+    // Catch the newcomer up on doors and lights
+    net.send({
+      t: "world", to: msg.p.id,
+      doors: houses.houses.map(h => h.doorOpen),
+      lights: houses.houses.map(h => h.lightOn),
+    });
+  }
+});
+net.on("left", msg => {
+  const name = remotePlayers.players.get(msg.id)?.name ?? "A player";
+  remotePlayers.remove(msg.id);
+  inventoryUI.feed(`${name} left`, "info");
+  updateSquadPlayerCount();
+});
+net.on("host", msg => { if (msg.id === net.id) becomeHost(); });
+net.on("disconnect", () => {
+  const wasClient = localTarget.id !== net.hostId;
+  remotePlayers.clear();
+  inventoryUI.feed("Disconnected from co-op: playing solo", "info");
+  if (wasClient) becomeHost();
+  updateSquadPlayerCount();
+});
+
+net.on("st", msg => remotePlayers.applyState(msg.from, msg));
+net.on("shot", msg => remotePlayers.shot(msg.from, msg, characterBody.position));
+net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz));
+net.on("throw", msg => {
+  throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.from);
+});
+net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
+net.on("light", msg => { const h = houses.houses[msg.h]; if (h && h.lightOn !== msg.on) houses.toggleLight(h); });
+net.on("world", msg => {
+  msg.doors.forEach((o, i) => { if (houses.houses[i]) houses.setDoor(houses.houses[i], o); });
+  msg.lights.forEach((on, i) => { const h = houses.houses[i]; if (h && h.lightOn !== on) houses.toggleLight(h); });
+});
+net.on("drop", msg => pickups.spawn(msg.k, msg.x, msg.z, pickupData(msg.k), msg.l));
+net.on("kill", () => {
+  killsThisLife++;
+  showHitMarker(false, true);
+  sfx.kill();
+});
+
+// Host-only inputs from clients
+net.on("hit", msg => {
+  if (!net.isHost) return;
+  const m = zombieManager.active.find(x => x.netId === msg.n && !x.dying);
+  if (m) zombieManager.damage(m, msg.d, msg.px, msg.pz, msg.from);
+});
+net.on("noise", msg => { if (net.isHost) zombieManager.noise(msg.x, msg.z, msg.r, msg.k); });
+
+// Client-only: the host's world
+net.on("mon", msg => { if (net.isClient) monsterSync?.apply(msg.d); });
+net.on("ef", msg => {
+  if (!net.isClient) return;
+  const gun = ENEMY_GUNS[msg.g];
+  if (gun) enemyFire.fire(gun, _efFrom.set(msg.f[0], msg.f[1], msg.f[2]), _efTo.set(msg.a[0], msg.a[1], msg.a[2]), msg.s, msg.sx, msg.sz, 1, true);
+});
+net.on("lvl", msg => {
+  if (!net.isClient || !director) return;
+  if (director.level?.n !== msg.n || director.level.total !== msg.tot) {
+    director.level = { ...getLevel(msg.n), total: msg.tot, boss: 0 };
+  }
+  director.state = msg.s;
+  director.killed = msg.k;
+  director.timer = msg.tm;
+});
+net.on("lev", msg => {
+  if (!net.isClient) return;
+  if (msg.e === "start") onLevelStart(getLevel(msg.n));
+  else if (msg.e === "clear") onLevelCleared(getLevel(msg.n));
+  else if (msg.e === "boss") onBossSpawn({ def: MONSTER_TYPES.boss });
+});
+net.on("wipe", () => {
+  gameHud.showBanner({ title: "SQUAD WIPED", sub: "Restarting the level", color: "#ff4b3a", duration: 4 });
+});
+
+function netTick(delta) {
+  if (!net.connected) return;
+  netStateTimer -= delta;
+  if (netStateTimer <= 0) {
+    netStateTimer = 1 / NET_STATE_HZ;
+    const b = characterBody.position, v = characterBody.velocity;
+    net.send({
+      t: "st",
+      x: +b.x.toFixed(2), y: +b.y.toFixed(2), z: +b.z.toFixed(2),
+      vx: +v.x.toFixed(2), vz: +v.z.toFixed(2),
+      by: +bodyYaw.toFixed(3), ay: +aimYaw.toFixed(3), ap: +aimPitch.toFixed(3),
+      aim: input.aim ? 1 : 0, fire: timeSinceShot < 0.15 ? 1 : 0,
+      w: inventory.current, hp: Math.max(0, Math.round(playerHealth)), dead: playerHealth <= 0 ? 1 : 0,
+      vis: +playerVisibility().toFixed(2), k: killsThisLife,
+    });
+  }
+  if (!net.isHost) return;
+
+  netMonsterTimer -= delta;
+  if (netMonsterTimer <= 0 && remotePlayers.count > 0) {
+    netMonsterTimer = 1 / NET_MONSTER_HZ;
+    net.send({ t: "mon", d: monsterSync.snapshot() });
+  }
+  netLevelTimer -= delta;
+  if (netLevelTimer <= 0 && director?.level) {
+    netLevelTimer = 1 / NET_LEVEL_HZ;
+    net.send({ t: "lvl", n: director.level.n, s: director.state, k: director.killed, tot: director.total, tm: +director.timer.toFixed(1) });
+  }
+  // Whole squad down for a few seconds: restart the level
+  if (director?.state === "fight" && getTargets().every(t => !t.alive)) {
+    wipeTimer += delta;
+    if (wipeTimer > 4) {
+      wipeTimer = 0;
+      director.restart();
+      net.send({ t: "wipe" });
+      gameHud.showBanner({ title: "SQUAD WIPED", sub: "Restarting the level", color: "#ff4b3a", duration: 4 });
+    }
+  } else {
+    wipeTimer = 0;
+  }
+}
+
+// ─── Squad panel (co-op) ──────────────────────────────────────────────────────
+const squadEl = document.getElementById("squad");
+let squadHtml = "";
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function updateSquad(delta) {
+  squadTimer -= delta;
+  if (squadTimer > 0) return;
+  squadTimer = 0.25;
+  let html = "";
+  if (net.connected) {
+    const me = net.players.get(net.id);
+    const rows = [{ name: myName, color: me?.color ?? "#fff", hp: Math.max(0, playerHealth), kills: killsThisLife, me: true }];
+    for (const p of remotePlayers.players.values()) rows.push({ name: p.name, color: p.color, hp: p.hp, kills: p.kills, dead: p.dead });
+    html = `<div class="squad-head">SQUAD · ${escapeHtml(net.room)}${net.ping ? ` · ${net.ping} ms` : ""}</div>` + rows.map(r => `
+      <div class="squad-row${r.me ? " me" : ""}${r.dead || r.hp <= 0 ? " down" : ""}">
+        <span class="squad-dot" style="background:${r.color}"></span>
+        <span class="squad-name">${escapeHtml(r.name)}${r.me ? " (you)" : ""}</span>
+        <span class="squad-hp"><i style="width:${Math.round(r.hp)}%;background:${r.color}"></i></span>
+        <span class="squad-kills">${r.kills}</span>
+      </div>`).join("");
+  }
+  if (html !== squadHtml) {
+    squadHtml = html;
+    squadEl.innerHTML = html;
+  }
+}
+
+// ─── Lobby ────────────────────────────────────────────────────────────────────
+const lobby = new Lobby({
+  onSolo(name) {
+    myName = name;
+    lobby.hide();
+  },
+  async onCoop(name, room) {
+    myName = name;
+    const welcome = await net.connect(Net.defaultUrl(), name, room);
+    onConnected(welcome);
+    lobby.hide();
+  },
+});
+
 // ─── Main Loop ────────────────────────────────────────────────────────────────
 let _animRunning = false;
 const clock = new THREE.Clock();
@@ -1961,9 +2267,18 @@ function animate() {
   );
 
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
-  director?.update(delta);
-  if (zombieManager) zombieManager.update(delta);
+  if (net.isClient) {
+    // Co-op client: mirror the host's monsters instead of simulating them
+    monsterSync?.updatePuppets(delta, characterBody.position);
+    regenPlayerHealth(5 * delta);
+  } else {
+    director?.update(delta);
+    if (zombieManager) zombieManager.update(delta);
+  }
   enemyFire.update(delta);
+  remotePlayers.update(delta, camera, FEET_OFFSET);
+  netTick(delta);
+  updateSquad(delta);
 
   updateThirdPersonCamera(delta);
   updateSoldier(delta);
@@ -2047,13 +2362,11 @@ async function boot() {
       linDamping: MONSTER_LIN_DAMPING,
       angDamping: MONSTER_ANG_DAMPING,
       playerRadius: CHARACTER_RADIUS,
-      getPlayerBody: () => characterBody,
-      canAttackPlayer: () => playerHealth > 0,
-      dealDamageToPlayer,
+      getTargets,
+      onPlayerHit,
       regenPlayerHealth,
       enemyFire,
       sfx,
-      getVisibility: playerVisibility,
     });
 
     // Soldier, zombies and the world download + parse in parallel
@@ -2066,16 +2379,23 @@ async function boot() {
 
     director = new LevelDirector({
       manager: zombieManager,
-      getPlayerPos: () => characterBody.position,
+      // Spawns gather around a random living player
+      getPlayerPos: () => {
+        const alive = getTargets().filter(t => t.alive);
+        return (alive.length ? alive[(Math.random() * alive.length) | 0] : localTarget).pos;
+      },
       onLevelStart,
       onLevelCleared,
       onBossSpawn,
     });
     zombieManager.onKill = zombie => {
-      killsThisLife++;
+      // Kill credit goes to whoever landed the last hit
+      if (zombie.lastHitBy === null || zombie.lastHitBy === localTarget.id) killsThisLife++;
+      else net.send({ t: "kill", to: zombie.lastHitBy, n: zombie.netId });
       rollZombieDrop(zombie);
       director.onKill(zombie);
     };
+    monsterSync = new MonsterSync(zombieManager, enemyFire);
     zombieManager.onSpotted = () => {
       // Sting only when the first monster notices you
       if (zombieManager.chasingCount === 0) sfx.spotted();
@@ -2102,6 +2422,7 @@ async function boot() {
     window.inventory = inventory;
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
+    lobby.show();
     loadingScreen.classList.add("hidden");
     loadingScreen.addEventListener("transitionend", () => loadingScreen.remove(), { once: true });
   } catch (err) {
