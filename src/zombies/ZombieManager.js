@@ -39,10 +39,14 @@ const MARKER_RANGE     = 55;
 // ─── Distance tiers (see CLAUDE.md performance rules) ─────────────────────────
 const FAR_TIER  = 80;
 
-const DEATH_CLIPS = ["death1", "death2", "death3"];
-const PAIN_CLIPS  = ["pain1", "pain2", "pain3"];
+// ─── Creatures (hound / dragon) ───────────────────────────────────────────────
+const PACK_RADIUS     = 34;   // a hound that spots you calls the pack within this
+const FLY_LERP        = 1.1;  // altitude change rate (exp-blend)
+const FALL_GRAVITY    = 18;   // dead flyers drop out of the sky
+const ROLL_TIME       = 0.45; // procedural death: time to keel over
 
 const byPriority = (a, b) => a.priority - b.priority;
+const pick = list => list[(Math.random() * list.length) | 0];
 const _eyeFrom = new CANNON.Vec3();
 const _eyeTo = new CANNON.Vec3();
 const _eyeRes = new CANNON.RaycastResult();
@@ -71,7 +75,7 @@ export class ZombieManager {
   constructor({
     scene, world, monsterMaterial, linDamping, angDamping,
     playerRadius, getTargets, onPlayerHit, regenPlayerHealth,
-    enemyFire, sfx,
+    enemyFire, sfx, loadGLB,
   }) {
     this.world = world;
     this.playerRadius = playerRadius;
@@ -83,22 +87,43 @@ export class ZombieManager {
     this._targets = [];
     this._netId = 0;
 
-    this.pool = new MonsterPools({ scene, world, monsterMaterial, linDamping, angDamping });
+    this.pool = new MonsterPools({ scene, world, monsterMaterial, linDamping, angDamping, loadGLB });
     this.settings = { enableAI: true };
 
     this.kills = 0;
     this.chasingCount = 0;
     this.aliveCount = 0;
-    this.boss = null;          // the living Warlord, for the HUD
+    this.boss = null;          // the living Warlord (or dragon), for the HUD bar
+    this.scentMul = 1;         // rain washes scent out (set by main.js)
     // Hooks (set by main.js / the level director)
     this.onKill = null;        // (monster)
     this.onSpotted = null;     // (monster) first time a monster spots the player
     this.onDoorBang = null;    // (x, z)
+    this.onCrash = null;       // (monster) a dead flyer hit the ground
     this.navigate = null;      // (zx, zz, tx, tz, out, big) → 0 | 1 | 2
     this.canSpawnAt = null;    // (x, z) → bool
 
     this._chasers = [];
     this._roleTimer = 0;
+    this._time = 0;
+  }
+
+  _localDist(x, z) {
+    const me = this._localTarget();
+    return me ? Math.hypot(me.pos.x - x, me.pos.z - z) : 30;
+  }
+
+  /** True if a bullet hitting world point p struck the head. */
+  isHeadshot(m, p, headHeight) {
+    if (m.headSphere) {
+      const h = m.headSphere;
+      const r = THREE.MathUtils.degToRad(m.rotY);
+      const hx = m.body.position.x + Math.sin(r) * h.z;
+      const hz = m.body.position.z + Math.cos(r) * h.z;
+      const hy = m.root.position.y + h.y;
+      return Math.hypot(p.x - hx, p.y - hy, p.z - hz) < h.r * 1.2;
+    }
+    return p.y - m.root.position.y > m.height - headHeight * (m.height / 2.43);
   }
 
   _nearestTarget(x, z, onlyAlive = true) {
@@ -167,8 +192,10 @@ export class ZombieManager {
     m.shotsLeft = 0;
     m.aimX = x; m.aimY = 1; m.aimZ = z;
     m.strafeTimer = 0;
+    m.pounceCd = 1 + Math.random() * 2;
+    m.pounceT = 0;
     if (opts.hunting) this._investigate(m, m.homeX, m.homeZ);
-    if (def.boss) this.boss = m;
+    if (def.boss || def.bossBar) this.boss = m;
     return m;
   }
 
@@ -207,13 +234,15 @@ export class ZombieManager {
     }
     const heavy = m.def.bigBody;
     m.staggerTimer = heavy ? STAGGER_TIME * 0.3 : STAGGER_TIME;
+    if (m.pounceT > 0) return false; // mid-leap: no flinch, no shove
     const pushK = heavy ? 0.25 : 1;
     m.body.velocity.x += pushX * pushK;
     m.body.velocity.z += pushZ * pushK;
-    if (!heavy || Math.random() < 0.2) {
+    const pains = m.kind.painClips;
+    if (pains.length && (!heavy || Math.random() < 0.2)) {
       if (m.currentAnim !== "attack" || m.animLockTimer <= 0) {
         m.animLockTimer = 0;
-        this._setAnimation(m, PAIN_CLIPS[(Math.random() * PAIN_CLIPS.length) | 0], 0.3);
+        this._setAnimation(m, pick(pains), 0.3);
       }
     }
     return false;
@@ -238,7 +267,21 @@ export class ZombieManager {
     m.body.collisionFilterGroup = GROUP_NONE;
     m.body.velocity.set(0, 0, 0);
     m.animLockTimer = 0;
-    this._setAnimation(m, DEATH_CLIPS[(Math.random() * DEATH_CLIPS.length) | 0], 99);
+    m.pounceT = 0;
+    const deaths = m.kind.deathClips;
+    if (deaths.length) {
+      this._setAnimation(m, pick(deaths), 99);
+    } else {
+      // No death clip: flinch, freeze, then keel over (flyers drop out of the sky first)
+      m.deathStyle = m.def.flying ? "fall" : "roll";
+      m.deathT = 0;
+      m.rollT = 0;
+      m.fallV = 0;
+      m.rollSide = Math.random() < 0.5 ? -1 : 1;
+      if (m.kind.painClips.length) this._setAnimation(m, m.kind.painClips[0], 99);
+      if (m.def.voice === "dragon") this.sfx?.dragonRoar(this._localDist(m.body.position.x, m.body.position.z), true);
+      else if (m.def.voice === "hound") this.sfx?.yelp(this._localDist(m.body.position.x, m.body.position.z));
+    }
     if (this.boss === m) this.boss = null;
     this.kills++;
     this.onKill?.(m);
@@ -284,20 +327,32 @@ export class ZombieManager {
     m.boredTimer = 0;
   }
 
-  _spot(m, x, z, target = null) {
+  /** quiet: a pack member answering the call (no extra howl). */
+  _spot(m, x, z, target = null, quiet = false) {
     if (m.state === "chase" || m.state === "alert" || m.dying) return;
+    const def = m.def;
     m.target = target ?? this._nearestTarget(x, z);
     m.state = "alert";
-    m.stateTimer = m.def.boss ? 1.2 : SPOT_TIME;
+    m.stateTimer = def.boss || def.flying ? 1.2 : def.pack ? 0.35 : SPOT_TIME;
     m.lastX = x; m.lastZ = z;
     m.lostTimer = 0;
     m.awareness = 1;
     m.markerTimer = 1.6;
     m.animLockTimer = 0;
     if (m.actions.point && Math.random() < 0.6) this._setAnimation(m, "point", m.stateTimer);
-    const me = this._localTarget();
-    if (me) this.sfx?.growl(Math.hypot(me.pos.x - m.body.position.x, me.pos.z - m.body.position.z), !!m.def.bigBody);
+    const d = this._localDist(m.body.position.x, m.body.position.z);
+    if (def.voice === "hound") { if (!quiet) this.sfx?.howl(d); }
+    else if (def.voice === "dragon") this.sfx?.dragonRoar(d);
+    else this.sfx?.growl(d, !!def.bigBody);
     this.onSpotted?.(m);
+    // Pack hunters: one spots you, the rest nearby come running
+    if (def.pack) {
+      const p = m.body.position;
+      for (const o of this.pool.active) {
+        if (o === m || o.type !== m.type || o.dying) continue;
+        if (Math.hypot(o.body.position.x - p.x, o.body.position.z - p.z) < PACK_RADIUS) this._spot(o, x, z, m.target, true);
+      }
+    }
   }
 
   /** t: a target. Returns 0 if unseen, else how clearly (0..1.5). */
@@ -319,11 +374,20 @@ export class ZombieManager {
         peripheral = 0.35; // something moved at the edge of vision
       }
     }
-    _eyeFrom.set(p.x, def.height * 0.85, p.z);
+    _eyeFrom.set(p.x, m.flyY + def.height * 0.85, p.z);
     _eyeTo.set(pp.x, pp.y + 0.4, pp.z);
     _eyeRes.reset();
     if (this.world.raycastClosest(_eyeFrom, _eyeTo, losOpts, _eyeRes)) return 0;
     return peripheral * (1.5 - dist / range);
+  }
+
+  /** Scent: the nearest living player within the type's scent radius (walls and darkness don't matter). */
+  _smell(m) {
+    const r = (m.def.scent ?? 0) * this.scentMul;
+    if (r <= 0) return null;
+    const p = m.body.position;
+    const t = this._nearestTarget(p.x, p.z);
+    return t && Math.hypot(t.pos.x - p.x, t.pos.z - p.z) < r ? t : null;
   }
 
   _sense(m, tick) {
@@ -343,7 +407,7 @@ export class ZombieManager {
       const pp = t.pos;
       const dist = Math.hypot(pp.x - p.x, pp.z - p.z);
       m.hasLOS = this._canSee(m, t, true) > 0;
-      if (m.hasLOS || dist < TOUCH_RADIUS) {
+      if (m.hasLOS || dist < TOUCH_RADIUS || this._smell(m) === t) {
         m.lastX = pp.x; m.lastZ = pp.z;
         m.lostTimer = 0;
       } else {
@@ -359,6 +423,14 @@ export class ZombieManager {
     }
     if (m.state === "alert") return;
     m.hasLOS = false;
+    // Scent builds awareness fast and leads the way, even blind
+    const scent = this._smell(m);
+    if (scent) {
+      m.awareness += tick * 1.6;
+      if (m.awareness >= 1) { this._spot(m, scent.pos.x, scent.pos.z, scent); return; }
+      if (m.state === "wander") this._investigate(m, scent.pos.x, scent.pos.z);
+      else { m.goalX = scent.pos.x; m.goalZ = scent.pos.z; }
+    }
     // Whoever is closest or most visible
     let seen = 0, best = null;
     for (const t of this._targets) {
@@ -373,7 +445,7 @@ export class ZombieManager {
       if (m.awareness >= 1) { this._spot(m, pp.x, pp.z, best); return; }
       if (m.awareness > 0.4 && m.state === "wander") this._investigate(m, pp.x, pp.z);
       else if (m.state !== "wander") { m.goalX = pp.x; m.goalZ = pp.z; }
-    } else {
+    } else if (!scent) {
       m.awareness = Math.max(0, m.awareness - 0.25 * tick);
     }
   }
@@ -417,15 +489,28 @@ export class ZombieManager {
     v.z += (dz - v.z) * blend;
   }
 
+  /** Run-clip speed for a ground speed v. GLB creatures say at what speed their clip plays at 1×. */
+  _runRate(m, v, lo = 0.3, hi = 1.6) {
+    const ref = m.def.runRef;
+    return ref ? THREE.MathUtils.clamp(v / ref, 0.6, 1.5) : THREE.MathUtils.clamp(v / 2.8, lo, hi) * 0.6;
+  }
+
+  /** Walk / run / idle for a ground speed v (walk only for types with a walk clip). */
+  _locomotion(m, v, idle = "stand") {
+    const def = m.def;
+    if (v <= 0.3) { this._setAnimation(m, idle); return; }
+    if (m.actions.walk && v < def.walkMax) {
+      this._setAnimation(m, "walk");
+      m.actions.walk.setEffectiveTimeScale(THREE.MathUtils.clamp(v / def.walkRef, 0.5, 1.6));
+      return;
+    }
+    this._setAnimation(m, "run");
+    this._setRunRate(m, this._runRate(m, v));
+  }
+
   _runAnim(m) {
     if (m.staggerTimer > 0) return;
-    const v = Math.hypot(m.body.velocity.x, m.body.velocity.z);
-    if (v > 0.3) {
-      this._setAnimation(m, "run");
-      this._setRunRate(m, THREE.MathUtils.clamp(v / 2.8, 0.3, 1.6) * 0.6);
-    } else {
-      this._setAnimation(m, "stand");
-    }
+    this._locomotion(m, Math.hypot(m.body.velocity.x, m.body.velocity.z));
   }
 
   /**
@@ -435,7 +520,7 @@ export class ZombieManager {
    */
   _moveTo(m, tx, tz, speed, delta, bangDoors) {
     const p = m.body.position;
-    if (this.navigate) {
+    if (this.navigate && !m.def.flying) {
       m.navTimer -= delta;
       const moved = Math.abs(m.navTarget.x - tx) + Math.abs(m.navTarget.z - tz) > 1.5;
       if (m.navTimer <= 0 || moved) {
@@ -469,7 +554,7 @@ export class ZombieManager {
     const s = speed * (m.staggerTimer > 0 ? 0.25 : 1);
     const k = d > 1e-4 ? Math.min(s, d * 3) / d : 0;
     this._steer(m, dx * k + m.sepX, dz * k + m.sepZ, delta);
-    if (d > 0.05) this._faceTowards(m, dx, dz, delta, 8);
+    if (d > 0.05) this._faceTowards(m, dx, dz, delta, m.def.flying ? 2.5 : 8);
     this._runAnim(m);
     return m.nav;
   }
@@ -564,6 +649,7 @@ export class ZombieManager {
     const tracking = m.hasLOS || m.lostTimer < 1.5;
     const tx = tracking ? pp.x : m.lastX;
     const tz = tracking ? pp.z : m.lastZ;
+    if (m.pounceT > 0 && this._updatePounce(m, delta)) return;
     // Route around buildings / through doors first
     if (this.navigate) {
       m.navTimer -= delta;
@@ -584,6 +670,7 @@ export class ZombieManager {
     const dist = Math.hypot(dx, dz);
     const nx = dist > 1e-4 ? dx / dist : 0;
     const nz = dist > 1e-4 ? dz / dist : 0;
+    if (m.def.pounce && tracking && m.hasLOS && this._tryPounce(m, dist, nx, nz)) return;
     const ring = m.isAttacker ? m.engageRadius : m.engageRadius + WAIT_RING_OFFSET;
     const err = dist - ring;
     const speed = m.speed * (m.staggerTimer > 0 ? 0.25 : 1);
@@ -600,20 +687,68 @@ export class ZombieManager {
     if (tracking && m.isAttacker && this._meleeAttack(m, delta, dist, nx, nz)) return;
     if (m.staggerTimer <= 0) {
       const v = Math.hypot(m.body.velocity.x, m.body.velocity.z);
-      if (v > 0.35) {
+      if (v > 0.35 && !m.actions.walk) {
         this._setAnimation(m, "run");
-        this._setRunRate(m, THREE.MathUtils.clamp(v / 2.8, 0.35, 1.8) * 0.6);
+        this._setRunRate(m, this._runRate(m, v, 0.35, 1.8));
       } else {
-        this._setAnimation(m, m.taunts && m.actions.taunt ? "taunt" : "stand");
+        this._locomotion(m, v, m.taunts && m.actions.taunt ? "taunt" : "stand");
       }
     }
+  }
+
+  // ── Pounce (hounds) ─────────────────────────────────────────────────────────
+
+  _tryPounce(m, dist, nx, nz) {
+    const pc = m.def.pounce;
+    if (m.pounceCd > 0 || m.staggerTimer > 0 || dist < pc.min || dist > pc.max) return false;
+    m.pounceT = pc.time;
+    m.pounceX = nx; m.pounceZ = nz;
+    m.pounceHit = false;
+    m.rotY = THREE.MathUtils.radToDeg(Math.atan2(nx, nz));
+    m.animLockTimer = 0;
+    this._setAnimation(m, "jump", pc.time);
+    const jump = m.actions.jump;
+    jump?.setEffectiveTimeScale(jump.getClip().duration / (pc.time * 1.6));
+    this.sfx?.snarl(this._localDist(m.body.position.x, m.body.position.z));
+    return true;
+  }
+
+  /** The leap: flies straight along the launch direction and bites once on contact. */
+  _updatePounce(m, delta) {
+    const pc = m.def.pounce;
+    m.pounceT -= delta;
+    m.body.wakeUp();
+    m.body.velocity.x = m.pounceX * pc.speed;
+    m.body.velocity.z = m.pounceZ * pc.speed;
+    const t = m.target;
+    if (!m.pounceHit && t?.alive) {
+      const p = m.body.position;
+      const dx = t.pos.x - p.x, dz = t.pos.z - p.z;
+      const d = Math.hypot(dx, dz);
+      if (d < m.engageRadius + 0.45) {
+        m.pounceHit = true;
+        const inv = d > 1e-4 ? 1 / d : 0;
+        this.onPlayerHit(t, pc.damage * m.damageMul, dx * inv * pc.knock, dz * inv * pc.knock, 0.6, p.x, p.z);
+        m.pounceT = Math.min(m.pounceT, 0.12); // land on them, don't sail through
+      }
+    }
+    if (m.pounceT <= 0) {
+      m.pounceT = 0;
+      m.pounceCd = pc.cooldown[0] + Math.random() * (pc.cooldown[1] - pc.cooldown[0]);
+      m.animLockTimer = 0;
+      m.body.velocity.x *= 0.2;
+      m.body.velocity.z *= 0.2;
+    }
+    return true;
   }
 
   _muzzlePos(m, out) {
     const r = THREE.MathUtils.degToRad(m.rotY);
     const fx = Math.sin(r), fz = Math.cos(r);
-    const s = m.height / 2.43;
     const p = m.body.position;
+    const mz = m.def.muzzle;
+    if (mz) return out.set(p.x + fx * mz.z, m.flyY + mz.y, p.z + fz * mz.z); // mouth (dragon)
+    const s = m.height / 2.43;
     // Gun sits forward and to the monster's right, at chest height
     return out.set(p.x + fx * 0.55 * s - fz * 0.22 * s, m.height * 0.6, p.z + fz * 0.55 * s + fx * 0.22 * s);
   }
@@ -650,12 +785,17 @@ export class ZombieManager {
     if (dist > band.max) radial = Math.min(m.speed, (dist - band.max) * 2);
     else if (dist < band.min) radial = -Math.min(m.speed, (band.min - dist) * 2);
     m.strafeTimer -= delta;
-    if (m.strafeTimer <= 0) { m.strafeTimer = 1.5 + Math.random() * 2.5; m.circleDir *= Math.random() < 0.6 ? -1 : 1; }
+    if (m.strafeTimer <= 0) {
+      m.strafeTimer = def.flying ? 5 + Math.random() * 4 : 1.5 + Math.random() * 2.5;
+      m.circleDir *= Math.random() < 0.6 ? -1 : 1;
+    }
     const firing = m.gunPhase !== "cool";
-    const strafe = (firing ? 0.6 : 1.4) * m.circleDir;
+    // Flyers orbit wide and only face you to breathe; walkers sidestep
+    const strafe = (def.flying ? m.speed * (firing ? 0.35 : 0.9) : firing ? 0.6 : 1.4) * m.circleDir;
     this._steer(m, nx * radial - nz * strafe + m.sepX, nz * radial + nx * strafe + m.sepZ, delta);
     m.body.wakeUp();
-    this._faceTowards(m, dx, dz, delta, firing ? 12 : 8);
+    if (def.flying && !firing) this._faceTowards(m, m.body.velocity.x, m.body.velocity.z, delta, 2.5);
+    else this._faceTowards(m, dx, dz, delta, def.flying ? 4 : firing ? 12 : 8);
 
     // Aim lags behind the target: moving targets are harder to hit
     const lag = 1 - Math.exp(-4 * delta);
@@ -705,11 +845,11 @@ export class ZombieManager {
     for (const z of list) { z.sepX = 0; z.sepZ = 0; }
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
-      if (a.dying || a.distXZ > FAR_TIER) continue;
+      if (a.dying || a.distXZ > FAR_TIER || a.def.flying) continue;
       const ap = a.body.position;
       for (let j = i + 1; j < list.length; j++) {
         const b = list[j];
-        if (b.dying) continue;
+        if (b.dying || b.def.flying) continue;
         const sepR = a.capRadius + b.capRadius + SEPARATION_PADDING;
         const bp = b.body.position;
         let ox = ap.x - bp.x, oz = ap.z - bp.z;
@@ -738,20 +878,67 @@ export class ZombieManager {
     const body = m.body;
     body.velocity.set(0, 0, 0);
     body.position.y = m.visualOffY;
+    let lift = 0;
+    if (m.deathStyle) {
+      lift = this._proceduralDeath(m, delta);
+      if (m.flyY > 0) m.dieTimer = 0; // the corpse timer starts when it lands
+    }
     const sink = THREE.MathUtils.clamp((m.dieTimer - CORPSE_HOLD_TIME) / CORPSE_SINK_TIME, 0, 1);
-    m.root.position.set(body.position.x, -sink * CORPSE_SINK_DEPTH * (m.height / 2.43), body.position.z);
+    m.root.position.set(body.position.x, m.flyY + lift - sink * CORPSE_SINK_DEPTH * (m.height / 2.43), body.position.z);
     m.root.rotation.y = THREE.MathUtils.degToRad(m.rotY);
     return m.dieTimer >= CORPSE_HOLD_TIME + CORPSE_SINK_TIME;
   }
 
+  /**
+   * Death for models without a death clip: the flinch freezes, flyers drop
+   * and crash, then the body keels over onto its side. Returns the height to
+   * lift the root so the rolled body rests on the ground instead of in it.
+   */
+  _proceduralDeath(m, delta) {
+    m.deathT += delta;
+    if (m.deathT > 0.3) m.mixer.timeScale = 0;
+    if (m.flyY > 0) {
+      m.fallV -= FALL_GRAVITY * delta;
+      m.flyY = Math.max(0, m.flyY + m.fallV * delta);
+      m.bank += m.rollSide * delta * 1.5; // tumbling
+      m.root.rotation.z = m.bank;
+      if (m.flyY === 0) {
+        m.rollT = 0;
+        this.onCrash?.(m);
+      }
+      return 0;
+    }
+    m.rollT = (m.rollT ?? 0) + delta;
+    const k = Math.min(1, m.rollT / ROLL_TIME);
+    const roll = m.rollSide * (Math.PI / 2) * k * k;
+    m.root.rotation.z = m.bank + (roll - m.bank) * k;
+    return Math.abs(Math.sin(m.root.rotation.z)) * m.capRadius * 0.45;
+  }
+
   // Monsters walk on flat ground only; pinning Y means no amount of crowd
-  // pressure can lift one onto the player or another monster.
+  // pressure can lift one onto the player or another monster. Flyers hold
+  // their altitude (flyY) the same way.
   _pinToGround(m) {
     const body = m.body;
-    body.position.y = m.visualOffY;
+    body.position.y = m.visualOffY + m.flyY;
     body.velocity.y = 0;
-    m.root.position.set(body.position.x, 0, body.position.z);
+    m.root.position.set(body.position.x, m.flyY, body.position.z);
     m.root.rotation.y = THREE.MathUtils.degToRad(m.rotY);
+    m.root.rotation.z = m.bank;
+    this.pool.orient(m);
+  }
+
+  /** Altitude (cruise high, drop low to breathe fire) and banking into turns. */
+  _updateFlight(m, delta) {
+    const fl = m.def.flying;
+    const attacking = m.state === "chase" && m.gunPhase !== "cool";
+    const want = (attacking ? fl.dive : fl.altitude) + Math.sin(this._time * 0.9 + m.id) * 0.7;
+    m.flyY += (want - m.flyY) * (1 - Math.exp(-FLY_LERP * delta));
+    let turn = m.rotY - (m.prevRotY ?? m.rotY);
+    turn = ((turn + 540) % 360) - 180;
+    m.prevRotY = m.rotY;
+    const bank = THREE.MathUtils.clamp(-turn / Math.max(delta, 1e-3) * 0.012, -0.55, 0.55);
+    m.bank += (bank - m.bank) * (1 - Math.exp(-3 * delta));
   }
 
   _updateMarker(m, delta) {
@@ -764,7 +951,7 @@ export class ZombieManager {
     if (!show) return;
     m.marker.material = this.pool.markerMats[char];
     const bob = char === "!" ? Math.sin(m.markerTimer * 18) * 0.06 : 0;
-    m.marker.position.set(m.body.position.x, m.height + 0.45 + bob, m.body.position.z);
+    m.marker.position.set(m.body.position.x, m.flyY + m.height + 0.45 + bob, m.body.position.z);
     const s = (char === "!" ? 0.7 : 0.5) * Math.max(1, m.distXZ / 18);
     m.marker.scale.set(s, s, s);
   }
@@ -772,6 +959,7 @@ export class ZombieManager {
   update(delta) {
     const targets = this._targets = this.getTargets();
     if (!targets.length) return;
+    this._time += delta;
     this.enemyFire?.beginFrame();
 
     // 0. Corpses (iterate backwards: finished ones go back to the pool)
@@ -822,6 +1010,8 @@ export class ZombieManager {
       if (m.dying) continue;
       if (m.animLockTimer > 0) m.animLockTimer -= delta;
       if (m.staggerTimer > 0) m.staggerTimer -= delta;
+      if (m.pounceCd > 0) m.pounceCd -= delta;
+      if (m.pounceT > 0 && m.state !== "chase") m.pounceT = 0;
       if (m.flashTimer > 0) {
         m.flashTimer -= delta;
         if (m.flashTimer <= 0) m.mesh.material = m.burnTimer > 0 ? m.mats.burn : m.mats.base;
@@ -853,6 +1043,7 @@ export class ZombieManager {
             break;
         }
       }
+      if (m.def.flying) this._updateFlight(m, delta);
       this._pinToGround(m);
       this._updateMarker(m, delta);
 

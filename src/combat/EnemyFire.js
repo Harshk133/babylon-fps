@@ -75,6 +75,7 @@ export class EnemyFire {
     this._time = 0;
     this._visual = false;
     this.onFire = null;
+    this.onBoltImpact = null; // (gun, pos, visualOnly) — dragon fireballs set the ground alight
   }
 
   /** Distance from the local player (for sound volume). */
@@ -172,7 +173,8 @@ export class EnemyFire {
     b.direct = false;
     b.visual = this._visual;
     b.sprite.material.color.setHex(gun.color);
-    b.sprite.scale.setScalar(gun.radius * 5);
+    b.sprite.scale.setScalar(gun.radius * (gun.trail ? 4 : 5));
+    b.trailTimer = 0;
     b.sprite.position.copy(from);
     b.sprite.visible = true;
   }
@@ -183,6 +185,7 @@ export class EnemyFire {
     if (!explode) return;
     this.effects.impact(b.pos, 0, 1, 0, "dust", 8);
     const g = b.gun;
+    this.onBoltImpact?.(g, b.pos, b.visual);
     if (g.splash > 0 && !b.direct && !b.visual) {
       for (const t of this.getTargets()) {
         if (!t.alive) continue;
@@ -209,6 +212,18 @@ export class EnemyFire {
       _a.copy(b.pos);
       b.pos.addScaledVector(b.vel, delta);
       _b.copy(b.pos);
+      // Fireballs shed flames as they fly
+      if (b.gun.trail) {
+        b.trailTimer -= delta;
+        while (b.trailTimer <= 0) {
+          b.trailTimer += 0.012;
+          const s = b.gun.radius;
+          this.effects.flame(
+            b.pos.x + (Math.random() - 0.5) * s, b.pos.y + (Math.random() - 0.5) * s, b.pos.z + (Math.random() - 0.5) * s,
+            -b.vel.x * 0.08 + (Math.random() - 0.5), 0.8 + Math.random(), -b.vel.z * 0.08 + (Math.random() - 0.5),
+            0.25 + Math.random() * 0.2);
+        }
+      }
 
       // Players: closest approach of this step's segment to each player's axis
       let hitPlayer = false;

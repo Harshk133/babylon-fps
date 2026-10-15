@@ -73,6 +73,7 @@ export class Sfx {
   gunshot(kind = "smg", vol = 1) {
     const ctx = this.ctx;
     if (!ctx) return;
+    if (kind === "flame") { this.fireBreath(vol); return; }
     const p = GUN_PROFILES[kind] ?? GUN_PROFILES.smg;
     const t = ctx.currentTime;
     const hi = vol < 1 ? p.hi * (0.4 + 0.6 * vol) : p.hi;
@@ -257,5 +258,233 @@ export class Sfx {
 
   hurt() {
     this._blip(140, 0.15, 0.4, "sawtooth");
+  }
+
+  // ── Creatures ───────────────────────────────────────────────────────────────
+
+  /** A throaty voice: oscillator with vibrato through a lowpass, plus breath noise. */
+  _voice(t, { type = "sawtooth", f0, f1, f2 = null, dur, vol, vib = 20, vibDepth = 0.1, lp = 900, breath = 0.4, breathHz = 600 }) {
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f0, t);
+    if (f2) {
+      osc.frequency.linearRampToValueAtTime(f1, t + dur * 0.4);
+      osc.frequency.linearRampToValueAtTime(f2, t + dur);
+    } else {
+      osc.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    }
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = vib;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = f0 * vibDepth;
+    lfo.connect(lfoGain).connect(osc.frequency);
+    const filter = ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = lp;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + Math.min(0.12, dur * 0.2));
+    g.gain.setValueAtTime(vol, t + dur * 0.6);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    osc.connect(filter).connect(g).connect(this.master);
+    osc.start(t); lfo.start(t);
+    osc.stop(t + dur + 0.05); lfo.stop(t + dur + 0.05);
+    if (breath > 0) this._noise(t, dur * 0.9, "bandpass", breathHz, breathHz * 0.5, vol * breath);
+  }
+
+  /** Hellhound pack call: a rising, wavering howl. */
+  howl(distance = 0) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const v = 0.4 / (1 + distance * 0.035);
+    if (v < 0.02) return;
+    const base = 330 * (0.9 + Math.random() * 0.2);
+    this._voice(ctx.currentTime, {
+      type: "triangle", f0: base, f1: base * 1.6, f2: base * 1.2, dur: 1.7, vol: v,
+      vib: 6, vibDepth: 0.03, lp: 2200, breath: 0.25, breathHz: 1400,
+    });
+  }
+
+  /** Short snarl as a hound leaps. */
+  snarl(distance = 0) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const v = 0.5 / (1 + distance * 0.08);
+    if (v < 0.03) return;
+    this._voice(ctx.currentTime, { f0: 170, f1: 110, dur: 0.38, vol: v, vib: 34, vibDepth: 0.18, lp: 1400, breath: 0.7, breathHz: 900 });
+  }
+
+  /** Hound death. */
+  yelp(distance = 0) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const v = 0.4 / (1 + distance * 0.08);
+    if (v < 0.03) return;
+    this._voice(ctx.currentTime, { type: "triangle", f0: 900, f1: 380, dur: 0.32, vol: v, vib: 12, vibDepth: 0.05, lp: 3000, breath: 0.2, breathHz: 1800 });
+  }
+
+  /** Dragon roar (dying: higher and falling away). */
+  dragonRoar(distance = 0, dying = false) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const v = 0.85 / (1 + distance * 0.025);
+    if (v < 0.03) return;
+    const t = ctx.currentTime;
+    if (dying) {
+      this._voice(t, { f0: 160, f1: 40, dur: 2.2, vol: v, vib: 9, vibDepth: 0.2, lp: 700, breath: 0.8, breathHz: 500 });
+      return;
+    }
+    this._voice(t, { f0: 62, f1: 95, f2: 48, dur: 2.0, vol: v, vib: 14, vibDepth: 0.22, lp: 520, breath: 0.9, breathHz: 380 });
+    this._voice(t + 0.05, { type: "square", f0: 124, f1: 190, f2: 96, dur: 1.8, vol: v * 0.25, vib: 11, vibDepth: 0.15, lp: 900, breath: 0 });
+  }
+
+  /** Dragon fireball leaving the mouth. */
+  fireBreath(vol = 1) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    this._noise(t, 0.7, "bandpass", 300, 1400, 0.9 * vol);
+    this._noise(t, 0.5, "lowpass", 600, 120, 0.7 * vol);
+    this._sweep(t, 80, 40, 0.5, 0.5 * vol);
+  }
+
+  /** Something heavy hitting the ground (a dragon crashing). */
+  thud(distance = 0) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const v = 1.3 / (1 + distance * 0.04);
+    this._noise(t, 1.1, "lowpass", 700, 50, v);
+    this._sweep(t, 70, 22, 0.9, v);
+  }
+
+  heartbeat(vol = 0.5) {
+    if (!this.ctx) return;
+    this._blip(58, 0.13, vol, "sine");
+    this._blip(52, 0.16, vol * 0.8, "sine", 0.24);
+  }
+
+  /** Rolling thunder; close strikes crack first. */
+  thunder(strength = 1) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    if (strength > 0.7) this._noise(t, 0.35, "highpass", 2500, 800, 0.5 * strength);
+    this._noise(t + 0.05, 3.6, "lowpass", 380, 35, 1.2 * strength, 0.6);
+    this._noise(t + 0.4, 2.8, "lowpass", 220, 30, 0.8 * strength, 0.5);
+    this._sweep(t, 55, 28, 2.5, 0.5 * strength);
+  }
+
+  /** Something unpleasant in the distance (night ambience). */
+  stinger() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    switch ((Math.random() * 4) | 0) {
+      case 0: this.howl(70 + Math.random() * 40); break;
+      case 1: { // metal groan
+        const osc = ctx.createOscillator();
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime(70 + Math.random() * 40, t);
+        osc.frequency.linearRampToValueAtTime(120 + Math.random() * 60, t + 1.8);
+        const bp = ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = 600;
+        bp.Q.value = 9;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(0.06, t + 0.6);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 2.2);
+        osc.connect(bp).connect(g).connect(this.master);
+        osc.start(t);
+        osc.stop(t + 2.3);
+        break;
+      }
+      case 2: // whisper: breathy formant sweeps
+        for (let i = 0; i < 3; i++) this._noise(t + i * 0.28, 0.35, "bandpass", 1800 + Math.random() * 1200, 900, 0.07);
+        break;
+      default: // far-off scream
+        this._voice(t, { type: "triangle", f0: 700, f1: 1100, f2: 500, dur: 1.1, vol: 0.05, vib: 7, vibDepth: 0.04, lp: 2600, breath: 0.4, breathHz: 1500 });
+    }
+  }
+
+  // ── Ambience: rain, wind, drone ─────────────────────────────────────────────
+
+  _loopNoise(seconds) {
+    const ctx = this.ctx;
+    const len = Math.floor(ctx.sampleRate * seconds);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    return src;
+  }
+
+  _startAmbience() {
+    const ctx = this.ctx;
+    const a = this.amb = {};
+    // Rain: hiss + patter, muffled indoors
+    const rain = this._loopNoise(4.3);
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 400;
+    a.rainLP = ctx.createBiquadFilter();
+    a.rainLP.type = "lowpass";
+    a.rainLP.frequency.value = 7000;
+    a.rain = ctx.createGain();
+    a.rain.gain.value = 0;
+    rain.connect(hp).connect(a.rainLP).connect(a.rain).connect(this.master);
+    rain.start();
+    // Wind: low rumble that swells
+    const wind = this._loopNoise(5.1);
+    const wlp = ctx.createBiquadFilter();
+    wlp.type = "lowpass";
+    wlp.frequency.value = 320;
+    a.wind = ctx.createGain();
+    a.wind.gain.value = 0;
+    const swell = ctx.createOscillator();
+    swell.frequency.value = 0.09;
+    const swellGain = ctx.createGain();
+    swellGain.gain.value = 0.5;
+    const windAmp = ctx.createGain();
+    windAmp.gain.value = 0.6;
+    swell.connect(swellGain).connect(windAmp.gain);
+    wind.connect(wlp).connect(windAmp).connect(a.wind).connect(this.master);
+    wind.start();
+    swell.start();
+    // Drone: two detuned lows, only at night
+    a.drone = ctx.createGain();
+    a.drone.gain.value = 0;
+    const dlp = ctx.createBiquadFilter();
+    dlp.type = "lowpass";
+    dlp.frequency.value = 160;
+    for (const f of [49, 51.7, 73.4]) {
+      const o = ctx.createOscillator();
+      o.type = "sawtooth";
+      o.frequency.value = f;
+      o.connect(dlp);
+      o.start();
+    }
+    dlp.connect(a.drone).connect(this.master);
+    a.last = { rain: -1, wind: -1, night: -1, indoor: null };
+  }
+
+  /** rain / wind / night: 0..1; indoor muffles the rain. Cheap to call every frame. */
+  setAmbience(rain, wind, night, indoor) {
+    if (!this.ctx) return;
+    if (!this.amb) this._startAmbience();
+    const a = this.amb, l = a.last, t = this.ctx.currentTime;
+    const q = v => Math.round(v * 50) / 50;
+    if (q(rain) !== l.rain || indoor !== l.indoor) {
+      l.rain = q(rain);
+      l.indoor = indoor;
+      a.rain.gain.setTargetAtTime(l.rain * (indoor ? 0.16 : 0.28), t, 0.4);
+      a.rainLP.frequency.setTargetAtTime(indoor ? 700 : 7000, t, 0.2);
+    }
+    if (q(wind) !== l.wind) { l.wind = q(wind); a.wind.gain.setTargetAtTime(l.wind * 0.22, t, 0.8); }
+    if (q(night) !== l.night) { l.night = q(night); a.drone.gain.setTargetAtTime(l.night * 0.03, t, 1.5); }
   }
 }

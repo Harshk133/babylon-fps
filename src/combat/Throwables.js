@@ -7,7 +7,7 @@ import { GRENADE, MOLOTOV } from "./weapons.js";
 const POOL        = 8;
 const RADIUS      = 0.08;
 const HIDE_Y      = -500;
-const MAX_FIRES   = 3;
+const MAX_FIRES   = 5;        // molotovs + dragon fire
 const FIRE_LIGHTS = 2;        // persistent lights shared by the fires (each costs per-pixel)
 const ARC_POINTS  = 64;
 const ARC_STEP    = 1 / 30;
@@ -158,7 +158,15 @@ export class Throwables {
     b.sleep();
   }
 
-  _ignite(x, z, hitZombie, owner) {
+  /**
+   * Burning ground from something other than a molotov (dragon fireballs).
+   * hostile fires burn players but not monsters.
+   */
+  igniteAt(x, z, hostile = true) {
+    this._ignite(x, z, null, null, hostile);
+  }
+
+  _ignite(x, z, hitZombie, owner, hostile = false) {
     const f = this.fires.find(q => !q.active) ?? this.fires.reduce((a, b) => (a.time < b.time ? a : b));
     if (f.active) this._endFire(f);
     f.active = true;
@@ -168,6 +176,7 @@ export class Throwables {
     f.tick = 0;
     f.born = performance.now();
     f.owner = owner;
+    f.hostile = hostile;
     f.scorch.position.set(x, 0.02, z);
     f.scorch.material.opacity = 0.4;
     this.fireFX.ground(x, z, MOLOTOV.radius, MOLOTOV.duration);
@@ -182,6 +191,7 @@ export class Throwables {
     f.light = light;
     light.position.set(x, 1.2, z);
 
+    if (hostile) return;
     this.sfx.glassBreak();
     this.onIgnite?.(x, z, hitZombie, owner);
   }
@@ -241,7 +251,7 @@ export class Throwables {
       f.tick -= delta;
       while (f.tick <= 0) {
         f.tick += MOLOTOV.tick;
-        this.onFireTick?.(f.x, f.z, MOLOTOV.radius, MOLOTOV.tick, f.owner);
+        this.onFireTick?.(f.x, f.z, MOLOTOV.radius, MOLOTOV.tick, f.owner, f.hostile);
       }
     }
   }

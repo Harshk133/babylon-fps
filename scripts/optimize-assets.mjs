@@ -24,6 +24,8 @@ const MODELS = [
   { src: "public/models/autorickshaw_3d_model_free.glb",      ratio: 0.1,  error: 0.01, tex: 1024 },
   { src: "public/models/rusty_roof_wooden_house_1_3d_model_free.glb", ratio: 0.5, error: 0.004, tex: 1024 },
   { src: "public/models/dragon_gold.glb",                     ratio: 0.5,  error: 0.004, tex: 1024 },
+  // Hellhound: already low-poly; just WebP + quantize + meshopt
+  { src: "public/models/zombie_dog_animation.glb",            ratio: 1,    error: 0,     tex: 1024 },
   // Player: keep only the clips Soldier.js plays (24 → 8), no simplification
   {
     src: "public/models/soldier/soldier.glb", ratio: 1, error: 0, tex: 1024,

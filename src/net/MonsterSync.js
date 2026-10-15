@@ -12,6 +12,7 @@ export const WEAPON_LIST = Object.keys(WEAPON_MODELS);
 export const ANIMS = [
   "stand", "run", "attack", "pain1", "pain2", "pain3", "jump", "flip", "salute", "taunt",
   "wave", "point", "crstand", "crwalk", "crattack", "crpain", "crdeath", "death1", "death2", "death3",
+  "walk", // appended: indices are on the wire
 ];
 const ANIM_INDEX = Object.fromEntries(ANIMS.map((a, i) => [a, i]));
 const FIELDS = 12;
@@ -100,6 +101,8 @@ export class MonsterSync {
         if (!m.dying) {
           m.dying = true;
           m.body.collisionFilterGroup = GROUP_NONE;
+          m.deathT = 0;
+          m.rollSide = nid & 1 ? 1 : -1;
         }
       } else {
         alive++;
@@ -113,7 +116,7 @@ export class MonsterSync {
       m.health = d[i + 11];
       m.maxHealth = 100;
       if (m.state === "chase") chasing++;
-      if (m.def.boss && !m.dying) mgr.boss = m;
+      if ((m.def.boss || m.def.bossBar) && !m.dying) mgr.boss = m;
     }
     for (const [nid, m] of this.puppets) {
       if (!seen.has(nid)) {
@@ -138,13 +141,23 @@ export class MonsterSync {
       const b = m.body.position;
       b.x += (m.tx - b.x) * k;
       b.z += (m.tz - b.z) * k;
-      b.y = m.visualOffY;
+      // Flyers (and leaping hounds) carry their height in the snapshot's root y
+      m.flyY += (Math.max(0, m.ty) - m.flyY) * k;
+      b.y = m.visualOffY + m.flyY;
       m.body.aabbNeedsUpdate = true;
       let dr = (m.trot - m.rotY) % 360;
       if (dr > 180) dr -= 360; else if (dr < -180) dr += 360;
       m.rotY += dr * k;
-      m.root.position.set(b.x, m.ty, b.z);
+      mgr.pool.orient(m);
+      m.root.position.set(b.x, m.ty < 0 ? m.ty : m.flyY, b.z);
       m.root.rotation.y = THREE.MathUtils.degToRad(m.rotY);
+      // Models without a death clip keel over (the host does the same)
+      if (m.dying && !m.kind.deathClips.length) {
+        m.deathT += delta;
+        if (m.deathT > 0.3) m.mixer.timeScale = 0;
+        const roll = Math.min(1, m.deathT / 0.45);
+        if (m.flyY < 0.2) m.root.rotation.z = m.rollSide * (Math.PI / 2) * roll * roll;
+      }
       m.distXZ = Math.hypot(b.x - viewer.x, b.z - viewer.z);
       if (m.flashTimer > 0) {
         m.flashTimer -= delta;
@@ -158,7 +171,7 @@ export class MonsterSync {
       }
       m.marker.visible = m.showMarker && m.distXZ < 55;
       if (m.marker.visible) {
-        m.marker.position.set(b.x, m.height + 0.45, b.z);
+        m.marker.position.set(b.x, m.flyY + m.height + 0.45, b.z);
         const s = 0.6 * Math.max(1, m.distXZ / 18);
         m.marker.scale.set(s, s, s);
       }

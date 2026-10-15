@@ -6,7 +6,7 @@ const TRACER_LIFE     = 0.06;
 const PARTICLE_COUNT  = 400;
 const PARTICLE_HIDE_Y = -1000;
 const FLASH_LIFE      = 0.05;
-const FLAME_COUNT     = 200; // only the flying molotov rag uses these now
+const FLAME_COUNT     = 320; // the flying molotov rag and dragon fireball trails
 const BLAST_LIFE      = 0.35;
 
 const BLOOD = [new THREE.Color(0x7a0606), new THREE.Color(0xa00d0d), new THREE.Color(0x4a0303)];

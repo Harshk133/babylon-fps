@@ -17,6 +17,11 @@ import { EnemyFire } from "./combat/EnemyFire.js";
 import { LevelDirector } from "./zombies/LevelDirector.js";
 import { MONSTER_TYPES } from "./zombies/MonsterTypes.js";
 import { GameHUD } from "./ui/GameHUD.js";
+import { HealthBars } from "./ui/HealthBars.js";
+import { Environment } from "./world/Environment.js";
+import { Weather } from "./world/Weather.js";
+import { Atmosphere } from "./world/Atmosphere.js";
+import { plantDeadForest } from "./world/Forest.js";
 import { Net } from "./net/Net.js";
 import { RemotePlayers } from "./net/RemotePlayers.js";
 import { MonsterSync } from "./net/MonsterSync.js";
@@ -55,13 +60,15 @@ const SHADOW_FRUSTUM_SIZE = 25;
 
 // ─── World Scatter Settings ───────────────────────────────────────────────────
 const HOUSE_COUNT        = 2;
-const TREE_A_COUNT       = 2;
-const TREE_B_COUNT       = 1;
+const TREE_A_COUNT       = 5;
+const TREE_B_COUNT       = 4;
 
-const TREE_A_HEIGHT_MIN  = 10;
-const TREE_A_HEIGHT_MAX  = 16;
-const TREE_B_HEIGHT_MIN  = 8;
-const TREE_B_HEIGHT_MAX  = 13;
+// Tree sizes in player heights (the soldier is CHARACTER_HEIGHT = 1.8 m tall),
+// so a tree always reads as a tree next to the player: 4–9× is 7–16 m.
+const TREE_A_HEIGHT_MUL  = [5, 8.5];   // old tree with vines
+const TREE_B_HEIGHT_MUL  = [3.5, 6];   // driftwood
+const DEAD_TREE_COUNT    = 130;
+const DEAD_TREE_HEIGHT_MUL = [4, 8];
 
 const SCATTER_RADIUS_MIN = 18;
 const SCATTER_RADIUS_MAX = 200;
@@ -113,6 +120,13 @@ function updatePlayerHealthUI(delta) {
       healthFillEl.classList.toggle("critical", hp <= 30);
     }
     if (healthValEl) healthValEl.textContent = `${hp}`;
+    // The ECG races as you bleed
+    const beat = (0.42 + hp / 100 * 0.78).toFixed(2);
+    if (beat !== hudCache.beat) {
+      hudCache.beat = beat;
+      healthCardEl?.style.setProperty("--beat", `${beat}s`);
+      healthCardEl?.classList.toggle("flatline", hp <= 0);
+    }
   }
 
   if (timeSinceHit > 0.5) healthTrail += (playerHealth - healthTrail) * (1 - Math.exp(-4 * delta));
@@ -224,6 +238,8 @@ const deathKillsEl  = document.getElementById("death-kills");
 
 const ammoReserveEl = document.getElementById("ammo-reserve");
 const ammoWeaponEl  = document.getElementById("ammo-weapon");
+const ammoPipsEl    = document.getElementById("ammo-pips-fill");
+const healthCardEl  = document.querySelector(".health-card");
 
 const hud = {
   paused: true,
@@ -269,10 +285,13 @@ function updateCombatHUD(delta) {
     hud.weapon = inventory.current;
     hud.ammo = -1;
     if (ammoWeaponEl) ammoWeaponEl.textContent = def.short;
+    // One pip per round in the magazine
+    ammoCardEl?.style.setProperty("--pips", `${def.magSize}`);
   }
   if (slot.ammo !== hud.ammo) {
     hud.ammo = slot.ammo;
     if (ammoCountEl) ammoCountEl.textContent = `${slot.ammo}`;
+    if (ammoPipsEl) ammoPipsEl.style.clipPath = `inset(0 ${100 - (slot.ammo / def.magSize) * 100}% 0 0)`;
     const low = slot.ammo <= Math.max(1, def.magSize * 0.25);
     if (low !== hud.low) {
       hud.low = low;
@@ -340,31 +359,10 @@ function scatterPositions(count, rngFn, minR, maxR, minSep) {
 }
 
 // ─── Scene & Renderer ─────────────────────────────────────────────────────────
-const FOG_COLOR = 0xb08468;
-
+// Sky, fog colour/range and the lights are driven by the day/night cycle
+// (world/Environment.js); these are just the starting values.
 const scene = new THREE.Scene();
-scene.background = makeSkyTexture();
-scene.fog = new THREE.Fog(FOG_COLOR, 35, 190);
-
-// Dusk gradient mapped as an equirect background so the horizon tracks the view
-function makeSkyTexture() {
-  const c = document.createElement("canvas");
-  c.width = 4; c.height = 512;
-  const g = c.getContext("2d");
-  const grad = g.createLinearGradient(0, 0, 0, c.height);
-  grad.addColorStop(0.0,  "#1f2b44");
-  grad.addColorStop(0.3,  "#5d5a72");
-  grad.addColorStop(0.46, "#d99a68");
-  grad.addColorStop(0.5,  "#b08468");
-  grad.addColorStop(0.56, "#3a2e2a");
-  grad.addColorStop(1.0,  "#2a221f");
-  g.fillStyle = grad;
-  g.fillRect(0, 0, c.width, c.height);
-  const tex = new THREE.CanvasTexture(c);
-  tex.mapping = THREE.EquirectangularReflectionMapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
+scene.fog = new THREE.Fog(0xb08468, 35, 190);
 
 const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.5, 220);
 
@@ -586,9 +584,11 @@ world.addBody(groundBody);
 updateGroundChunks(0, 0);
 
 // ─── Lighting ─────────────────────────────────────────────────────────────────
-scene.add(new THREE.HemisphereLight(0x9fb4d8, 0x4a3a2c, 0.9));
-scene.add(new THREE.AmbientLight(0xffe2c8, 0.25));
-const sun = new THREE.DirectionalLight(0xffc48a, 2.4);
+// Colours and intensities are set every frame by the day/night cycle
+const hemiLight = new THREE.HemisphereLight(0x9fb4d8, 0x4a3a2c, 0.9);
+const ambientLight = new THREE.AmbientLight(0xffe2c8, 0.25);
+scene.add(hemiLight, ambientLight);
+const sun = new THREE.DirectionalLight(0xffc48a, 2.4); // the moon at night
 sun.position.set(6, 12, 4);
 sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024);
@@ -612,6 +612,20 @@ const sunTarget = new THREE.Object3D();
 scene.add(sunTarget);
 sun.target = sunTarget;
 scene.add(sun);
+
+// Flashlight (F): a spot from the camera along the aim. It's always in the
+// scene (intensity 0 when off) so toggling never recompiles shaders. At night
+// it's the difference between seeing and not, but monsters see it too.
+const FLASHLIGHT_INTENSITY = 160;
+const flashlight = new THREE.SpotLight(0xfff1d6, 0, 46, 0.42, 0.55, 1.6);
+flashlight.castShadow = false;
+scene.add(flashlight, flashlight.target);
+const torch = { on: false, manual: false, level: 0, hinted: false };
+
+const env = new Environment({ scene, renderer, lights: { hemi: hemiLight, ambient: ambientLight, sun } });
+const weather = new Weather(scene);
+const atmosphere = new Atmosphere(scene);
+const healthBars = new HealthBars(scene);
 
 // ─── Character Physics & Root ─────────────────────────────────────────────────
 const characterRoot = new THREE.Group();
@@ -719,6 +733,7 @@ function setKey(code, pressed, repeat) {
       case "KeyO": useDoor(true); break;
       case "KeyC": useDoor(false); break;
       case "KeyL": useLightSwitch(); break;
+      case "KeyF": toggleTorch(); break;
     }
   } else if (code === "KeyG") {
     releaseThrow();
@@ -890,9 +905,85 @@ function updateSoldier(delta) {
 // ─── Shadow / Camera ──────────────────────────────────────────────────────────
 function updateSunShadow() {
   const fx = characterBody.position.x, fz = characterBody.position.z;
+  const d = env.lightDir; // sun by day, moon by night
   sunTarget.position.set(fx, 0, fz);
-  sun.position.set(fx + 30, 22, fz + 18); // low evening sun → longer shadows
+  sun.position.set(fx + d.x * 40, d.y * 40, fz + d.z * 40);
   sun.shadow.camera.updateProjectionMatrix();
+}
+
+// ─── Flashlight, weather & mood ───────────────────────────────────────────────
+const _torchAim = new THREE.Vector3();
+let stingerTimer = 25;
+let heartTimer = 0;
+let wetness = 0;
+let indoor = false;
+const DRY_GROUND = { roughness: 0.95, color: new THREE.Color(0xffffff) };
+const WET_GROUND = { roughness: 0.45, color: new THREE.Color(0x8a8a8a) };
+
+function toggleTorch() {
+  torch.on = !torch.on;
+  torch.manual = true;
+  sfx.click();
+}
+
+function updateTorch(delta) {
+  // Comes on by itself as night falls, until you switch it yourself
+  if (!torch.manual) torch.on = env.darkness > 0.55;
+  if (env.darkness > 0.55 && !torch.hinted) {
+    torch.hinted = true;
+    inventoryUI.feed("Night falls. F toggles your flashlight (they can see it)", "info");
+  }
+  const want = torch.on && playerHealth > 0 ? 1 : 0;
+  torch.level += (want - torch.level) * (1 - Math.exp(-14 * delta));
+  // A faint flicker in the dark
+  const flicker = 1 - (Math.random() < 0.02 ? Math.random() * 0.4 : 0);
+  flashlight.intensity = FLASHLIGHT_INTENSITY * torch.level * flicker;
+  // From the soldier's chest along the aim: starting at the camera would
+  // floodlight the soldier's back
+  camera.getWorldDirection(_torchAim);
+  flashlight.position.copy(camPivot).addScaledVector(camRight, 0.15).addScaledVector(_torchAim, 0.6);
+  flashlight.position.y -= 0.2;
+  flashlight.target.position.copy(flashlight.position).addScaledVector(_torchAim, 12);
+  flashlight.target.updateMatrixWorld();
+}
+
+function updateMood(delta) {
+  indoor =!!houses?.houseAt(camera.position.x, camera.position.z);
+  env.update(delta, camera, weather);
+  weather.update(delta, camera.position, indoor);
+  atmosphere.update(delta, camera.position, {
+    mist: Math.max(env.darkness * 0.8, weather.rain * 0.6),
+    fogColor: scene.fog.color,
+    wind: weather.wind,
+    rain: weather.rain,
+  });
+  healthBars.update(delta, zombieManager?.active ?? [], characterBody.position);
+  updateTorch(delta);
+
+  // Rain soaks the ground (darker, glossier); it dries slowly
+  wetness += ((weather.rain > 0.15 ? 1 : 0) - wetness) * (1 - Math.exp(-(weather.rain > 0.15 ? 0.08 : 0.02) * delta));
+  planeMaterial.roughness = THREE.MathUtils.lerp(DRY_GROUND.roughness, WET_GROUND.roughness, wetness);
+  planeMaterial.color.copy(DRY_GROUND.color).lerp(WET_GROUND.color, wetness);
+  // Rain hides your scent from the hounds
+  if (zombieManager) zombieManager.scentMul = 1 - weather.rain * 0.35;
+
+  sfx.setAmbience(weather.rain, Math.min(1, weather.wind / 4.5), env.darkness, indoor);
+  // Things in the dark
+  stingerTimer -= delta;
+  if (stingerTimer <= 0) {
+    stingerTimer = 18 + Math.random() * 30;
+    if (env.darkness > 0.6 && playerHealth > 0) sfx.stinger();
+  }
+  // Heartbeat when hurt
+  if (playerHealth > 0 && playerHealth < 35) {
+    heartTimer -= delta;
+    if (heartTimer <= 0) {
+      heartTimer = 0.55 + playerHealth / 60;
+      sfx.heartbeat(0.25 + (35 - playerHealth) / 70);
+    }
+  }
+  gameHud.setWorld(env.timeLabel, env.phase, weather.label, torch.on, env.bloodMoon && env.darkness > 0.6);
+  gameHud.setDarkness(env.darkness);
 }
 
 function rigValue(key) {
@@ -1099,8 +1190,9 @@ function fireShot(def) {
 
     const zombie = _shotResult.body.zombie;
     if (zombie && zombieManager) {
-      const headshot = _hitPoint.y > zombie.height - HEAD_HEIGHT * (zombie.height / 2.43);
+      const headshot = zombieManager.isHeadshot(zombie, _hitPoint, HEAD_HEIGHT);
       const damage = def.damage * (headshot ? def.headshotMultiplier : 1);
+      zombie.killCause = headshot ? "head" : "gun";
       const killed = hitMonster(zombie, damage, _shotDir.x * def.push, _shotDir.z * def.push);
       const blood = def.pellets > 1 ? 4 : headshot ? 22 : 10;
       effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", blood);
@@ -1223,6 +1315,7 @@ function onGrenadeExplode(pos, owner = null) {
     const f = (1 - d / R) * shield;
     const dmg = THREE.MathUtils.lerp(GRENADE.minDamage, GRENADE.maxDamage, f) * shield;
     const inv = d > 1e-3 ? 1 / d : 0;
+    z.killCause = "blast";
     const killed = zombieManager.damage(z, dmg, dx * inv * GRENADE.push * f, dz * inv * GRENADE.push * f, by);
     anyHit = true;
     anyKill ||= killed;
@@ -1250,13 +1343,15 @@ function onGrenadeExplode(pos, owner = null) {
 const BURN_TIME_TOUCH  = 6;
 const BURN_TIME_DIRECT = 9;
 
-function onFireTick(x, z, r, dt, owner = null) {
+/** hostile: dragon fire (burns players, not monsters). */
+function onFireTick(x, z, r, dt, owner = null, hostile = false) {
   const r2 = r * r;
   const by = owner ?? localTarget.id;
-  for (const zb of net.isClient ? [] : zombieManager?.active ?? []) {
-    if (zb.dying) continue;
+  for (const zb of net.isClient || hostile ? [] : zombieManager?.active ?? []) {
+    if (zb.dying || zb.def.flying) continue;
     const dx = zb.body.position.x - x, dz = zb.body.position.z - z;
     if (dx * dx + dz * dz < r2) {
+      zb.killCause = "fire";
       zombieManager.ignite(zb, BURN_TIME_TOUCH, by);
       zombieManager.damage(zb, MOLOTOV.zombieDps * dt * 0.35, 0, 0, by);
     }
@@ -1390,13 +1485,17 @@ function spawnDrop(k, x, z, life) {
   net.send({ t: "drop", k, x: +x.toFixed(2), z: +z.toFixed(2), l: life });
 }
 
+const BOSS_STASH   = ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov"];
+const DRAGON_STASH = ["medkit", "medkit", "ammo", "ammo", "ammo", "grenade"];
+
 function rollZombieDrop(zombie) {
   const p0 = zombie.body.position;
-  if (zombie.def.boss) {
-    // The Warlord drops a stash
-    ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov"].forEach((k, i) => {
-      const a = (i / 8) * Math.PI * 2;
-      spawnDrop(k, p0.x + Math.cos(a) * 2.2, p0.z + Math.sin(a) * 2.2, DROP_LIFETIME * 2);
+  const stash = zombie.def.boss ? BOSS_STASH : zombie.def.bossBar ? DRAGON_STASH : null;
+  if (stash) {
+    // The Warlord and dragons drop a stash
+    stash.forEach((k, i) => {
+      const a = (i / stash.length) * Math.PI * 2;
+      spawnDrop(k, p0.x + Math.cos(a) * 2.6, p0.z + Math.sin(a) * 2.6, DROP_LIFETIME * 2);
     });
     return;
   }
@@ -1508,7 +1607,7 @@ const pickups = new Pickups(scene);
 const fireFX = new FireFX(scene);
 const gameHud = new GameHUD();
 
-// Monster gunfire (gunners, Warlord plasma). Walls block it; windows don't.
+// Monster gunfire (gunners, Warlord plasma, dragon fire). Walls block it; windows don't.
 const enemyFire = new EnemyFire({
   scene,
   world,
@@ -1517,6 +1616,18 @@ const enemyFire = new EnemyFire({
   getTargets,
   onHitPlayer: (target, dmg, sx, sz) => onPlayerHit(target, dmg, 0, 0, 0.18, sx, sz),
 });
+enemyFire.onBoltImpact = (gun, pos) => onBoltImpact(gun, pos);
+
+weather.onThunder = strength => {
+  sfx.thunder(strength);
+  cameraTrauma = Math.min(1, cameraTrauma + strength * 0.12);
+};
+env.onNightfall = blood => {
+  if (playerHealth <= 0) return;
+  if (blood) gameHud.showBanner({ title: "BLOOD MOON", sub: "Night falls", text: "Something is wrong with the moon tonight.", color: "#ff3a22", duration: 4.5 });
+  else gameHud.showBanner({ title: "NIGHTFALL", sub: "Stay in the light", color: "#8ea4d8", duration: 3 });
+  sfx.howl(80);
+};
 
 // ─── Player noise & visibility (what the monsters sense) ──────────────────────
 let stepTimer = 0;
@@ -1540,17 +1651,23 @@ function updatePlayerNoise(delta) {
   stepTimer -= delta;
   if (stepTimer <= 0) {
     stepTimer = step[1];
-    makeNoise(characterBody.position.x, characterBody.position.z, step[0], "step");
+    // Rain drowns out footsteps
+    makeNoise(characterBody.position.x, characterBody.position.z, step[0] * (1 - weather.rain * 0.35), "step");
   }
 }
 
-/** Sight multiplier for monsters: sprinting stands out, a dark house hides you. */
+/**
+ * Sight multiplier for monsters: sprinting stands out, a dark house hides
+ * you, night hides you unless your flashlight is on, rain blurs everything.
+ */
 function playerVisibility() {
   let v = 1;
   if (sprinting) v *= 1.25;
   else if (Math.hypot(moveVelocity.x, moveVelocity.z) < 0.5) v *= 0.85;
   const h = houses?.houseAt(characterBody.position.x, characterBody.position.z);
   if (h && !h.lightOn) v *= 0.45;
+  v *= 1 - env.darkness * (torch.level > 0.5 ? 0.1 : 0.5);
+  v *= 1 - weather.rain * 0.25;
   return v;
 }
 
@@ -1597,12 +1714,47 @@ function onBossSpawn(boss) {
   sfx.growl(0, true);
 }
 
+function onDragonSpawn(dragon) {
+  if (net.isHost) net.send({ t: "lev", e: "dragon", n: director.level.n });
+  gameHud.showBanner({ title: "DRAGON", sub: "Something is circling above", text: "Get under a roof when it dives.", color: dragon.def.color, duration: 4 });
+  sfx.dragonRoar(25);
+}
+
+// Dragon fireballs: a burst of flame where they land, and burning ground
+let lastDragonFire = 0;
+function onBoltImpact(gun, pos) {
+  if (!gun.ignite) return;
+  const y = Math.max(0.3, pos.y);
+  fireFX.blast(pos.x, y, pos.z);
+  const d = Math.hypot(pos.x - characterBody.position.x, pos.z - characterBody.position.z);
+  sfx.explosion(d + 25);
+  cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - d / 25, 0, 1) * 0.35);
+  // One burning patch per burst is plenty (the fires are pooled)
+  const now = performance.now();
+  if (pos.y < 1.2 && now - lastDragonFire > 1500) {
+    lastDragonFire = now;
+    throwables.igniteAt(pos.x, pos.z, true);
+  }
+}
+
+/** A dead dragon hits the ground. */
+function onMonsterCrash(m) {
+  const p = m.body.position;
+  const d = Math.hypot(p.x - characterBody.position.x, p.z - characterBody.position.z);
+  sfx.thud(d);
+  cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - d / 40, 0, 1) * 0.9);
+  _vecA.set(p.x, 0.3, p.z);
+  for (let i = 0; i < 4; i++) effects.impact(_vecA, Math.random() - 0.5, 1, Math.random() - 0.5, "dust", 14);
+}
+
+const KILL_VERB = { head: "HEADSHOT", blast: "BLOWN UP", fire: "BURNED", gun: "KILLED" };
+
 function updateLevelHud() {
   if (!director?.level) return;
   gameHud.setLevel(director.level.n, director.level.name, director.killed, director.total);
   if (director.state === "cleared") gameHud.setBannerFoot(`Next level in ${director.countdown}`);
   const boss = zombieManager?.boss;
-  gameHud.setBoss(boss?.def.label.toUpperCase(), boss ? Math.max(0, boss.health / boss.maxHealth) : null);
+  gameHud.setBoss(boss?.def.label.toUpperCase(), boss ? Math.max(0, boss.health / boss.maxHealth) : null, boss?.def.color);
 }
 
 const throwables = new Throwables({
@@ -1805,6 +1957,15 @@ function setupGui() {
 
   }
 
+  const wFolder = gui.addFolder("🌗 Time & Weather");
+  wFolder.close();
+  wFolder.add(env, "hour", 0, 23.99, 0.01).name("Hour").listen();
+  wFolder.add(env, "timeScale", 0, 20, 0.1).name("Time speed");
+  wFolder.add(env, "bloodMoon").name("Blood moon").listen();
+  const wx = { state: weather.state };
+  wFolder.add(wx, "state", ["clear", "overcast", "drizzle", "rain", "storm"]).name("Weather").onChange(s => weather.set(s));
+  wFolder.add(weather, "locked").name("Hold weather");
+
   if (zombieManager) {
     const zFolder = gui.addFolder("👹 Monsters & Levels");
     zFolder.close();
@@ -1812,6 +1973,16 @@ function setupGui() {
     const jump = { level: 1, go() { director.start(Math.max(1, Math.round(jump.level))); } };
     zFolder.add(jump, "level", 1, 20, 1).name("Level");
     zFolder.add(jump, "go").name("▶ Start that level");
+    // Test spawns ~25 m in front of you (solo / host only)
+    const spawnAhead = (type, dist) => {
+      if (net.isClient) return;
+      const x = characterBody.position.x + Math.sin(aimYaw) * dist, z = characterBody.position.z + Math.cos(aimYaw) * dist;
+      const m = zombieManager.spawn(type, x, z, { homeX: characterBody.position.x, homeZ: characterBody.position.z, hunting: true });
+      if (!m) inventoryUI.feed(`Couldn't spawn a ${MONSTER_TYPES[type].label} there`, "info");
+    };
+    const spawns = { hounds() { for (let i = 0; i < 3; i++) spawnAhead("hound", 22 + i * 2); }, dragon() { spawnAhead("dragon", 40); } };
+    zFolder.add(spawns, "hounds").name("🐺 Spawn hellhound pack");
+    zFolder.add(spawns, "dragon").name("🐉 Spawn dragon");
   }
 
   // Prevent pointer lock while interacting with lil-gui
@@ -1852,8 +2023,8 @@ async function loadWorld() {
   const settle = p => p.then(v => v, err => { console.warn(err); return null; });
 
   // Fetch and parse everything at once instead of one model after another
-  const [dragonGltf, autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf] = await Promise.all([
-    settle(loadGLB("/models/dragon_gold.glb")),
+  // (the dragon and the hellhound are monsters now: MonsterPool loads them)
+  const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf] = await Promise.all([
     settle(loadGLB("/models/autorickshaw_3d_model_free.glb")),
     settle(vrmlLoader.loadAsync("/models/house.wrl")),
     gltfLoader.loadAsync("/models/house/house-kit.glb"),
@@ -1861,14 +2032,6 @@ async function loadWorld() {
     loadGLB("/trees/dreftwood tree.glb"),
   ]);
 
-  if (dragonGltf) {
-    createEditableModel({
-      id: "dragon",
-      name: "🐉 Gold Dragon",
-      object3D: dragonGltf.scene,
-      initialParams: { posX: 20, posY: 0, posZ: -20, rotY: 45, scale: 1.5 },
-    });
-  }
   if (autoGltf) {
     createEditableModel({
       id: "autorickshaw",
@@ -1898,11 +2061,18 @@ async function loadWorld() {
   // One close to spawn with its door facing the start
   houses.add(-13, 20, Math.atan2(13, -20));
 
+  // Scale that makes a model `mul` player heights tall
+  const heightScale = (root, mul) => {
+    root.updateWorldMatrix(true, true);
+    const b = new THREE.Box3().setFromObject(root);
+    return (CHARACTER_HEIGHT * mul) / ((b.max.y - b.min.y) || 1);
+  };
+
   createEditableModel({
     id: "treeA",
     name: "🌳 Old Tree (Vine)",
     object3D: treeAGltf.scene.clone(true),
-    initialParams: { posX: -12, posY: 0, posZ: -30, rotY: 0, scale: 2.0 },
+    initialParams: { posX: -12, posY: 0, posZ: -30, rotY: 0, scale: heightScale(treeAGltf.scene, 7) },
     trunkCollider: true,
   });
 
@@ -1910,7 +2080,7 @@ async function loadWorld() {
     id: "treeB",
     name: "🪵 Driftwood Tree",
     object3D: treeBGltf.scene.clone(true),
-    initialParams: { posX: 14, posY: 0, posZ: -32, rotY: 90, scale: 2.0 },
+    initialParams: { posX: 14, posY: 0, posZ: -32, rotY: 90, scale: heightScale(treeBGltf.scene, 5) },
     trunkCollider: true,
   });
 
@@ -1936,19 +2106,21 @@ async function loadWorld() {
   const treeBRawH   = treeBBounds.max.y - treeBBounds.min.y || 1;
   const treeBSnapAtOne = -treeBBounds.min.y;
 
-  const treeAScaleMin = TREE_A_HEIGHT_MIN / treeARawH;
-  const treeAScaleMax = TREE_A_HEIGHT_MAX / treeARawH;
-  const treeBScaleMin = TREE_B_HEIGHT_MIN / treeBRawH;
-  const treeBScaleMax = TREE_B_HEIGHT_MAX / treeBRawH;
+  const treeAScaleMin = CHARACTER_HEIGHT * TREE_A_HEIGHT_MUL[0] / treeARawH;
+  const treeAScaleMax = CHARACTER_HEIGHT * TREE_A_HEIGHT_MUL[1] / treeARawH;
+  const treeBScaleMin = CHARACTER_HEIGHT * TREE_B_HEIGHT_MUL[0] / treeBRawH;
+  const treeBScaleMax = CHARACTER_HEIGHT * TREE_B_HEIGHT_MUL[1] / treeBRawH;
 
   const housePositions = scatterPositions(HOUSE_COUNT, rng, SCATTER_RADIUS_MIN + 6,  SCATTER_RADIUS_MAX, 22);
-  const treeAPositions = scatterPositions(TREE_A_COUNT, rng, SCATTER_RADIUS_MIN,      SCATTER_RADIUS_MAX, 6);
-  const treeBPositions = scatterPositions(TREE_B_COUNT, rng, SCATTER_RADIUS_MIN,      SCATTER_RADIUS_MAX, 5);
-
   for (const { x, z } of housePositions) {
     houses.add(x, z, rng() * Math.PI * 2);
   }
   mapObstacles.push(...houses.mapObstacles());
+
+  // Big trees stay out of houses (a scattered tree used to land on one)
+  const keepClear = (list, pad) => list.filter(({ x, z }) => !houses.blocks(x, z, pad));
+  const treeAPositions = keepClear(scatterPositions(TREE_A_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 8), 5);
+  const treeBPositions = keepClear(scatterPositions(TREE_B_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 7), 4);
 
   for (const { x, z } of treeAPositions) {
     const scale = rngRange(rng, treeAScaleMin, treeAScaleMax);
@@ -1975,6 +2147,66 @@ async function loadWorld() {
     freezeStatic(clone);
     addTreeCollider(x, snapY, z, rotY, scale, 0.22, 4.0, 2.2, 5.0);
   }
+
+  // Burning wrecks: the autorickshaw plus a few charred debris piles, each
+  // pouring smoke (the first so the fires are kept clear of the forest)
+  const fireSpots = [];
+  const rick = editableModels.autorickshaw?.params;
+  if (rick?.visible) fireSpots.push({ x: rick.posX, y: 0.6, z: rick.posZ, scale: 1 });
+  for (const [x, z] of DEBRIS_SPOTS) {
+    if (houses.blocks(x, z, 4) || nearObstacle(x, z, 3)) continue;
+    fireSpots.push({ x, y: 0.15, z, scale: 0.75 });
+    addDebrisPile(x, z);
+  }
+  atmosphere.setSources(fireSpots);
+
+  // The dead forest, sized against the player
+  plantDeadForest({
+    scene, world, material: staticMaterial, rng: makeLCG(0x5eedf0e5),
+    count: DEAD_TREE_COUNT, playerHeight: CHARACTER_HEIGHT, heightMul: DEAD_TREE_HEIGHT_MUL,
+    ringMin: 14, ringMax: 175, mapObstacles,
+    blocked: (x, z) => Math.hypot(x, z) < 12 || houses.blocks(x, z, 4) || nearObstacle(x, z, 3.5)
+      || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 3)
+      || fireSpots.some(s => Math.hypot(s.x - x, s.z - z) < 5),
+  });
+}
+
+const DEBRIS_SPOTS = [[26, 12], [-31, 9], [9, -47], [-5, 39], [48, 30]];
+
+/** Rough clearance test against everything already on the minimap. */
+function nearObstacle(x, z, pad) {
+  for (const o of mapObstacles) {
+    const r = o.type === "circle" ? o.r : Math.hypot(o.w, o.d) / 2;
+    if (Math.hypot(o.x - x, o.z - z) < r + pad) return true;
+  }
+  return false;
+}
+
+// Charred logs around a fire spot (one instanced mesh for every pile)
+const debrisLogs = [];
+function addDebrisPile(x, z) {
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2 + Math.random() * 0.5;
+    debrisLogs.push({ x: x + Math.cos(a) * 0.35, z: z + Math.sin(a) * 0.35, rot: a, tilt: 0.25 + Math.random() * 0.3, len: 1 + Math.random() * 0.6 });
+  }
+  if (!addDebrisPile.mesh) {
+    const mesh = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.09, 0.12, 1, 6).rotateZ(Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0x1a1210, roughness: 1, emissive: 0x3a0a00, emissiveIntensity: 0.6 }),
+      40);
+    mesh.count = 0;
+    mesh.castShadow = true;
+    scene.add(mesh);
+    addDebrisPile.mesh = mesh;
+  }
+  const mesh = addDebrisPile.mesh, m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+  mesh.count = Math.min(40, debrisLogs.length);
+  debrisLogs.slice(0, 40).forEach((l, i) => {
+    q.setFromEuler(e.set(0, l.rot, l.tilt));
+    mesh.setMatrixAt(i, m4.compose(_vecA.set(l.x, 0.12, l.z), q, _vecB.set(l.len, 1, 1)));
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.computeBoundingSphere();
 }
 
 // ─── Co-op multiplayer ────────────────────────────────────────────────────────
@@ -2114,10 +2346,12 @@ net.on("world", msg => {
   msg.lights.forEach((on, i) => { const h = houses.houses[i]; if (h && h.lightOn !== on) houses.toggleLight(h); });
 });
 net.on("drop", msg => pickups.spawn(msg.k, msg.x, msg.z, pickupData(msg.k), msg.l));
-net.on("kill", () => {
+net.on("kill", msg => {
   killsThisLife++;
   showHitMarker(false, true);
   sfx.kill();
+  const m = monsterSync?.findPuppet(msg.n);
+  if (m) gameHud.killFeed(m.def.label, "KILLED", m.def.color, false);
 });
 
 // Host-only inputs from clients
@@ -2138,7 +2372,8 @@ net.on("ef", msg => {
 net.on("lvl", msg => {
   if (!net.isClient || !director) return;
   if (director.level?.n !== msg.n || director.level.total !== msg.tot) {
-    director.level = { ...getLevel(msg.n), total: msg.tot, boss: 0 };
+    // msg.tot already counts the host's Warlords and dragons
+    director.level = { ...getLevel(msg.n), total: msg.tot, boss: 0, dragon: 0 };
   }
   director.state = msg.s;
   director.killed = msg.k;
@@ -2149,6 +2384,7 @@ net.on("lev", msg => {
   if (msg.e === "start") onLevelStart(getLevel(msg.n));
   else if (msg.e === "clear") onLevelCleared(getLevel(msg.n));
   else if (msg.e === "boss") onBossSpawn({ def: MONSTER_TYPES.boss });
+  else if (msg.e === "dragon") onDragonSpawn({ def: MONSTER_TYPES.dragon });
 });
 net.on("wipe", () => {
   gameHud.showBanner({ title: "SQUAD WIPED", sub: "Restarting the level", color: "#ff4b3a", duration: 4 });
@@ -2302,6 +2538,7 @@ function animate() {
 
   minimap.update(performance.now(), characterBody.position.x, characterBody.position.z, aimYaw);
 
+  updateMood(delta);
   updateGroundChunks(characterBody.position.x, characterBody.position.z);
   updateSunShadow();
   renderer.render(scene, camera);
@@ -2348,7 +2585,22 @@ async function warmUpGpu() {
     }
     m.mesh.material = t.skinMats[0].base;
   }
-  renderer.render(scene, camera); // uploads textures + buffers
+  // Pooled monsters wait at y = −500, outside the shadow camera, so their
+  // shadow-depth programs (skinned / morphed) would compile on first spawn.
+  // Stand one of each type near the player for this render.
+  const staged = [];
+  for (const t of Object.values(zombieManager?.pool.types ?? {})) {
+    const m = zombieManager.pool.all.find(x => x.type === t.type && !x.active);
+    if (!m) continue;
+    staged.push([m, m.root.position.clone()]);
+    m.root.position.set(characterBody.position.x + staged.length * 2 - 8, 0, characterBody.position.z + 6);
+    m.root.updateMatrixWorld(true);
+  }
+  renderer.render(scene, camera); // uploads textures + buffers, compiles shadow programs
+  for (const [m, p] of staged) {
+    m.root.position.copy(p);
+    m.root.updateMatrixWorld(true);
+  }
   for (const o of hidden) o.visible = false;
   fireFX.setWarmup(false);
 }
@@ -2367,7 +2619,9 @@ async function boot() {
       regenPlayerHealth,
       enemyFire,
       sfx,
+      loadGLB,
     });
+    zombieManager.onCrash = onMonsterCrash;
 
     // Soldier, zombies and the world download + parse in parallel
     await Promise.all([
@@ -2387,11 +2641,15 @@ async function boot() {
       onLevelStart,
       onLevelCleared,
       onBossSpawn,
+      onDragonSpawn,
     });
     zombieManager.onKill = zombie => {
       // Kill credit goes to whoever landed the last hit
-      if (zombie.lastHitBy === null || zombie.lastHitBy === localTarget.id) killsThisLife++;
-      else net.send({ t: "kill", to: zombie.lastHitBy, n: zombie.netId });
+      if (zombie.lastHitBy === null || zombie.lastHitBy === localTarget.id) {
+        killsThisLife++;
+        gameHud.killFeed(zombie.def.label, KILL_VERB[zombie.killCause] ?? "KILLED", zombie.def.color, zombie.killCause === "head");
+      } else net.send({ t: "kill", to: zombie.lastHitBy, n: zombie.netId });
+      zombie.killCause = null;
       rollZombieDrop(zombie);
       director.onKill(zombie);
     };
@@ -2420,6 +2678,8 @@ async function boot() {
 
     window.zombieManager = zombieManager;
     window.inventory = inventory;
+    window.env = env;
+    window.weather = weather;
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     lobby.show();

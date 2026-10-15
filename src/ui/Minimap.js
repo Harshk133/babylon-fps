@@ -177,7 +177,7 @@ export class Minimap {
         continue;
       }
       const hunting = z.state === "chase" || z.state === "alert";
-      const size = z.def.boss ? 5 : z.def.bigBody ? 3.8 : 2.6;
+      const size = z.def.flying ? 6 : z.def.boss ? 5 : z.def.bigBody ? 3.8 : 2.6;
       if (hunting) {
         ctx.strokeStyle = `rgba(255, 60, 40, ${0.25 + pulse * 0.35})`;
         ctx.lineWidth = 1;
@@ -189,7 +189,15 @@ export class Minimap {
       ctx.globalAlpha = hunting ? 1 : 0.55;
       ctx.fillStyle = z.burnTimer > 0 ? "#ffa13a" : z.def.color;
       ctx.beginPath();
-      ctx.arc(zx, zy, hunting ? size + 0.5 : size, 0, Math.PI * 2);
+      if (z.def.flying) {
+        // Flyers: a triangle, so you know to look up
+        ctx.moveTo(zx, zy - size);
+        ctx.lineTo(zx + size, zy + size * 0.75);
+        ctx.lineTo(zx - size, zy + size * 0.75);
+        ctx.closePath();
+      } else {
+        ctx.arc(zx, zy, hunting ? size + 0.5 : size, 0, Math.PI * 2);
+      }
       ctx.fill();
       ctx.globalAlpha = 1;
     }

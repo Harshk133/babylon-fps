@@ -4,33 +4,48 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>babylon-fps</title>
+    <title>Survive the Horde</title>
+    <!-- HUD type: Teko (numbers, labels), Creepster (titles), Special Elite (flavour text).
+         Offline / LAN play falls back to the system fonts. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Creepster&family=Special+Elite&family=Teko:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
   <body>
     <!-- Loading screen — sits on top of everything until assets are ready -->
     <div id="loading-screen">
       <div class="loading-content">
+        <h1 class="loading-title">SURVIVE THE HORDE</h1>
         <div class="loading-spinner"></div>
         <p id="loading-message">Loading world…</p>
         <div class="loading-track"><div id="loading-bar"></div></div>
       </div>
     </div>
 
-    <!-- Screen-space mood: permanent vignette, low-health pulse, hit flash -->
+    <!-- Screen-space mood: vignette (deeper at night), film grain, low-health pulse, hit flash -->
     <div id="vignette"></div>
+    <div id="grain"></div>
     <div id="low-health"></div>
     <div id="damage-overlay"></div>
 
     <!-- Player Health HUD -->
     <div id="hud">
       <div class="health-card">
-        <div class="health-head">
-          <span class="health-label">HEALTH</span>
-          <span id="health-val">100</span>
-        </div>
-        <div class="health-bar-bg">
-          <div id="health-bar-trail"></div>
-          <div id="health-bar-fill"></div>
+        <svg class="health-heart" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 21s-7.4-4.5-9.9-9.2C.4 8.5 2.3 4.6 6.1 4.6c2.2 0 3.5 1.2 5.9 3.6 2.4-2.4 3.7-3.6 5.9-3.6 3.8 0 5.7 3.9 4 7.2C19.4 16.5 12 21 12 21z" />
+        </svg>
+        <div class="health-main">
+          <div class="health-head">
+            <span class="health-label">VITALS</span>
+            <svg class="ecg" viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true">
+              <polyline points="0,12 30,12 36,12 40,4 44,18 48,9 52,12 100,12" />
+            </svg>
+            <span id="health-val">100</span>
+          </div>
+          <div class="health-bar-bg">
+            <div id="health-bar-trail"></div>
+            <div id="health-bar-fill"></div>
+          </div>
         </div>
       </div>
       <div id="noise-meter" data-level="0" title="How much noise you make">
@@ -65,10 +80,16 @@
 
     <!-- Threat counter -->
     <div id="threat">
-      <span class="threat-dot"></span>
+      <svg class="threat-eye" viewBox="0 0 24 14" aria-hidden="true">
+        <path d="M1 7C4 2.5 8 0.5 12 0.5S20 2.5 23 7c-3 4.5-7 6.5-11 6.5S4 11.5 1 7z" />
+        <circle cx="12" cy="7" r="3.4" />
+      </svg>
       <span id="threat-count">0</span>
       <span class="threat-label">HUNTING YOU</span>
     </div>
+
+    <!-- Kill feed (top right, under the minimap) -->
+    <div id="kill-feed"></div>
 
     <!-- Crosshair + hit marker -->
     <div id="crosshair">
@@ -81,7 +102,7 @@
     <!-- Ammo + kills -->
     <div id="combat-hud">
       <div id="kills-card">
-        <span class="kills-label">KILLS</span>
+        <span class="kills-label">☠ KILLS</span>
         <span id="kills-count">0</span>
       </div>
       <div id="ammo-card">
@@ -89,16 +110,25 @@
           <span id="ammo-count">32</span>
           <span class="ammo-reserve" id="ammo-reserve">/ ∞</span>
         </div>
+        <div class="ammo-pips"><div id="ammo-pips-fill"></div></div>
         <div class="ammo-weapon" id="ammo-weapon">SMG</div>
         <div class="reload-track"><div id="reload-bar"></div></div>
         <div class="reload-text">RELOADING</div>
       </div>
     </div>
 
-    <!-- Minimap (top right) -->
+    <!-- Minimap (top right) with the clock, weather and flashlight under it -->
     <div id="minimap">
       <canvas aria-label="Minimap"></canvas>
       <div class="mm-info"><span class="mm-heading">N 000°</span><span class="mm-coords">0, 0</span></div>
+      <div id="env-hud" data-phase="dusk">
+        <span id="env-icon">◓</span>
+        <span id="env-time">18:00</span>
+        <span id="env-phase">Dusk</span>
+        <span class="env-sep"></span>
+        <span id="env-weather">Overcast</span>
+        <span id="env-torch"><kbd>F</kbd>LIGHT</span>
+      </div>
     </div>
 
     <!-- Hotbar: weapon slots, throwables, medkits (filled by InventoryUI) -->
@@ -149,10 +179,11 @@
         <div><kbd>H</kbd><span>Use medkit</span></div>
         <div><kbd>O</kbd>/<kbd>C</kbd><span>Open / close door</span></div>
         <div><kbd>L</kbd><span>Light switch</span></div>
+        <div><kbd>F</kbd><span>Flashlight</span></div>
         <div><kbd>Tab</kbd><span>Inventory</span></div>
         <div><kbd>Esc</kbd><span>Pause</span></div>
       </div>
-      <p class="start-tip">Monsters hunt by sight and sound. Sprinting and gunfire give you away; walls stop their bullets. Clear each level to face worse.</p>
+      <p class="start-tip">Monsters hunt by sight and sound; hellhounds hunt by scent. The dark hides you, but your flashlight doesn't. Rain covers your footsteps. Clear each level to face worse.</p>
     </div>
 
     <!-- Death screen -->

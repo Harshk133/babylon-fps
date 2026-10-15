@@ -183,7 +183,7 @@ export const FIRE_PRESETS = {
     smoke: { count: 90,  life: 3.2, size: 3.0, grow: 2.4, rise: 6.0, spread: 3.8, opacity: 0.55 },
   },
 };
-const POOL_SIZES = { ground: 3, body: 14, blast: 3 };
+const POOL_SIZES = { ground: 5, body: 14, blast: 4 };
 
 function makeGeometry(count, preset, layer) {
   const base = new THREE.PlaneGeometry(1, 1);

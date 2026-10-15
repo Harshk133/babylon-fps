@@ -8,33 +8,42 @@ const LEASH           = 115;  // wanderers farther than this are recycled and re
 const HOME_RADIUS     = 22;   // wanderers mill about within this of the player's area
 const HOME_REFRESH    = 18;   // seconds between re-centring wanderers on the player's area
 
+// Monsters that make an entrance partway through a level instead of
+// spawning with the regular mix: level[count] of them once level[at] of the
+// level's kills are done, from ring min..max metres away.
+const SPECIALS = [
+  { type: "boss",   count: "boss",   at: "bossAt",   min: 34, max: 42, cb: "onBossSpawn" },
+  { type: "dragon", count: "dragon", at: "dragonAt", min: 45, max: 58, cb: "onDragonSpawn" },
+];
+
 /**
  * Runs the level loop: intro → fight → cleared (intermission) → next level.
  * Each level has a kill target, a cap on monsters alive at once, a spawn mix
- * (each level introduces a new type), and later a Warlord boss.
+ * (each level introduces a new type), and later Warlord bosses and dragons.
  *
  * Callbacks: onLevelStart(level), onFight(level), onLevelCleared(level),
- * onBossSpawn(monster).
+ * onBossSpawn(monster), onDragonSpawn(monster).
  */
 export class LevelDirector {
-  constructor({ manager, getPlayerPos, onLevelStart, onFight, onLevelCleared, onBossSpawn }) {
+  constructor({ manager, getPlayerPos, onLevelStart, onFight, onLevelCleared, onBossSpawn, onDragonSpawn }) {
     this.manager = manager;
     this.getPlayerPos = getPlayerPos;
-    this.cb = { onLevelStart, onFight, onLevelCleared, onBossSpawn };
+    this.cb = { onLevelStart, onFight, onLevelCleared, onBossSpawn, onDragonSpawn };
     this.state = "idle";
     this.level = null;
     this.playerCount = 1;       // co-op: bigger hordes for more players
     this.levelId = 0;
     this.killed = 0;
     this.spawned = 0;
-    this.bossesSpawned = 0;
+    this.bossesSpawned = 0;     // all specials (Warlords + dragons) spawned this level
+    this.specialSpawned = {};
     this.timer = 0;
     this._spawnTimer = 0;
     this._homeTimer = 0;
   }
 
   get total() {
-    return this.level ? this.level.total + (this.level.boss ?? 0) : 0;
+    return this.level ? this.level.total + (this.level.boss ?? 0) + (this.level.dragon ?? 0) : 0;
   }
 
   get remaining() {
@@ -56,11 +65,14 @@ export class LevelDirector {
       total: Math.round(base.total * (1 + 0.65 * (k - 1))),
       maxAlive: Math.min(40, Math.round(base.maxAlive * (1 + 0.55 * (k - 1)))),
       boss: base.boss ? base.boss + (k >= 3 ? 1 : 0) : 0,
+      // No dragon model, no dragons (or the level could never be cleared)
+      dragon: this.manager.pool.types.dragon ? base.dragon ?? 0 : 0,
     };
     this.levelId++;
     this.killed = 0;
     this.spawned = 0;
     this.bossesSpawned = 0;
+    this.specialSpawned = {};
     this.state = "intro";
     this.timer = INTRO_TIME;
     this.cb.onLevelStart?.(this.level);
@@ -145,7 +157,7 @@ export class LevelDirector {
     // Leash: far-off wanderers are recycled so they can respawn nearer
     for (let i = mgr.active.length - 1; i >= 0; i--) {
       const m = mgr.active[i];
-      if (m.dying || m.state !== "wander" || m.def.boss) continue;
+      if (m.dying || m.state !== "wander" || m.def.boss || m.def.bossBar) continue;
       if (m.distXZ > LEASH) {
         mgr.recycle(m);
         this.spawned--;
@@ -164,16 +176,18 @@ export class LevelDirector {
       }
     }
 
-    // Boss entrance
-    if (this.bossesSpawned < (lv.boss ?? 0) && this.killed >= Math.floor(lv.total * (lv.bossAt ?? 0.5))) {
-      const boss = this._spawn("boss", 34, 42);
-      if (boss) {
-        this.bossesSpawned++;
-        this.spawned++;
-        // The Warlord comes straight for you
-        mgr._spot(boss, pp.x, pp.z);
-        this.cb.onBossSpawn?.(boss);
-      }
+    // Warlord / dragon entrances
+    for (const sp of SPECIALS) {
+      const done = this.specialSpawned[sp.type] ?? 0;
+      if (done >= (lv[sp.count] ?? 0) || this.killed < Math.floor(lv.total * (lv[sp.at] ?? 0.5))) continue;
+      const m = this._spawn(sp.type, sp.min, sp.max);
+      if (!m) continue;
+      this.specialSpawned[sp.type] = done + 1;
+      this.bossesSpawned++;
+      this.spawned++;
+      // They come straight for you
+      mgr._spot(m, pp.x, pp.z);
+      this.cb[sp.cb]?.(m);
     }
 
     // Regular spawns

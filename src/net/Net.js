@@ -26,13 +26,36 @@ export class Net {
     // ?relay=wss://…/ws in the page address overrides the build setting (handy for testing)
     const fromLink = new URLSearchParams(location.search).get("relay");
     const configured = (fromLink || import.meta.env.RELAY_URL || import.meta.env.VITE_RELAY_URL || "").trim();
-    if (configured) return configured;
+    if (configured) return Net.normalizeUrl(configured);
     // Static hosts can't run the relay, so falling back to this site's own /ws can't work there
     if (/\.(vercel\.app|netlify\.app|github\.io|pages\.dev)$/.test(location.hostname)) {
       throw new Error("Co-op server address isn't set in this build. Add RELAY_URL = wss://<your-relay>.onrender.com/ws in Vercel and redeploy.");
     }
     const proto = location.protocol === "https:" ? "wss" : "ws";
     return `${proto}://${location.host}/ws`;
+  }
+
+  /**
+   * Forgives the usual ways of writing the relay address:
+   *   "wss://https://x.onrender.com/ws", "https://x.onrender.com", "x.onrender.com"
+   * all become "wss://x.onrender.com/ws" (ws:// is kept for local http hosts).
+   */
+  static normalizeUrl(raw) {
+    let s = raw.trim().replace(/^["']|["']$/g, "");
+    let secure = true;
+    // Strip every scheme someone typed (there may be two), remembering if it was plain http/ws
+    let m;
+    while ((m = /^(wss?|https?):\/\//i.exec(s))) {
+      if (/^(ws|http)$/i.test(m[1])) secure = false;
+      s = s.slice(m[0].length);
+    }
+    s = s.replace(/\/+$/, "");
+    const slash = s.indexOf("/");
+    const host = slash === -1 ? s : s.slice(0, slash);
+    let path = slash === -1 ? "" : s.slice(slash);
+    if (!path.endsWith("/ws")) path += "/ws";
+    const local = /^(localhost|127\.|192\.168\.|10\.)/.test(host);
+    return `${secure || !local ? "wss" : "ws"}://${host}${path}`;
   }
 
   on(type, fn) {

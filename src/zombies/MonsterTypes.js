@@ -12,6 +12,19 @@ export const MODELS = {
   ogro:        { body: `${OGRO}ogro.md2`,        skinDir: `${OGRO}skins/` },
 };
 
+// Skinned GLB monsters. clips maps the AI's animation names onto the file's
+// clips; a model with no death clip gets a procedural fall (see ZombieManager).
+export const GLB_MODELS = {
+  hellhound: {
+    url: "/models/zombie_dog_animation.glb",
+    clips: { stand: "idle", walk: "walk", run: "run", attack: "attack 3", pain1: "hit 2", jump: "Jump Edit" },
+  },
+  dragon: {
+    url: "/models/dragon_gold.glb",
+    clips: { stand: "Idle", run: "RideFlyRun", attack: "RideFlyRun" },
+  },
+};
+
 export const WEAPON_MODELS = {
   machinegun: { model: `${RATA}w_machinegun.md2`, skin: `${RATA}skins/w_machinegun.png` },
   shotgun:    { model: `${RATA}w_shotgun.md2`,    skin: `${RATA}skins/w_shotgun.png` },
@@ -40,6 +53,10 @@ export const ENEMY_GUNS = {
     kind: "bolt", burst: 6, interval: 0.16, damage: 13, speed: 19, radius: 0.32, splash: 2.2,
     aimTime: 0.8, cooldown: [2.4, 3.4], range: 45, sound: "rifle", color: 0x7fd4ff,
   },
+  firebreath: { // Dragon: fireballs that leave burning ground (ignite) and a flame trail
+    kind: "bolt", burst: 4, interval: 0.2, damage: 11, speed: 21, radius: 0.5, splash: 3, spread: 0.02,
+    aimTime: 1.1, cooldown: [3.2, 4.8], range: 60, sound: "flame", color: 0xff6a1a, trail: true, ignite: true,
+  },
 };
 
 /**
@@ -49,6 +66,15 @@ export const ENEMY_GUNS = {
  *   hunter: true — charges straight at whatever it hears instead of investigating
  * ranged: { gun, min, max } keeps the monster between min and max metres and shoots.
  * bigBody: too large for doorways; waits outside houses.
+ *
+ * GLB monsters (glb: key of GLB_MODELS) also need:
+ *   hitbox: spheres [radius, y, z, isHead] (y up from the feet, z forward), bodyY
+ *   sepRadius — crowd spacing / melee ring; runRef / walkRef — speeds (m/s)
+ *   at which the run / walk clips play at 1×; rates — clip speed overrides
+ * scent (m): smells living players this close, through walls and darkness.
+ * pack: spotting one alerts the rest nearby. pounce: leaping bite.
+ * flying: { altitude, dive } — cruises at altitude, drops to dive to attack.
+ * healthBar: always shows the overhead bar. bossBar: uses the big HUD bar.
  */
 export const MONSTER_TYPES = {
   walker: {
@@ -93,6 +119,29 @@ export const MONSTER_TYPES = {
     pool: 12, color: "#b06a3a",
     blurb: "Soaks up bullets and hits like a truck. Too big for doorways. Fire works.",
   },
+  hound: {
+    label: "Hellhound", glb: "hellhound",
+    height: 1.05, mass: 90, hp: 85, speed: 7.4,
+    hitbox: [[0.36, 0.5, 0.0], [0.32, 0.5, -0.42], [0.25, 0.82, 0.5, true]], bodyY: 0.55, sepRadius: 0.72,
+    runRef: 7, walkRef: 1.6, walkMax: 3.2, rates: { attack: 1.6, pain1: 1.4 },
+    melee: { damage: 7, knock: 4, rate: 1 },
+    pounce: { min: 2.6, max: 7.5, speed: 11.5, time: 0.62, damage: 13, knock: 7, cooldown: [3, 5] },
+    sight: { range: 20, fov: 200 }, hearing: 2.0, scent: 15, pack: true, voice: "hound",
+    healthBar: true, pool: 18, color: "#d8452f",
+    blurb: "Hunts in packs by scent, so the dark won't hide you. Watch for the leap.",
+  },
+  dragon: {
+    label: "Gold Dragon", glb: "dragon",
+    height: 3.6, mass: 600, hp: 1500, speed: 6.5,
+    hitbox: [[1.15, 1.2, -0.2], [0.7, 1.0, 1.35, true]], bodyY: 1.2, sepRadius: 1.6,
+    runRef: 6, rates: { attack: 1.5, stand: 1 },
+    melee: { damage: 18, knock: 10, rate: 0.8 },
+    flying: { altitude: 13, dive: 8.5 }, muzzle: { y: 1.0, z: 2.3 },
+    sight: { range: 75, fov: 360 }, hearing: 1.2, bigBody: true, voice: "dragon",
+    ranged: { gun: "firebreath", min: 11, max: 26 },
+    healthBar: true, bossBar: true, pool: 2, color: "#ffb030",
+    blurb: "Circles overhead and rains fire. Get under a roof; its flames keep burning on the ground.",
+  },
   boss: {
     label: "Warlord", model: "ogro", skins: ["sharokh.png"], weapons: ["club"],
     height: 3.9, radius: 0.17, mass: 900, hp: 2600, speed: 2.5,
@@ -107,13 +156,16 @@ export const MONSTER_TYPES = {
 // ─── Levels ───────────────────────────────────────────────────────────────────
 // total: monsters to kill. maxAlive: on the field at once. mix: spawn weights.
 // boss: number of Warlords, released once `bossAt` of the level is killed.
+// dragon / dragonAt: the same for dragons.
 const HAND_MADE = [
   { name: "First Contact", total: 10, maxAlive: 6, mix: { walker: 1 }, introduces: "walker" },
   { name: "Fast Movers", total: 14, maxAlive: 8, mix: { walker: 0.6, runner: 0.4 }, introduces: "runner" },
-  { name: "They Can Hear You", total: 16, maxAlive: 9, mix: { walker: 0.35, runner: 0.2, listener: 0.45 }, introduces: "listener" },
-  { name: "Armed and Dangerous", total: 18, maxAlive: 10, mix: { walker: 0.3, runner: 0.2, listener: 0.2, gunner: 0.3 }, introduces: "gunner" },
-  { name: "Heavy Hitters", total: 20, maxAlive: 11, mix: { walker: 0.3, runner: 0.2, listener: 0.15, gunner: 0.2, brute: 0.15 }, introduces: "brute" },
-  { name: "The Warlord", total: 18, maxAlive: 10, boss: 1, bossAt: 0.3, mix: { walker: 0.3, runner: 0.25, listener: 0.15, gunner: 0.2, brute: 0.1 }, introduces: "boss" },
+  { name: "Hellhounds", total: 16, maxAlive: 9, mix: { walker: 0.4, runner: 0.2, hound: 0.4 }, introduces: "hound" },
+  { name: "They Can Hear You", total: 16, maxAlive: 9, mix: { walker: 0.3, runner: 0.15, listener: 0.4, hound: 0.15 }, introduces: "listener" },
+  { name: "Armed and Dangerous", total: 18, maxAlive: 10, mix: { walker: 0.25, runner: 0.15, listener: 0.15, gunner: 0.3, hound: 0.15 }, introduces: "gunner" },
+  { name: "Heavy Hitters", total: 20, maxAlive: 11, mix: { walker: 0.25, runner: 0.15, listener: 0.15, gunner: 0.2, brute: 0.15, hound: 0.1 }, introduces: "brute" },
+  { name: "Wings of Fire", total: 18, maxAlive: 10, dragon: 1, dragonAt: 0.25, mix: { walker: 0.3, runner: 0.2, listener: 0.15, gunner: 0.15, hound: 0.2 }, introduces: "dragon" },
+  { name: "The Warlord", total: 18, maxAlive: 10, boss: 1, bossAt: 0.3, mix: { walker: 0.25, runner: 0.2, listener: 0.15, gunner: 0.2, brute: 0.1, hound: 0.1 }, introduces: "boss" },
 ];
 
 const LATE_NAMES = ["No Rest", "Blood Moon", "The Long Night", "Siege", "Overrun", "Last Light", "Hell Gate", "Endless"];
@@ -127,9 +179,11 @@ export function getLevel(n) {
     name: LATE_NAMES[(k - 1) % LATE_NAMES.length],
     total: Math.min(60, 20 + 3 * k),
     maxAlive: Math.min(22, 11 + k),
-    mix: { walker: 0.26, runner: 0.22, listener: 0.18, gunner: 0.22, brute: 0.12 },
+    mix: { walker: 0.22, runner: 0.2, listener: 0.16, gunner: 0.2, brute: 0.1, hound: 0.14 },
     boss: k % 5 === 0 ? 1 + Math.floor(k / 10) : 0,
     bossAt: 0.5,
+    dragon: k % 3 === 0 ? 1 + (k >= 9 ? 1 : 0) : 0,
+    dragonAt: 0.35,
     hpMul: 1 + 0.1 * k,
     damageMul: 1 + 0.06 * k,
     speedMul: Math.min(1.25, 1 + 0.02 * k),
