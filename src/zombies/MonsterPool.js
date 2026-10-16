@@ -7,6 +7,11 @@ import { GROUP_ZOMBIE, GROUP_PLAYER, GROUP_PROJECTILE } from "../physicsGroups.j
 import { MODELS, WEAPON_MODELS, GLB_MODELS, MONSTER_TYPES } from "./MonsterTypes.js";
 
 const POOL_HIDE_Y = -500;
+// Parked bodies each get their own spot on a line far outside the map. All at
+// one point, the physics broadphase saw ~150 bodies overlapping and walked
+// every pair of them on every step.
+const PARK_X0 = -4000, PARK_GAP = 6;
+let parkCount = 0;
 const MD2_FPS = 10;
 
 // The MD2s merge death1..3 / pain1..3 into single clips; split them back out
@@ -188,6 +193,7 @@ export class MonsterPools {
     this.inactive[type] = [];
     for (let i = 0; i < t.def.pool; i++) {
       const m = t.glb ? this._createGlbInstance(type) : this._createInstance(type, i);
+      m.parkX = PARK_X0 - parkCount++ * PARK_GAP;
       this._deactivate(m);
       this.inactive[type].push(m);
       this.all.push(m);
@@ -514,7 +520,8 @@ export class MonsterPools {
     m.animLockTimer = 0;
     m.body.velocity.set(0, 0, 0);
     m.body.angularVelocity.set(0, 0, 0);
-    m.body.position.set(0, POOL_HIDE_Y, 0);
+    m.body.position.set(m.parkX ?? 0, POOL_HIDE_Y, 0);
+    m.body.aabbNeedsUpdate = true; // a sleeping body's box isn't refreshed otherwise
     m.body.sleep();
     m.root.visible = false;
     m.root.position.set(0, POOL_HIDE_Y, 0);

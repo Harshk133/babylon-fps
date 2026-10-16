@@ -423,6 +423,26 @@ function scatterPositions(count, rngFn, minR, maxR, minSep) {
 // Sky, fog colour/range and the lights are driven by the day/night cycle
 // (world/Environment.js); these are just the starting values.
 const scene = new THREE.Scene();
+// Hidden things (pooled bullets and effects, parked monsters, far loot) keep
+// their last matrices: nothing draws them, and they're brought up to date the
+// frame they show again. Same as three's updateMatrixWorld otherwise.
+function updateVisibleMatrices(o, force) {
+  if (o.matrixAutoUpdate) o.updateMatrix();
+  if (o.matrixWorldNeedsUpdate || force) {
+    if (o.matrixWorldAutoUpdate) {
+      if (o.parent === null) o.matrixWorld.copy(o.matrix);
+      else o.matrixWorld.multiplyMatrices(o.parent.matrixWorld, o.matrix);
+    }
+    o.matrixWorldNeedsUpdate = false;
+    force = true;
+  }
+  const children = o.children;
+  for (let i = 0; i < children.length; i++) {
+    const c = children[i];
+    if (c.visible && (c.matrixWorldAutoUpdate || force)) updateVisibleMatrices(c, force);
+  }
+}
+scene.updateMatrixWorld = function (force) { updateVisibleMatrices(this, force); };
 scene.fog = new THREE.Fog(0xb08468, 35, 190);
 
 const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.5, 220);
@@ -452,8 +472,10 @@ function updateDynamicResolution(frameMs, logicMs) {
   perf.avg += (Math.min(frameMs, 100) - perf.avg) * 0.05;
   perf.logic += (Math.min(logicMs, 100) - perf.logic) * 0.05;
   const cpuBound = perf.logic > perf.avg * 0.6;
-  if (perf.avg > 20 && !cpuBound) { perf.slow += frameMs; perf.fast = 0; }
-  else if (perf.avg < 14) { perf.fast += frameMs; perf.slow = 0; }
+  // Frame budget: 60 FPS, or 30 when a phone is capped there (a capped frame isn't a slow one)
+  const budget = touch?.settings.fps === "30" ? 1000 / 30 : 1000 / 60;
+  if (perf.avg > budget * 1.2 && !cpuBound) { perf.slow += frameMs; perf.fast = 0; }
+  else if (perf.avg < budget * 0.84) { perf.fast += frameMs; perf.slow = 0; }
   else { perf.slow = 0; perf.fast = 0; }
 
   let next = perf.ratio;
@@ -963,11 +985,13 @@ function updateTouch() {
 }
 
 // ─── Ground Check ─────────────────────────────────────────────────────────────
+let groundRayHit = false;   // checkGrounded's ray, reused by snapCharacterToGround (same spot)
 function checkGrounded() {
   onGround = false;
   rayOrigin.set(characterBody.position.x, characterBody.position.y + 0.05,          characterBody.position.z);
   rayTo    .set(characterBody.position.x, characterBody.position.y - FEET_OFFSET - 0.45, characterBody.position.z);
   const hit = world.raycastClosest(rayOrigin, rayTo, groundRayOpts, rayResult);
+  groundRayHit = hit;
   if (!hit) return;
   const dist = rayResult.distance - FEET_OFFSET;
   if (dist <= GROUND_SNAP_DISTANCE && characterBody.velocity.y <= 0.75) {
@@ -986,9 +1010,8 @@ function applyGroundStickForce(delta) {
 
 function snapCharacterToGround() {
   if (!onGround) return;
-  rayOrigin.set(characterBody.position.x, characterBody.position.y + 0.05,          characterBody.position.z);
-  rayTo    .set(characterBody.position.x, characterBody.position.y - FEET_OFFSET - 0.45, characterBody.position.z);
-  if (world.raycastClosest(rayOrigin, rayTo, groundRayOpts, rayResult)) {
+  // Runs right after checkGrounded with the body where it was: reuse its ray
+  if (groundRayHit) {
     const d = rayResult.distance - FEET_OFFSET;
     if (d < GROUND_SNAP_DISTANCE && d > -STEP_UP) characterBody.position.y -= d;
   }
@@ -3827,12 +3850,21 @@ function renderFrame() {
 }
 
 let _animRunning = false;
+let prevFeetY = 0;
+let lastFrameAt = 0;
 const clock = new THREE.Clock();
 
 function animate() {
   if (!_animRunning) return;
   requestAnimationFrame(animate);
   const frameStart = performance.now();
+  if (touch) {
+    // Phones: at most 60 (or 30) frames a second. A 90/120 Hz screen would
+    // otherwise get twice the work, heat the phone and throttle it.
+    const minGap = touch.settings.fps === "30" ? 1000 / 30 - 2 : 1000 / 60 - 2;
+    if (frameStart - lastFrameAt < minGap) return;
+    lastFrameAt = frameStart;
+  }
   const rawDelta = clock.getDelta();
   const frameMs = rawDelta * 1000;
   const delta = Math.min(rawDelta, 0.05);
@@ -3849,7 +3881,7 @@ function animate() {
   // Pose + collider before the step, so it pushes whatever it drives into
   rickshaw?.update(delta, env.darkness);
 
-  world.step(1 / 60, delta, 3);
+  world.step(1 / 60, delta, IS_TOUCH ? 2 : 3);
 
   checkGrounded();
   snapCharacterToGround();
@@ -3857,11 +3889,13 @@ function animate() {
   rickshawAfterStep();
   keepInBounds();
 
-  characterRoot.position.set(
-    characterBody.position.x,
-    characterBody.position.y - FEET_OFFSET,
-    characterBody.position.z
-  );
+  // The physics contact settles the body a centimetre or two up and down on
+  // alternate frames: averaging two frames cancels that in the visible
+  // character without lagging behind slopes (jumps and stairs pass through)
+  const feetY = characterBody.position.y - FEET_OFFSET;
+  const smoothY = Math.abs(feetY - prevFeetY) < 0.04 ? (feetY + prevFeetY) / 2 : feetY;
+  prevFeetY = feetY;
+  characterRoot.position.set(characterBody.position.x, smoothY, characterBody.position.z);
 
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
   if (isBR()) {

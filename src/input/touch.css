@@ -399,7 +399,9 @@ body.touch .ammo-pips,
 body.touch .ammo-weapon { display: none; }
 
 /* Weapon / item row: only guns you own, as cards */
-body.touch #hotbar { bottom: 2px; zoom: 0.62; gap: 8px; flex-direction: row; align-items: flex-end; }
+/* Above the touch layer (#touch-ui, 1650), whose full-screen look surface
+   would otherwise swallow every tap on a slot or a prompt */
+body.touch #hotbar { bottom: 2px; zoom: 0.62; gap: 8px; flex-direction: row; align-items: flex-end; z-index: 1660; }
 body.touch #hotbar [data-hb] { pointer-events: auto; }
 body.touch .hb-slot:not(.owned) { display: none; }
 body.touch .hb-slot {
@@ -430,8 +432,9 @@ body.touch #kill-feed { top: 80px; right: auto; left: 14px; align-items: flex-st
 body.touch #squad { top: 66px; left: auto; right: 8px; zoom: 0.7; }   /* under the minimap */
 
 /* Context prompts: big tappable pills, right of the crosshair */
-body.touch #pickup-prompt { top: 46%; left: 62%; transform: none; pointer-events: auto; zoom: 0.9; align-items: flex-start; }
-body.touch #pickup-prompt:not(.visible) { pointer-events: none; }
+body.touch #pickup-prompt { top: 46%; left: 62%; transform: none; pointer-events: none; zoom: 0.9; align-items: flex-start; z-index: 1660; }
+body.touch #pickup-prompt.visible .prompt-row { pointer-events: auto; }
+body.touch #pickup-prompt { padding: 0; gap: 8px; background: none; border: 0; box-shadow: none; }
 body.touch #pickup-prompt kbd { display: none; }
 body.touch .prompt-row {
   padding: 8px 18px;

@@ -119,6 +119,11 @@ export class Soldier {
     this.palm    = bone("Middle1R");
     this.legs = ["UpperLeg.L", "UpperLeg.R", "LowerLeg.L", "LowerLeg.R"].map(bone);
     this.arms = ["UpperArm.L", "UpperArm.R"].map(bone);
+    // Bones we rotate by hand every frame. The clips don't key some of them
+    // (Abdomen, Neck), so without a reset each frame's rotation would pile onto
+    // the last one: the head spun when prone. Their rest pose is restored first.
+    this._handPosed = [this.abdomen, this.chest, this.neck, ...this.arms, ...this.legs]
+      .filter(Boolean).map(b => [b, b.quaternion.clone()]);
 
     const upperBones = new Set();
     this.abdomen.traverse(o => upperBones.add(o.name));
@@ -312,6 +317,7 @@ export class Soldier {
     }
 
     this._applyWeights();
+    for (const [b, q] of this._handPosed) b.quaternion.copy(q);
     this.mixer.update(delta);
 
     const lean = this.proneW * PRONE_LEAN + this.crouchW * CROUCH_LEAN;

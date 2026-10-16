@@ -31,6 +31,7 @@ const DEFAULTS = {
   invertY: false,
   size: 1,          // button scale
   opacity: 0.8,
+  fps: "60",        // frame cap: "60", or "30" to save battery and heat
 };
 
 function loadSettings() {
@@ -185,6 +186,12 @@ export class TouchControls {
         <label class="tc-check"><input type="checkbox" data-k="invertY"><span>Invert up / down</span></label>
         <label><span>Button size <b data-out="size"></b></span><input type="range" data-k="size" min="0.7" max="1.4" step="0.05"></label>
         <label><span>Button opacity <b data-out="opacity"></b></span><input type="range" data-k="opacity" min="0.3" max="1" step="0.05"></label>
+        <label><span>Frame rate</span>
+          <select data-k="fps">
+            <option value="60">60 FPS (smooth)</option>
+            <option value="30">30 FPS (battery saver, cooler phone)</option>
+          </select>
+        </label>
         <p class="tc-gyro-note"></p>
         <div class="tc-set-row"><button data-act="reset" class="ghost">Defaults</button><button data-act="done">Done</button></div>
       </div>`;
@@ -266,7 +273,7 @@ export class TouchControls {
       } else {
         this._touches.set(e.pointerId, { kind: "look", x: e.clientX, y: e.clientY });
       }
-      s.setPointerCapture?.(e.pointerId);
+      try { s.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
     });
     s.addEventListener("pointermove", e => this._move(e));
     s.addEventListener("pointerup", e => this._end(e));
@@ -349,7 +356,7 @@ export class TouchControls {
       this._firstTouch();
       e.preventDefault();
       e.stopPropagation();
-      b.setPointerCapture?.(e.pointerId);
+      try { b.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
       b.classList.add("down");
       const t = { kind: look ? "look" : "btn", x: e.clientX, y: e.clientY, up: () => { b.classList.remove("down"); up?.(); } };
       this._touches.set(e.pointerId, t);

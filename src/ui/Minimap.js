@@ -3,8 +3,9 @@
 // every frame) and only touches the heading DOM when it changes.
 
 const MAP_RANGE   = 60;    // metres from centre to edge
-const REDRAW_HZ   = 30;
+const REDRAW_HZ   = navigator.maxTouchPoints > 0 && matchMedia("(pointer: coarse)").matches ? 20 : 30; // phones: 20
 const EDGE_RANGE  = 160;   // weapon pickups this close but off-map get an edge marker
+const LAYER_MOVE  = 8;     // metres you can move before the static layer is redrawn
 const CARDINALS   = [["N", 0], ["E", 90], ["S", 180], ["W", 270]];
 const HEADINGS    = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 
@@ -46,6 +47,7 @@ export class Minimap {
     this.scale = dpr;
     this.size = css;
     this._next = 0;
+    this._layer = null; // redraw the static layer at the new size
   }
 
   /** px, pz: player position. yaw: camera yaw (forward = (sin yaw, cos yaw)). */
@@ -77,21 +79,14 @@ export class Minimap {
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, S, S);
 
-    // World-aligned grid (10 m) so movement reads even on empty ground
-    ctx.strokeStyle = "rgba(255, 230, 200, 0.06)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    const g0x = Math.floor((px - MAP_RANGE * 1.5) / 10) * 10;
-    const g0z = Math.floor((pz - MAP_RANGE * 1.5) / 10) * 10;
-    for (let gx = g0x; gx <= px + MAP_RANGE * 1.5; gx += 10) {
-      ctx.moveTo(mx(gx, pz - 90), my(gx, pz - 90));
-      ctx.lineTo(mx(gx, pz + 90), my(gx, pz + 90));
-    }
-    for (let gz = g0z; gz <= pz + MAP_RANGE * 1.5; gz += 10) {
-      ctx.moveTo(mx(px - 90, gz), my(px - 90, gz));
-      ctx.lineTo(mx(px + 90, gz), my(px + 90, gz));
-    }
-    ctx.stroke();
+    // Grid, trees, rocks and buildings: one pre-drawn north-up layer, turned
+    // to the heading (redrawn only after you've moved a few metres)
+    const L = this._staticLayer(px, pz, k);
+    ctx.save();
+    ctx.translate(c, c);
+    ctx.rotate(yaw);
+    ctx.drawImage(L.canvas, (px - L.x) * k - L.half, (pz - L.z) * k - L.half, L.half * 2, L.half * 2);
+    ctx.restore();
 
     // Range rings
     ctx.strokeStyle = "rgba(255, 220, 180, 0.1)";
@@ -101,8 +96,9 @@ export class Minimap {
       ctx.stroke();
     }
 
-    // ── Obstacles (houses, trees, props)
+    // ── Live obstacles: house doors (open / shut) and the rickshaw
     for (const o of this.sources.obstacles()) {
+      if (!o.door && !o.vehicle) continue;
       const dx = o.x - px, dz = o.z - pz;
       if (dx * dx + dz * dz > (MAP_RANGE + 30) ** 2) continue;
       const ox = mx(o.x, o.z), oy = my(o.x, o.z);
@@ -379,6 +375,51 @@ export class Minimap {
       this._coords = coords;
       this.coordsEl.textContent = coords;
     }
+  }
+
+  /** North-up layer of the grid and static obstacles around (px, pz), reused while you stay near. */
+  _staticLayer(px, pz, k) {
+    const L = this._layer;
+    if (L && L.k === k && Math.hypot(px - L.x, pz - L.z) < LAYER_MOVE) return L;
+    const half = MAP_RANGE * 1.5 * k;          // covers the disc at any heading, plus the drift
+    const dpr = this.scale;
+    const canvas = L?.canvas ?? document.createElement("canvas");
+    const size = Math.ceil(half * 2 * dpr);
+    if (canvas.width !== size) canvas.width = canvas.height = size;
+    const g = canvas.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, half * 2, half * 2);
+    // North-up, east (−X) to the right, like the big map
+    const X = x => half - (x - px) * k, Y = z => half - (z - pz) * k;
+    const reach = MAP_RANGE * 1.5 + 5;
+
+    g.strokeStyle = "rgba(255, 230, 200, 0.06)";
+    g.lineWidth = 1;
+    g.beginPath();
+    for (let gx = Math.floor((px - reach) / 10) * 10; gx <= px + reach; gx += 10) { g.moveTo(X(gx), 0); g.lineTo(X(gx), half * 2); }
+    for (let gz = Math.floor((pz - reach) / 10) * 10; gz <= pz + reach; gz += 10) { g.moveTo(0, Y(gz)); g.lineTo(half * 2, Y(gz)); }
+    g.stroke();
+
+    for (const o of this.sources.obstacles()) {
+      if (o.door || o.vehicle) continue;
+      if (Math.abs(o.x - px) > reach || Math.abs(o.z - pz) > reach) continue;
+      if (o.type === "circle") {
+        g.fillStyle = "rgba(110, 140, 80, 0.32)";
+        g.beginPath();
+        g.arc(X(o.x), Y(o.z), Math.max(2, o.r * k), 0, Math.PI * 2);
+        g.fill();
+      } else {
+        g.save();
+        g.translate(X(o.x), Y(o.z));
+        g.rotate(Math.PI - o.rot);
+        g.fillStyle = "rgba(210, 190, 160, 0.26)";
+        g.strokeStyle = "rgba(240, 220, 190, 0.45)";
+        g.fillRect(-o.w * k / 2, -o.d * k / 2, o.w * k, o.d * k);
+        g.strokeRect(-o.w * k / 2, -o.d * k / 2, o.w * k, o.d * k);
+        g.restore();
+      }
+    }
+    return (this._layer = { canvas, x: px, z: pz, k, half });
   }
 
   _diamond(x, y, s) {

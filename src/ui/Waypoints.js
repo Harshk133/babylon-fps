@@ -11,7 +11,7 @@ import { bearingDeg } from "./WorldMap.js";
 const MAX_PINS    = 8;
 const PILLAR_H    = 70;
 const COMPASS_FOV = 120;  // degrees of heading shown across the tape
-const COMPASS_HZ  = 30;
+const COMPASS_HZ  = 20;
 const EDGE_PAD    = 34;   // px kept between an edge-clamped marker and the screen edge
 const LABELS = { 0: "N", 45: "NE", 90: "E", 135: "SE", 180: "S", 225: "SW", 270: "W", 315: "NW" };
 
@@ -70,6 +70,8 @@ export class Waypoints {
     this._cKey = "";
     this._degText = "";
     this.visible = true;
+    // The tape is drawn once: redraw it when the HUD font (Teko) has arrived
+    document.fonts?.ready.then(() => { this._tape = null; this._cKey = ""; });
   }
 
   /** pin: { x, z, color, label } or null. Same ids as WorldMap ("me" is yours). */
@@ -137,6 +139,36 @@ export class Waypoints {
     if (this.visible) this._drawCompass(now, me);
   }
 
+  /** Ticks and letters for −FOV/2 … 360 + FOV/2 degrees, so any heading's window fits. */
+  _buildTape(w, h, dpr, pxPerDeg) {
+    const tape = document.createElement("canvas");
+    const span = 360 + COMPASS_FOV;
+    tape.width = Math.ceil(span * pxPerDeg * dpr);
+    tape.height = Math.round(h * dpr);
+    const ctx = tape.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    for (let d = -COMPASS_FOV / 2; d <= 360 + COMPASS_FOV / 2; d += 5) {
+      const deg = ((d % 360) + 360) % 360;
+      const x = (d + COMPASS_FOV / 2) * pxPerDeg;
+      const label = LABELS[deg];
+      const major = deg % 15 === 0;
+      ctx.strokeStyle = "rgba(255,255,255,0.75)";
+      ctx.lineWidth = label ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(x, h - 1);
+      ctx.lineTo(x, h - (label ? 9 : major ? 7 : 4));
+      ctx.stroke();
+      if (label || major) {
+        ctx.font = label ? "600 15px 'Teko', 'Segoe UI', sans-serif" : "500 11px 'Teko', 'Segoe UI', sans-serif";
+        ctx.fillStyle = label === "N" ? "rgb(255,90,70)" : label ? "#fff" : "rgba(255,255,255,0.6)";
+        ctx.fillText(label ?? String(deg), x, h - 12);
+      }
+    }
+    return tape;
+  }
+
   _drawCompass(now, me) {
     if (now < this._cNext) return;
     let heading = (-me.yaw * 180) / Math.PI % 360;
@@ -150,35 +182,17 @@ export class Waypoints {
     const cv = this.compassCanvas;
     const w = cv.clientWidth || 300, h = cv.clientHeight || 30;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); this._tape = null; }
     const ctx = this.cctx;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
     const pxPerDeg = w / COMPASS_FOV;
     const rel = d => { let r = (d - heading) % 360; if (r > 180) r -= 360; if (r < -180) r += 360; return r; };
-
-    ctx.textAlign = "center";
-    ctx.textBaseline = "alphabetic";
-    const first = Math.ceil((heading - COMPASS_FOV / 2) / 5) * 5;
-    for (let d = first; d <= heading + COMPASS_FOV / 2; d += 5) {
-      const deg = ((d % 360) + 360) % 360;
-      const x = w / 2 + rel(deg) * pxPerDeg;
-      // Fade toward the ends of the tape
-      const a = 1 - Math.min(1, Math.abs(x - w / 2) / (w / 2)) ** 2;
-      const label = LABELS[deg];
-      const major = deg % 15 === 0;
-      ctx.strokeStyle = `rgba(255,255,255,${0.75 * a})`;
-      ctx.lineWidth = label ? 2 : 1;
-      ctx.beginPath();
-      ctx.moveTo(x, h - 1);
-      ctx.lineTo(x, h - (label ? 9 : major ? 7 : 4));
-      ctx.stroke();
-      if (label || major) {
-        ctx.font = label ? "600 15px 'Teko', 'Segoe UI', sans-serif" : "500 11px 'Teko', 'Segoe UI', sans-serif";
-        ctx.fillStyle = label === "N" ? `rgba(255,90,70,${a})` : `rgba(255,255,255,${(label ? 1 : 0.6) * a})`;
-        ctx.fillText(label ?? String(deg), x, h - 12);
-      }
-    }
+    // The ticks and letters are drawn once onto a long tape; each update just
+    // slides it under the window (the CSS mask fades its ends)
+    this._tape ??= this._buildTape(w, h, dpr, pxPerDeg);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(this._tape, Math.round(heading * pxPerDeg * dpr), 0, cv.width, cv.height, 0, 0, cv.width, cv.height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     // Pins: a drop in their colour at their bearing (pinned to the tape's ends when outside)
     for (const p of this.pins.values()) {
       const r = rel(bearingDeg(me.x, me.z, p.x, p.z));

@@ -40,6 +40,8 @@ const MARKER_RANGE     = 55;
 
 // ─── Distance tiers (see CLAUDE.md performance rules) ─────────────────────────
 const FAR_TIER  = 80;
+const ANIM_NEAR = 25;   // animation updates every frame closer than this
+const ANIM_MID  = 50;   // every 2nd frame up to here, every 3rd beyond
 
 // ─── Creatures (hound / dragon) ───────────────────────────────────────────────
 const PACK_RADIUS     = 34;   // a hound that spots you calls the pack within this
@@ -103,7 +105,8 @@ export class ZombieManager {
     this.onDoorBang = null;    // (x, z)
     this.onCrash = null;       // (monster) a dead flyer hit the ground
     this.navigate = null;      // (zx, zz, tx, tz, out, big, zy, ty) → 0 | 1 | 2 (zy / ty: feet heights)
-    this.surfaceAt = null;     // (x, z, feetY, terrainY) → height walked on (house floors, stairs)
+    this.surfaceAt = null;
+    this._animFrame = 0;     // (x, z, feetY, terrainY) → height walked on (house floors, stairs)
     this.canSpawnAt = null;    // (x, z) → bool
 
     this._chasers = [];
@@ -1078,10 +1081,17 @@ export class ZombieManager {
       }
     }
 
+    // Animation LOD: every frame up close, every 2nd frame past ANIM_NEAR,
+    // every 3rd past ANIM_MID (with the skipped time, so the clips keep pace)
+    this._animFrame = (this._animFrame + 1) % 6;
     for (const m of active) {
       if (m.dying || m.distXZ >= FAR_TIER) continue;
-      m.mixer.update(delta);
-      m.wMixer?.update(delta);
+      m.animDt = (m.animDt ?? 0) + delta;
+      const every = m.distXZ < ANIM_NEAR || m.def.flying ? 1 : m.distXZ < ANIM_MID ? 2 : 3;
+      if ((this._animFrame + m.netId) % every !== 0) continue;
+      m.mixer.update(m.animDt);
+      m.wMixer?.update(m.animDt);
+      m.animDt = 0;
     }
     this.enemyFire?.endFrame();
 

@@ -3,6 +3,7 @@ import * as CANNON from "cannon-es";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { GROUP_WORLD, GROUP_GLASS, GROUP_ZOMBIE } from "../physicsGroups.js";
 import { QUALITY } from "../quality.js";
+import { mergeStaticMeshes } from "./MergeStatic.js";
 
 // Enterable two-story houses assembled from Kenney's CC0 Building Kit +
 // Furniture Kit (public/models/house/house-kit.glb, built by
@@ -405,6 +406,7 @@ export class Houses {
     // Each floor: its own lamp material (so the floors light independently) and switch
     const floors = SWITCHES.map((s, f) => {
       let lampMat = null;
+      const lamps = new THREE.Group();
       for (const [lx, lz, lf] of CEILING_LAMPS) {
         if (lf !== f) continue;
         const lamp = this.lampTemplate.clone(true);
@@ -417,9 +419,12 @@ export class Houses {
             o.material = lampMat;
           }
         });
-        root.add(lamp);
+        lamps.add(lamp);
       }
       if (lampMat) { lampMat.emissive = new THREE.Color(0xffd27a); lampMat.emissiveIntensity = 0; }
+      // A floor's lamps as one mesh per material (2 draws instead of 6); the bulbs keep lampMat
+      mergeStaticMeshes(lamps);
+      root.add(lamps);
       // Light switch with an animated rocker
       const sw = new THREE.Group();
       sw.position.copy(s.pos);

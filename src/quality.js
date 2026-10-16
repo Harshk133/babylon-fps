@@ -86,8 +86,9 @@ const TOUCH_TUNING = {
   },
   medium: {
     antialias: true,
-    pixelRatioMax: 1.6,
+    pixelRatioMax: 1.4,
     pixelRatioMin: 1,
+    shadowEvery: 1,       // every frame: alternating light / heavy frames judder
     grass: 3800,
     pebbles: 120,
     rain: 2800,
@@ -98,9 +99,9 @@ const TOUCH_TUNING = {
   },
   high: {
     antialias: true,
-    pixelRatioMax: 2,
+    pixelRatioMax: 1.75,
     pixelRatioMin: 1.1,
-    shadowEvery: 2,
+    shadowEvery: 1,
     grass: 7000,
     pebbles: 200,
     rain: 4500,
