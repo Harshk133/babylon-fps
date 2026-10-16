@@ -4,11 +4,11 @@ import { cloneItem, getItemTemplate } from "../items/ItemModels.js";
 
 const HIDE_Y          = -500;
 const HOVER_HEIGHT    = 0.6;
-const MAX_ACTIVE      = 80;
+const MAX_ACTIVE      = 240;  // battle royale scatters a lot of loot
 const INTERACT_RADIUS = 2.2;   // weapons: shows the [E] prompt
 const AUTO_RADIUS     = 1.4;   // ammo / throwables / medkits: walk over to collect
 const BLINK_TIME      = 5;     // timed drops blink for their last few seconds
-const FAR_SKIP        = 90;    // don't animate pickups this far away
+const FAR_SKIP        = 90;    // don't animate (or draw) pickups this far away
 
 const CATEGORY_COLOR = {
   weapon:    0xffa630,
@@ -44,6 +44,7 @@ export class Pickups {
     this.active = [];
     this.nearestWeapon = null;
     this.touching = [];       // consumables within AUTO_RADIUS this frame
+    this.byId = new Map();    // network id → entry (battle royale loot shared by every player)
     this._time = 0;
 
     this._ringGeo = new THREE.RingGeometry(0.38, 0.58, 32).rotateX(-Math.PI / 2);
@@ -97,7 +98,7 @@ export class Pickups {
     root.visible = false;
     this.scene.add(root);
 
-    const entry = { kind, def, root, spinner, active: false, x: 0, z: 0, life: Infinity, data: null, phase: 0 };
+    const entry = { kind, def, root, spinner, active: false, x: 0, z: 0, life: Infinity, data: null, phase: 0, id: null };
     this.pools[kind].push(entry);
     return entry;
   }
@@ -105,15 +106,19 @@ export class Pickups {
   /**
    * kind: key of PICKUP_KINDS. data: { ammo, reserve } for guns, { count } for throwables.
    * life: seconds before it despawns (Infinity for placed world loot).
+   * id: optional network id, so a pickup taken by one player vanishes for all.
    */
-  spawn(kind, x, z, data = null, life = Infinity) {
-    if (this.active.length >= MAX_ACTIVE) return null;
+  spawn(kind, x, z, data = null, life = Infinity, id = null) {
+    if (this.active.length >= MAX_ACTIVE || !this.pools[kind]) return null;
+    if (id !== null && this.byId.has(id)) return null;
     let entry = this.pools[kind].find(e => !e.active) ?? this._create(kind);
     entry.active = true;
     entry.x = x;
     entry.z = z;
     entry.life = life;
     entry.data = data;
+    entry.id = id;
+    if (id !== null) this.byId.set(id, entry);
     entry.phase = Math.random() * Math.PI * 2;
     entry.root.position.set(x, 0, z);
     entry.root.visible = true;
@@ -127,9 +132,15 @@ export class Pickups {
     entry.active = false;
     entry.root.visible = false;
     entry.root.position.y = HIDE_Y;
+    if (entry.id !== null) { this.byId.delete(entry.id); entry.id = null; }
     const i = this.active.indexOf(entry);
     if (i >= 0) this.active.splice(i, 1);
     if (this.nearestWeapon === entry) this.nearestWeapon = null;
+  }
+
+  releaseById(id) {
+    const e = this.byId.get(id);
+    if (e) this.release(e);
   }
 
   clear() {
@@ -147,15 +158,17 @@ export class Pickups {
 
     for (let i = this.active.length - 1; i >= 0; i--) {
       const e = this.active[i];
+      const dx = e.x - px, dz = e.z - pz;
+      const d2 = dx * dx + dz * dz;
+      const near = d2 <= FAR_SKIP * FAR_SKIP;
       if (e.life !== Infinity) {
         e.life -= delta;
         if (e.life <= 0) { this.release(e); continue; }
-        e.root.visible = e.life > BLINK_TIME || Math.sin(e.life * 18) > -0.3;
+        e.root.visible = near && (e.life > BLINK_TIME || Math.sin(e.life * 18) > -0.3);
+      } else {
+        e.root.visible = near;
       }
-
-      const dx = e.x - px, dz = e.z - pz;
-      const d2 = dx * dx + dz * dz;
-      if (d2 > FAR_SKIP * FAR_SKIP) continue;
+      if (!near) continue;
 
       e.phase += delta;
       e.spinner.rotation.y += delta * 1.3;

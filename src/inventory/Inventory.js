@@ -14,13 +14,14 @@ export class Inventory {
     this.reset();
   }
 
-  reset() {
+  /** empty: battle royale drop, nothing in your pockets (current is null until you find a gun). */
+  reset(empty = false) {
     this.weapons = {};            // id → { id, ammo, reserve }
     this.throwables = {};         // kind → count
-    for (const id of STARTING_WEAPONS) this._give(id, WEAPONS[id].magSize, WEAPONS[id].startReserve);
-    for (const k of THROWABLE_ORDER) this.throwables[k] = THROWABLES[k].start;
-    this.medkits = MEDKIT.start;
-    this.current = STARTING_WEAPON;
+    if (!empty) for (const id of STARTING_WEAPONS) this._give(id, WEAPONS[id].magSize, WEAPONS[id].startReserve);
+    for (const k of THROWABLE_ORDER) this.throwables[k] = empty ? 0 : THROWABLES[k].start;
+    this.medkits = empty ? 0 : MEDKIT.start;
+    this.current = empty ? null : STARTING_WEAPON;
     this.selectedThrowable = THROWABLE_ORDER[0];
     this.version = (this.version ?? 0) + 1;
   }
@@ -33,7 +34,7 @@ export class Inventory {
 
   has(id) { return !!this.weapons[id]; }
 
-  get currentSlot() { return this.weapons[this.current]; }
+  get currentSlot() { return this.current ? this.weapons[this.current] : null; }
 
   get ownedWeapons() { return WEAPON_ORDER.filter(id => this.weapons[id]); }
 
@@ -57,12 +58,12 @@ export class Inventory {
     return { msg: `+${taken} ${def.short} ammo`, isNew: false };
   }
 
-  /** Removes a gun (for dropping). The last gun can't be dropped. */
-  removeWeapon(id) {
-    if (!this.weapons[id] || this.ownedWeapons.length <= 1) return null;
+  /** Removes a gun (for dropping). The last gun can't be dropped unless `any`. */
+  removeWeapon(id, any = false) {
+    if (!this.weapons[id] || (!any && this.ownedWeapons.length <= 1)) return null;
     const slot = this.weapons[id];
     delete this.weapons[id];
-    if (this.current === id) this.current = this.ownedWeapons[0];
+    if (this.current === id) this.current = this.ownedWeapons[0] ?? null;
     this._touch();
     return slot;
   }

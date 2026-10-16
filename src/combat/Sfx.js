@@ -472,6 +472,58 @@ export class Sfx {
     a.last = { rain: -1, wind: -1, night: -1, indoor: null };
   }
 
+  // ── Battle royale drop: plane engines and freefall wind ─────────────────────
+
+  _startFlight() {
+    const ctx = this.ctx;
+    const f = this.flight = { last: { engine: -1, rush: -1 } };
+    // Engines: detuned saws with a slow throb
+    f.engine = ctx.createGain();
+    f.engine.gain.value = 0;
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 420;
+    for (const hz of [62, 63.3, 124.5]) {
+      const o = ctx.createOscillator();
+      o.type = "sawtooth";
+      o.frequency.value = hz;
+      o.connect(lp);
+      o.start();
+    }
+    lp.connect(f.engine).connect(this.master);
+    // Freefall: band-passed rushing noise
+    const rush = this._loopNoise(3.7);
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 900;
+    bp.Q.value = 0.6;
+    f.rush = ctx.createGain();
+    f.rush.gain.value = 0;
+    rush.connect(bp).connect(f.rush).connect(this.master);
+    rush.start();
+  }
+
+  /** engine / rush: 0..1. Cheap to call every frame. */
+  setFlight(engine, rush) {
+    if (!this.ctx) return;
+    if (!this.flight) {
+      if (engine <= 0 && rush <= 0) return;
+      this._startFlight();
+    }
+    const f = this.flight, l = f.last, t = this.ctx.currentTime;
+    const q = v => Math.round(v * 20) / 20;
+    if (q(engine) !== l.engine) { l.engine = q(engine); f.engine.gain.setTargetAtTime(l.engine * 0.12, t, 0.4); }
+    if (q(rush) !== l.rush) { l.rush = q(rush); f.rush.gain.setTargetAtTime(l.rush * 0.35, t, 0.25); }
+  }
+
+  /** The canopy snapping open. */
+  chuteOpen() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    this._noise(t, 0.35, "lowpass", 1800, 300, 0.7);
+    this._noise(t + 0.05, 0.2, "bandpass", 500, 200, 0.4);
+  }
+
   /** rain / wind / night: 0..1; indoor muffles the rain. Cheap to call every frame. */
   setAmbience(rain, wind, night, indoor) {
     if (!this.ctx) return;

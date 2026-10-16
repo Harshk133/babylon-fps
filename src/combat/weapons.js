@@ -11,7 +11,7 @@ export const HEAD_HEIGHT = 0.5;
 export const WEAPONS = {
   pistol: {
     name: "Pistol", short: "PISTOL", slot: 1, auto: false,
-    fireRate: 6, magSize: 12, reserveMax: Infinity, startReserve: Infinity, pickupReserve: 0,
+    fireRate: 6, magSize: 12, reserveMax: Infinity, startReserve: Infinity, pickupReserve: 24,
     reloadTime: 1.2, damage: 34, pellets: 1, headshotMultiplier: 3, range: 90,
     spreadHip: 0.016, spreadAim: 0.002, spreadMove: 0.016, spreadAir: 0.04,
     bloomPerShot: 0.01, bloomMax: 0.03, bloomRecovery: 0.12,

@@ -131,6 +131,37 @@ export class Minimap {
       }
     }
 
+    // ── Battle royale zone: blue outside the safe circle, next circle dashed white
+    const zone = this.sources.zone?.();
+    if (zone) {
+      const zx = mx(zone.x, zone.z), zy = my(zone.x, zone.z);
+      ctx.fillStyle = "rgba(40, 110, 255, 0.3)";
+      ctx.beginPath();
+      ctx.rect(0, 0, S, S);
+      ctx.arc(zx, zy, Math.max(0, zone.r * k), 0, Math.PI * 2, true);
+      ctx.fill("evenodd");
+      ctx.strokeStyle = "#4da3ff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(zx, zy, Math.max(0, zone.r * k), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.arc(mx(zone.nx, zone.nz), my(zone.nx, zone.nz), Math.max(0, zone.nr * k), 0, Math.PI * 2);
+      ctx.stroke();
+      // Outside the next circle: a line toward its centre
+      if (Math.hypot(zone.nx - px, zone.nz - pz) > zone.nr) {
+        ctx.beginPath();
+        ctx.moveTo(c, c);
+        ctx.lineTo(mx(zone.nx, zone.nz), my(zone.nx, zone.nz));
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.lineWidth = 1;
+    }
+
     // ── Fires
     for (const f of this.sources.fires()) {
       if (!f.active) continue;

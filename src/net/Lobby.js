@@ -1,4 +1,5 @@
-// Name / room entry shown after loading: play solo or join co-op.
+// Name / room entry shown after loading. Three modes: solo against the horde,
+// co-op against the horde, or a battle royale (players against each other).
 
 const NAME_KEY = "babylon-fps:name";
 const ROOM_KEY = "babylon-fps:room";
@@ -11,14 +12,15 @@ function save(key, value) {
 }
 
 export class Lobby {
-  /** onSolo(name), onCoop(name, room) → Promise (rejects with an Error to show). */
-  constructor({ onSolo, onCoop }) {
+  /** onSolo(name); onCoop(name, room) / onBattleRoyale(name, room) → Promise (rejects with an Error to show). */
+  constructor({ onSolo, onCoop, onBattleRoyale }) {
     this.el = document.getElementById("lobby");
     this.nameEl = document.getElementById("lobby-name");
     this.roomEl = document.getElementById("lobby-room");
     this.statusEl = document.getElementById("lobby-status");
     this.coopBtn = document.getElementById("lobby-coop");
     this.soloBtn = document.getElementById("lobby-solo");
+    this.brBtn = document.getElementById("lobby-br");
     this.open = false;
 
     const params = new URLSearchParams(location.search);
@@ -31,14 +33,14 @@ export class Lobby {
       return n;
     };
     this.soloBtn.addEventListener("click", () => onSolo(name()));
-    this.coopBtn.addEventListener("click", async () => {
+    const join = async connect => {
       const room = this.roomEl.value.trim().toLowerCase() || "horde";
       save(ROOM_KEY, room);
       this.setBusy(true);
       this.setStatus("Connecting…");
-      const slow = setTimeout(() => this.setStatus("Waking up the co-op server… free hosts can take up to a minute"), 5000);
+      const slow = setTimeout(() => this.setStatus("Waking up the server… free hosts can take up to a minute"), 5000);
       try {
-        await onCoop(name(), room);
+        await connect(name(), room);
         this.setStatus("");
       } catch (err) {
         this.setStatus(err.message || "Couldn't connect", true);
@@ -46,7 +48,9 @@ export class Lobby {
       } finally {
         clearTimeout(slow);
       }
-    });
+    };
+    this.coopBtn.addEventListener("click", () => join(onCoop));
+    this.brBtn.addEventListener("click", () => join(onBattleRoyale));
     for (const el of [this.nameEl, this.roomEl]) {
       el.addEventListener("keydown", e => {
         e.stopPropagation(); // typing WASD here shouldn't move the player
@@ -64,6 +68,7 @@ export class Lobby {
   setBusy(busy) {
     this.coopBtn.disabled = busy;
     this.soloBtn.disabled = busy;
+    this.brBtn.disabled = busy;
   }
 
   show() {

@@ -23,18 +23,30 @@ import { Weather } from "./world/Weather.js";
 import { Atmosphere } from "./world/Atmosphere.js";
 import { plantDeadForest } from "./world/Forest.js";
 import { Net } from "./net/Net.js";
-import { RemotePlayers } from "./net/RemotePlayers.js";
+import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "./net/RemotePlayers.js";
 import { MonsterSync } from "./net/MonsterSync.js";
 import { Lobby } from "./net/Lobby.js";
+import { BrHud } from "./br/BrHud.js";
+import { ZoneWall, createPlane, updatePlane, createParachute, setSkydivePose } from "./br/BrVisuals.js";
+import {
+  PLANE, FREEFALL, CHUTE, BR_AUTO_START, BR_END_HOLD, BR_WARMUP_RESPAWN, BR_MAX_PLAYERS,
+  PVP_DAMAGE, PVP_HEADSHOT, PVP_HEAD_Y, BR_GUN_RESERVE,
+  planeRoute, planeAt, zoneCircles, zoneAt, lootPlan, fmtClock,
+} from "./br/BattleRoyale.js";
 import { ENEMY_GUNS, getLevel } from "./zombies/MonsterTypes.js";
 import {
-  WEAPONS, WEAPON_ORDER, HEAD_HEIGHT, GRENADE, MOLOTOV, MEDKIT, THROWABLES,
+  WEAPONS, WEAPON_ORDER, HEAD_HEIGHT, GRENADE, MOLOTOV, MEDKIT, THROWABLES, THROWABLE_ORDER,
 } from "./combat/weapons.js";
 import { Inventory } from "./inventory/Inventory.js";
 import { InventoryUI } from "./inventory/InventoryUI.js";
 import { Pickups } from "./pickups/Pickups.js";
 import { renderItemIcon } from "./items/ItemModels.js";
 import { GROUP_WORLD, GROUP_PLAYER, GROUP_ZOMBIE } from "./physicsGroups.js";
+
+// ─── Game mode ────────────────────────────────────────────────────────────────
+// "solo" and "coop" fight the horde; "br" is the battle royale (players vs players)
+let gameMode = "solo";
+const isBR = () => gameMode === "br";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const JOG_SPEED           = 5.2;   // m/s — default movement
@@ -60,6 +72,7 @@ const SHADOW_FRUSTUM_SIZE = 25;
 
 // ─── World Scatter Settings ───────────────────────────────────────────────────
 const HOUSE_COUNT        = 2;
+const FARMHOUSE_COUNT    = 6;     // outlying houses, mostly there to loot in the battle royale
 const TREE_A_COUNT       = 5;
 const TREE_B_COUNT       = 4;
 
@@ -87,7 +100,7 @@ const THROW_COOLDOWN = 0.6;
 const DROP_LIFETIME  = 45;    // zombie loot despawns after this many seconds
 
 const inventory = new Inventory();
-const currentDef = () => WEAPONS[inventory.current];
+const currentDef = () => WEAPONS[inventory.current]; // undefined when empty-handed (battle royale drop)
 
 // ─── Player Health System ─────────────────────────────────────────────────────
 let playerHealth     = 100;
@@ -144,7 +157,8 @@ function updatePlayerHealthUI(delta) {
     if (damageOverlayEl) damageOverlayEl.style.opacity = `${flash}`;
   }
 
-  const low = Math.round(THREE.MathUtils.clamp((40 - playerHealth) / 40, 0, 1) * 20) / 20;
+  // No bleeding-out vignette over someone else's fight while spectating
+  const low = brWatching() ? 0 : Math.round(THREE.MathUtils.clamp((40 - playerHealth) / 40, 0, 1) * 20) / 20;
   if (low !== hudCache.low) {
     hudCache.low = low;
     if (lowHealthEl) lowHealthEl.style.opacity = `${low}`;
@@ -161,7 +175,7 @@ function updateThreatUI() {
 
 /** srcX / srcZ: where the hit came from (shows the red direction arc). */
 function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX = null, srcZ = null) {
-  if (playerHealth <= 0) return;
+  if (playerHealth <= 0 || (isBR() && (br.ghost || br.flight === PHASE_PLANE))) return;
   playerHealth = Math.max(0, playerHealth - amount);
   if (srcX !== null) {
     const dx = srcX - characterBody.position.x, dz = srcZ - characterBody.position.z;
@@ -191,6 +205,7 @@ function onPlayerDeath() {
   sfx.hurt();
   cancelThrow();
   setInventoryOpen(false);
+  if (isBR()) { brOnLocalDeath(); return; }
   if (deathKillsEl) deathKillsEl.textContent = `${killsThisLife}`;
   if (deathScreenEl) deathScreenEl.classList.add("visible");
   if (document.pointerLockElement) document.exitPointerLock();
@@ -265,7 +280,7 @@ function updateCombatHUD(delta) {
     hud.gap = gap;
     crosshairEl?.style.setProperty("--gap", `${gap}px`);
   }
-  const hideCrosshair = sprinting || playerHealth <= 0;
+  const hideCrosshair = sprinting || playerHealth <= 0 || !currentDef() || brAirborne();
   if (hideCrosshair !== hud.crosshairHidden) {
     hud.crosshairHidden = hideCrosshair;
     crosshairEl?.classList.toggle("hidden", hideCrosshair);
@@ -281,29 +296,31 @@ function updateCombatHUD(delta) {
 
   const def = currentDef();
   const slot = inventory.currentSlot;
+  const mag = def ? def.magSize : 1;
+  const ammo = slot ? slot.ammo : 0, reserve = slot ? slot.reserve : 0;
   if (inventory.current !== hud.weapon) {
     hud.weapon = inventory.current;
     hud.ammo = -1;
-    if (ammoWeaponEl) ammoWeaponEl.textContent = def.short;
+    if (ammoWeaponEl) ammoWeaponEl.textContent = def ? def.short : "UNARMED";
     // One pip per round in the magazine
-    ammoCardEl?.style.setProperty("--pips", `${def.magSize}`);
+    ammoCardEl?.style.setProperty("--pips", `${mag}`);
   }
-  if (slot.ammo !== hud.ammo) {
-    hud.ammo = slot.ammo;
-    if (ammoCountEl) ammoCountEl.textContent = `${slot.ammo}`;
-    if (ammoPipsEl) ammoPipsEl.style.clipPath = `inset(0 ${100 - (slot.ammo / def.magSize) * 100}% 0 0)`;
-    const low = slot.ammo <= Math.max(1, def.magSize * 0.25);
+  if (ammo !== hud.ammo) {
+    hud.ammo = ammo;
+    if (ammoCountEl) ammoCountEl.textContent = `${ammo}`;
+    if (ammoPipsEl) ammoPipsEl.style.clipPath = `inset(0 ${100 - (ammo / mag) * 100}% 0 0)`;
+    const low = ammo <= Math.max(1, mag * 0.25);
     if (low !== hud.low) {
       hud.low = low;
       ammoCardEl?.classList.toggle("low", low);
     }
   }
-  if (slot.reserve !== hud.reserve) {
-    hud.reserve = slot.reserve;
-    if (ammoReserveEl) ammoReserveEl.textContent = `/ ${slot.reserve === Infinity ? "∞" : slot.reserve}`;
+  if (reserve !== hud.reserve) {
+    hud.reserve = reserve;
+    if (ammoReserveEl) ammoReserveEl.textContent = `/ ${reserve === Infinity ? "∞" : reserve}`;
   }
 
-  const reload = weapon.reloading ? Math.round((1 - weapon.reloadTimer / def.reloadTime) * 50) / 50 : -1;
+  const reload = weapon.reloading && def ? Math.round((1 - weapon.reloadTimer / def.reloadTime) * 50) / 50 : -1;
   if (reload !== hud.reload) {
     hud.reload = reload;
     ammoCardEl?.classList.toggle("reloading", reload >= 0);
@@ -315,7 +332,7 @@ function updateCombatHUD(delta) {
     if (killsEl) killsEl.textContent = `${killsThisLife}`;
   }
 
-  const showStart = hud.paused && playerHealth > 0 && !inventoryOpen && !lobby?.open;
+  const showStart = hud.paused && playerHealth > 0 && !inventoryOpen && !lobby?.open && !brWatching();
   if (showStart !== hud.shownPaused) {
     hud.shownPaused = showStart;
     startScreenEl?.classList.toggle("visible", showStart);
@@ -658,12 +675,14 @@ const cameraRig = {
   hip:    { distance: 2.6,  shoulder: 0.55, height: 0.12, fov: 62 },
   aim:    { distance: 1.25, shoulder: 0.5,  height: 0.06, fov: 42 },
   sprint: { distance: 3.0,  shoulder: 0.45, height: 0.15, fov: 70 },
+  air:    { distance: 6.5,  shoulder: 0,    height: 1.0,  fov: 72 }, // freefall / parachute
+  plane:  { distance: 24,   shoulder: 0,    height: 5.0,  fov: 66 }, // riding in the drop plane
   followXZ: 16, followY: 9,
   pitchMin: -1.2, pitchMax: 1.0,
   sensitivity: 0.0022, aimSensitivity: 0.0012,
 };
 let aimYaw = 0, aimPitch = -0.12;
-let aimBlend = 0, sprintBlend = 0;
+let aimBlend = 0, sprintBlend = 0, airBlend = 0, planeBlend = 0;
 let camFrac = 1;                 // 0..1 of the desired boom length after collision
 let recoilPitch = 0, recoilYaw = 0;
 const camPivot     = new THREE.Vector3(0, cameraRig.pivotHeight, 0);
@@ -718,6 +737,15 @@ function setKey(code, pressed, repeat) {
   if (pressed) {
     if (code === "Tab" || code === "KeyI") { setInventoryOpen(!inventoryOpen); return; }
     if (code === "Escape" && inventoryOpen) { setInventoryOpen(false); return; }
+    if (isBR() && !lobby.open) {
+      if (code === "KeyM") { brHud.setMapOpen(!brHud.mapOpen); return; }
+      if (code === "Enter" && net.isHost && (br.state === "warm" || br.state === "count")) { brHostStart(); return; }
+      if (brWatching()) {
+        if (code === "KeyA" || code === "ArrowLeft") brPickSpectate(-1);
+        if (code === "KeyD" || code === "ArrowRight") brPickSpectate(1);
+        return;
+      }
+    }
     if (!playing) return;
     if (code in SLOT_KEYS) {
       const id = WEAPON_ORDER.find(w => WEAPONS[w].slot === SLOT_KEYS[code]);
@@ -746,6 +774,7 @@ window.addEventListener("keydown", e => {
 window.addEventListener("keyup", e => setKey(e.code, false, false));
 canvas.addEventListener("click", () => {
   sfx.unlock();
+  if (brWatching()) { brPickSpectate(1); return; }
   if (playerHealth > 0 && !inventoryOpen && !lobby?.open) requestLock();
 });
 let wheelCooldown = 0;
@@ -773,7 +802,7 @@ document.addEventListener("pointerlockchange", () => {
   hud.paused = !isLocked();
   // The first level starts when you first click into the game
   // (co-op clients follow the host's levels instead)
-  if (isLocked() && director && director.state === "idle" && !net.isClient) director.start(1);
+  if (isLocked() && director && director.state === "idle" && !net.isClient && !isBR()) director.start(1);
 });
 document.addEventListener("mousemove", e => {
   if (!isLocked()) return;
@@ -895,7 +924,7 @@ function updateSoldier(delta) {
   soldier.update(delta, {
     localForward: onGround ? vx * sy + vz * cy : 0,
     localRight:   onGround ? -vx * cy + vz * sy : 0,
-    aiming: alive && !sprinting && (input.aim || input.fire || timeSinceShot < 0.5),
+    aiming: alive && !sprinting && !brAirborne() && (input.aim || input.fire || timeSinceShot < 0.5),
     firing: timeSinceShot < 0.12,
     aimYawOffset: angleDiff(aimYaw + recoilYaw, bodyYaw),
     aimPitch: aimPitch + recoilPitch,
@@ -904,7 +933,7 @@ function updateSoldier(delta) {
 
 // ─── Shadow / Camera ──────────────────────────────────────────────────────────
 function updateSunShadow() {
-  const fx = characterBody.position.x, fz = characterBody.position.z;
+  const fx = focusPos.x, fz = focusPos.z;
   const d = env.lightDir; // sun by day, moon by night
   sunTarget.position.set(fx, 0, fz);
   sun.position.set(fx + d.x * 40, d.y * 40, fz + d.z * 40);
@@ -933,7 +962,7 @@ function updateTorch(delta) {
     torch.hinted = true;
     inventoryUI.feed("Night falls. F toggles your flashlight (they can see it)", "info");
   }
-  const want = torch.on && playerHealth > 0 ? 1 : 0;
+  const want = torch.on && playerHealth > 0 && !brWatching() ? 1 : 0;
   torch.level += (want - torch.level) * (1 - Math.exp(-14 * delta));
   // A faint flicker in the dark
   const flicker = 1 - (Math.random() < 0.02 ? Math.random() * 0.4 : 0);
@@ -987,14 +1016,23 @@ function updateMood(delta) {
 }
 
 function rigValue(key) {
-  const { hip, aim, sprint } = cameraRig;
-  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(hip[key], aim[key], aimBlend), sprint[key], sprintBlend);
+  const { hip, aim, sprint, air, plane } = cameraRig;
+  const v = THREE.MathUtils.lerp(THREE.MathUtils.lerp(hip[key], aim[key], aimBlend), sprint[key], sprintBlend);
+  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(v, air[key], airBlend), plane[key], planeBlend);
+}
+
+/** Eases the freefall / plane camera presets in and out. phase: a PHASE_* drop phase. */
+function blendAirRig(phase, delta) {
+  const k = 1 - Math.exp(-3 * delta);
+  airBlend   += ((phase === PHASE_FALL || phase === PHASE_CHUTE ? 1 : 0) - airBlend) * k;
+  planeBlend += ((phase === PHASE_PLANE ? 1 : 0) - planeBlend) * k;
 }
 
 function updateThirdPersonCamera(delta) {
   const alive = playerHealth > 0;
-  aimBlend    += ((input.aim && alive && !sprinting ? 1 : 0) - aimBlend) * (1 - Math.exp(-12 * delta));
+  aimBlend    += ((input.aim && alive && !sprinting && !brAirborne() ? 1 : 0) - aimBlend) * (1 - Math.exp(-12 * delta));
   sprintBlend += ((sprinting ? 1 : 0) - sprintBlend) * (1 - Math.exp(-4 * delta));
+  blendAirRig(isBR() ? br.flight : PHASE_GROUND, delta);
 
   // Critically-damped style follow: tight on XZ, softer on Y so jumps/steps don't jolt
   const kxz = 1 - Math.exp(-cameraRig.followXZ * delta);
@@ -1005,8 +1043,25 @@ function updateThirdPersonCamera(delta) {
 
   recoilPitch *= Math.exp(-10 * delta);
   recoilYaw   *= Math.exp(-12 * delta);
-  const yaw   = aimYaw + recoilYaw;
-  const pitch = THREE.MathUtils.clamp(aimPitch + recoilPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+  placeCamera(aimYaw + recoilYaw, aimPitch + recoilPitch, delta);
+}
+
+/** Battle royale spectator: the same shoulder camera, riding another player's aim. */
+function updateSpectatorCamera(delta, p) {
+  aimBlend    += (0 - aimBlend) * (1 - Math.exp(-12 * delta));
+  sprintBlend += (0 - sprintBlend) * (1 - Math.exp(-4 * delta));
+  blendAirRig(p.phase, delta);
+  const k = 1 - Math.exp(-10 * delta);
+  const rp = p.root.position;
+  camPivot.x += (rp.x - camPivot.x) * k;
+  camPivot.z += (rp.z - camPivot.z) * k;
+  camPivot.y += (rp.y + cameraRig.pivotHeight - camPivot.y) * k;
+  placeCamera(p.aimYaw, p.aimPitch, delta);
+}
+
+/** Boom from camPivot along yaw / pitch, collision, shake and FOV. */
+function placeCamera(yaw, rawPitch, delta) {
+  const pitch = THREE.MathUtils.clamp(rawPitch, cameraRig.pitchMin, cameraRig.pitchMax);
   const cp = Math.cos(pitch);
   camLook.set(Math.sin(yaw) * cp, Math.sin(pitch), Math.cos(yaw) * cp);
   camRight.set(-Math.cos(yaw), 0, Math.sin(yaw));
@@ -1079,7 +1134,7 @@ function equipWeapon(id) {
 function onWeaponChanged(withSound = true) {
   const def = currentDef();
   soldier.setWeapon(inventory.current);
-  cameraRig.aim.fov = def.aimFov;
+  cameraRig.aim.fov = def ? def.aimFov : 50;
   weapon.reloading = false;
   weapon.bloom = 0;
   weapon.cooldown = 0;
@@ -1089,6 +1144,7 @@ function onWeaponChanged(withSound = true) {
 
 function currentSpread() {
   const def = currentDef();
+  if (!def) return 0.02;
   const hSpeed = Math.hypot(characterBody.velocity.x, characterBody.velocity.z);
   const moving = THREE.MathUtils.clamp(hSpeed / JOG_SPEED, 0, 1);
   return THREE.MathUtils.lerp(def.spreadHip, def.spreadAim, aimBlend)
@@ -1099,6 +1155,13 @@ function currentSpread() {
 
 function updateWeapon(delta) {
   const def = currentDef();
+  if (!def || brAirborne()) {
+    // Empty hands, or still in the air: nothing to shoot with
+    timeSinceShot += delta;
+    input.firePressed = false;
+    weapon.reloading = false;
+    return;
+  }
   weapon.cooldown = Math.max(0, weapon.cooldown - delta);
   weapon.switchTimer = Math.max(0, weapon.switchTimer - delta);
   weapon.bloom = Math.max(0, weapon.bloom - delta * def.bloomRecovery);
@@ -1141,6 +1204,8 @@ function updateWeapon(delta) {
 }
 
 const shotPoints = [];
+const pvpDamage = new Map(); // player id → damage from this shot
+const pvpHead = new Map();
 
 function fireShot(def) {
   inventory.consumeRound();
@@ -1161,6 +1226,13 @@ function fireShot(def) {
 
   let anyHit = false, anyHead = false, anyKill = false;
   shotPoints.length = 0;
+  // Battle royale: bullets hit other players too (never your own capsule)
+  const pvp = isBR();
+  shotOpts.collisionFilterMask = GROUP_WORLD | GROUP_ZOMBIE | (pvp ? GROUP_PLAYER : 0);
+  const ownGroup = characterBody.collisionFilterGroup;
+  characterBody.collisionFilterGroup = 0;
+  pvpDamage.clear();
+  pvpHead.clear();
   for (let i = 0; i < def.pellets; i++) {
     _shotDir.copy(_aimDir);
     _shotDir.x += (Math.random() - 0.5) * 2 * spread;
@@ -1189,7 +1261,16 @@ function fireShot(def) {
     if (!hit) continue;
 
     const zombie = _shotResult.body.zombie;
-    if (zombie && zombieManager) {
+    const victim = _shotResult.body.playerTarget;
+    if (pvp && victim && !victim.local) {
+      const head = _hitPoint.y - (_shotResult.body.position.y - FEET_OFFSET) > PVP_HEAD_Y;
+      const dmg = (PVP_DAMAGE[inventory.current] ?? 15) * (head ? PVP_HEADSHOT[inventory.current] ?? 1.5 : 1);
+      pvpDamage.set(victim.id, (pvpDamage.get(victim.id) ?? 0) + dmg);
+      if (head) pvpHead.set(victim.id, true);
+      effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", head ? 18 : def.pellets > 1 ? 4 : 9);
+      anyHit = true;
+      anyHead ||= head;
+    } else if (zombie && zombieManager) {
       const headshot = zombieManager.isHeadshot(zombie, _hitPoint, HEAD_HEIGHT);
       const damage = def.damage * (headshot ? def.headshotMultiplier : 1);
       zombie.killCause = headshot ? "head" : "gun";
@@ -1203,6 +1284,15 @@ function fireShot(def) {
       const n = _shotResult.hitNormalWorld;
       effects.impact(_hitPoint, n.x, n.y, n.z, "dust", def.pellets > 1 ? 3 : 7);
     }
+  }
+
+  characterBody.collisionFilterGroup = ownGroup;
+  // One damage message per player hit (a shotgun blast is one hit, not nine)
+  for (const [id, dmg] of pvpDamage) {
+    net.send({
+      t: "pvp", to: id, d: +dmg.toFixed(1), hs: pvpHead.has(id) ? 1 : 0, w: inventory.current,
+      sx: +characterBody.position.x.toFixed(1), sz: +characterBody.position.z.toFixed(1),
+    });
   }
 
   if (anyHit) {
@@ -1242,7 +1332,7 @@ function computeThrow() {
 }
 
 function beginThrow() {
-  if (throwCooldown > 0 || throwAiming) return;
+  if (throwCooldown > 0 || throwAiming || brAirborne()) return;
   const kind = inventory.selectedThrowable;
   if (inventory.throwables[kind] <= 0) {
     inventoryUI.feed(`No ${THROWABLES[kind].name}s — press Q to switch`, "info", kind);
@@ -1328,6 +1418,7 @@ function onGrenadeExplode(pos, owner = null) {
   const px = characterBody.position.x - pos.x, pz = characterBody.position.z - pos.z;
   const pd = Math.hypot(px, pz);
   if (pd < GRENADE.playerRadius) {
+    if (by !== localTarget.id) brNoteAttacker(by, "grenade", false);
     const shield = blastShielded(pos, characterBody.position.x, characterBody.position.y + 0.4, characterBody.position.z) ? 0.15 : 1;
     const f = (1 - pd / GRENADE.playerRadius) * shield;
     const k = pd > 1e-3 ? 8 * f / pd : 0;
@@ -1359,6 +1450,7 @@ function onFireTick(x, z, r, dt, owner = null, hostile = false) {
   const px = characterBody.position.x - x, pz = characterBody.position.z - z;
   const pr = r + CHARACTER_RADIUS;
   if (px * px + pz * pz < pr * pr && characterBody.position.y - FEET_OFFSET < 1) {
+    if (!hostile && by !== localTarget.id) brNoteAttacker(by, "molotov", false);
     dealDamageToPlayer(MOLOTOV.playerDps * dt, 0, 0, 0.08);
   }
 }
@@ -1376,13 +1468,13 @@ function useMedkit() {
 // ─── Pickups ──────────────────────────────────────────────────────────────────
 function pickupData(kind) {
   const def = WEAPONS[kind];
-  if (def) return { ammo: def.magSize, reserve: def.pickupReserve };
+  if (def) return { ammo: def.magSize, reserve: isBR() ? BR_GUN_RESERVE[kind] : def.pickupReserve };
   return null;
 }
 
 /** Tries to move a world pickup into the inventory. Returns true if it was taken. */
 function collectPickup(entry) {
-  const { kind, def } = entry;
+  const { kind, def, id } = entry;
   let res = null;
   switch (def.category) {
     case "weapon": {
@@ -1400,24 +1492,27 @@ function collectPickup(entry) {
   }
   if (!res) return false;
   pickups.release(entry);
+  // Shared battle royale loot: it's gone for everyone
+  if (id !== null) net.send({ t: "take", i: id });
   sfx.pickup(def.category === "weapon");
   inventoryUI.feed(res.msg, def.category, kind);
   return true;
 }
 
 function interact() {
-  if (pickups.nearestWeapon) collectPickup(pickups.nearestWeapon);
+  if (pickups.nearestWeapon && !brAirborne()) collectPickup(pickups.nearestWeapon);
 }
 
 function updatePickups(delta) {
-  pickups.update(delta, characterBody.position.x, characterBody.position.z);
-  if (playerHealth > 0) {
+  pickups.update(delta, focusPos.x, focusPos.z);
+  const canLoot = playerHealth > 0 && !brAirborne() && !brWatching();
+  if (canLoot) {
     for (let i = pickups.touching.length - 1; i >= 0; i--) collectPickup(pickups.touching[i]);
   }
 
   // Context prompts: weapon pickup, door, light switch
   let n = 0;
-  if (playerHealth > 0) {
+  if (canLoot) {
     const e = pickups.nearestWeapon;
     if (e) {
       promptRows[n++] = "E";
@@ -1462,10 +1557,10 @@ function dropWeapon(id) {
   const prev = inventory.current;
   const slot = inventory.removeWeapon(id);
   if (!slot) return;
-  pickups.spawn(id,
-    characterBody.position.x + Math.sin(bodyYaw) * 1.3,
-    characterBody.position.z + Math.cos(bodyYaw) * 1.3,
-    { ammo: slot.ammo, reserve: slot.reserve });
+  const x = characterBody.position.x + Math.sin(bodyYaw) * 1.3;
+  const z = characterBody.position.z + Math.cos(bodyYaw) * 1.3;
+  if (isBR()) brSpawnShared(id, x, z, { ammo: slot.ammo, reserve: slot.reserve });
+  else pickups.spawn(id, x, z, { ammo: slot.ammo, reserve: slot.reserve });
   inventoryUI.feed(`Dropped ${WEAPONS[id].name}`, "info", id);
   if (inventory.current !== prev) onWeaponChanged();
 }
@@ -1774,12 +1869,14 @@ const throwables = new Throwables({
   onFireTick,
 });
 
+const NO_PLAYERS = [];
 const minimap = new Minimap(document.getElementById("minimap"), {
   zombies: () => zombieManager?.active ?? [],
   pickups: () => pickups.active,
   fires: () => throwables.fires,
   obstacles: () => mapObstacles,
-  players: () => remotePlayers.mapList(),
+  players: () => (isBR() ? NO_PLAYERS : remotePlayers.mapList()),
+  zone: () => (isBR() && br.state === "match" ? br.zone : null),
 });
 
 // ─── Model Registry & Lil-GUI Controls ────────────────────────────────────────
@@ -2115,6 +2212,13 @@ async function loadWorld() {
   for (const { x, z } of housePositions) {
     houses.add(x, z, rng() * Math.PI * 2);
   }
+  // Outlying farmhouses on their own RNG, so the trees and the rest of the scatter don't move
+  const farmRng = makeLCG(0xfa53a11);
+  for (const { x, z } of scatterPositions(FARMHOUSE_COUNT, farmRng, 60, 165, 45)) {
+    const rot = farmRng() * Math.PI * 2;
+    if (houses.blocks(x, z, 14) || nearObstacle(x, z, 12)) continue;
+    houses.add(x, z, rot);
+  }
   mapObstacles.push(...houses.mapObstacles());
 
   // Big trees stay out of houses (a scattered tree used to land on one)
@@ -2248,6 +2352,7 @@ function onPlayerHit(target, dmg, kx, kz, shake, sx, sz) {
 
 /** Footsteps, gunfire, doors: the host's monsters hear everyone. */
 function makeNoise(x, z, r, kind) {
+  if (isBR()) return; // no monsters to hear it
   if (net.isClient) net.send({ t: "noise", to: "host", x: +x.toFixed(2), z: +z.toFixed(2), r, k: kind });
   else zombieManager?.noise(x, z, r, kind);
 }
@@ -2290,6 +2395,7 @@ function onConnected(welcome) {
     // The host owns the monsters; ours become puppets of its snapshots
     zombieManager.clearAll();
     zombieManager.pool.setPuppetMode(true);
+    weather.locked = true; // the host's sky
     inventoryUI.feed(`Joined room "${net.room}" · host: ${net.players.get(net.hostId)?.name ?? "?"}`, "info");
   } else {
     inventoryUI.feed(`Hosting room "${net.room}". Friends join with the same code.`, "info");
@@ -2298,6 +2404,13 @@ function onConnected(welcome) {
 }
 
 function becomeHost() {
+  weather.locked = false;
+  if (isBR()) {
+    // The match clock, zone and alive list are already here: just carry on
+    inventoryUI.feed("You're hosting the match now", "info");
+    brCheckWinner();
+    return;
+  }
   monsterSync?.becomeHost();
   updateSquadPlayerCount();
   // Pick the fight back up from the current level
@@ -2309,6 +2422,11 @@ net.on("joined", msg => {
   remotePlayers.add(msg.p);
   inventoryUI.feed(`${msg.p.name} joined the fight`, "weapon");
   updateSquadPlayerCount();
+  if (isBR()) {
+    br.netTimer = 0; // send them the match state right away
+    if (net.isHost) net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.lightOn) });
+    return;
+  }
   if (net.isHost) {
     // Catch the newcomer up on doors and lights
     net.send({
@@ -2323,9 +2441,14 @@ net.on("left", msg => {
   remotePlayers.remove(msg.id);
   inventoryUI.feed(`${name} left`, "info");
   updateSquadPlayerCount();
+  if (isBR()) brOnPlayerLeft(msg.id);
 });
 net.on("host", msg => { if (msg.id === net.id) becomeHost(); });
 net.on("disconnect", () => {
+  if (isBR()) {
+    brHud.showResult({ title: "DISCONNECTED", sub: "Lost the connection to the server", foot: "Reload the page to play again", color: "#ff4b3a" });
+    return;
+  }
   const wasClient = localTarget.id !== net.hostId;
   remotePlayers.clear();
   inventoryUI.feed("Disconnected from co-op: playing solo", "info");
@@ -2345,7 +2468,12 @@ net.on("world", msg => {
   msg.doors.forEach((o, i) => { if (houses.houses[i]) houses.setDoor(houses.houses[i], o); });
   msg.lights.forEach((on, i) => { const h = houses.houses[i]; if (h && h.lightOn !== on) houses.toggleLight(h); });
 });
-net.on("drop", msg => pickups.spawn(msg.k, msg.x, msg.z, pickupData(msg.k), msg.l));
+net.on("drop", msg => {
+  // a: [ammo, reserve] of a dropped gun (null reserve = ∞) · c: throwable count · i: shared loot id
+  const data = msg.a ? { ammo: msg.a[0], reserve: msg.a[1] ?? Infinity } : msg.c ? { count: msg.c } : pickupData(msg.k);
+  pickups.spawn(msg.k, msg.x, msg.z, data, msg.l ?? Infinity, msg.i ?? null);
+});
+net.on("take", msg => pickups.releaseById(msg.i));
 net.on("kill", msg => {
   killsThisLife++;
   showHitMarker(false, true);
@@ -2371,6 +2499,7 @@ net.on("ef", msg => {
 });
 net.on("lvl", msg => {
   if (!net.isClient || !director) return;
+  applyWorldClock(msg.hr, msg.wx);
   if (director.level?.n !== msg.n || director.level.total !== msg.tot) {
     // msg.tot already counts the host's Warlords and dragons
     director.level = { ...getLevel(msg.n), total: msg.tot, boss: 0, dragon: 0 };
@@ -2404,9 +2533,11 @@ function netTick(delta) {
       aim: input.aim ? 1 : 0, fire: timeSinceShot < 0.15 ? 1 : 0,
       w: inventory.current, hp: Math.max(0, Math.round(playerHealth)), dead: playerHealth <= 0 ? 1 : 0,
       vis: +playerVisibility().toFixed(2), k: killsThisLife,
+      ph: isBR() ? (br.ghost ? PHASE_PLANE : br.flight) : PHASE_GROUND,
     });
   }
   if (!net.isHost) return;
+  if (isBR()) { brNetTick(delta); return; }
 
   netMonsterTimer -= delta;
   if (netMonsterTimer <= 0 && remotePlayers.count > 0) {
@@ -2416,7 +2547,10 @@ function netTick(delta) {
   netLevelTimer -= delta;
   if (netLevelTimer <= 0 && director?.level) {
     netLevelTimer = 1 / NET_LEVEL_HZ;
-    net.send({ t: "lvl", n: director.level.n, s: director.state, k: director.killed, tot: director.total, tm: +director.timer.toFixed(1) });
+    net.send({
+      t: "lvl", n: director.level.n, s: director.state, k: director.killed, tot: director.total, tm: +director.timer.toFixed(1),
+      hr: +env.hour.toFixed(3), wx: weather.state,
+    });
   }
   // Whole squad down for a few seconds: restart the level
   if (director?.state === "fight" && getTargets().every(t => !t.alive)) {
@@ -2445,7 +2579,7 @@ function updateSquad(delta) {
   if (squadTimer > 0) return;
   squadTimer = 0.25;
   let html = "";
-  if (net.connected) {
+  if (net.connected && !isBR()) {
     const me = net.players.get(net.id);
     const rows = [{ name: myName, color: me?.color ?? "#fff", hp: Math.max(0, playerHealth), kills: killsThisLife, me: true }];
     for (const p of remotePlayers.players.values()) rows.push({ name: p.name, color: p.color, hp: p.hp, kills: p.kills, dead: p.dead });
@@ -2463,16 +2597,618 @@ function updateSquad(delta) {
   }
 }
 
+// ─── Battle royale ────────────────────────────────────────────────────────────
+// One player in the room hosts the match: it runs warm-up → countdown → match
+// → results and owns the match clock. The plane route, zone circles and loot
+// all come from the match seed (br/BattleRoyale.js), so a single `brstart`
+// message builds the same match everywhere. Each player owns their own health:
+// shooters send `pvp` damage to the victim, and the victim announces `elim`.
+const brHud = new BrHud();
+const zoneWall = new ZoneWall(scene);
+const dropPlane = createPlane();
+scene.add(dropPlane);
+const myChute = createParachute();
+characterRoot.add(myChute);
+
+// What the camera, minimap, shadows and ground chunks centre on (you, or the player you're watching)
+const focusPos = new THREE.Vector3(characterBody.position.x, characterBody.position.y, characterBody.position.z);
+const GHOST_PARK = { x: 0, y: 60, z: 0 }; // a spectator's own (hidden) body waits up here
+
+const br = {
+  state: "warm",         // warm → count → match → end
+  seed: 0,
+  t: 0,                  // match clock (s)
+  countdown: 0,
+  endTimer: 0,
+  route: null,
+  circles: null,
+  zone: { x: 0, z: 0, r: 0, nx: 0, nz: 0, nr: 0, phase: 0, shrinking: false, timeLeft: 0, dps: 0, final: false },
+  flight: PHASE_GROUND,  // your drop phase
+  fallTime: 0,
+  vy: 0,
+  skydive: 0,
+  inMatch: false,        // dropped in this match and still standing
+  ghost: false,          // joined mid-match: watch until the next one
+  started: 0,
+  alive: new Set(),      // player ids still standing
+  placement: 0,
+  spectating: null,
+  outside: false,
+  outsideBy: 0,
+  zoneTick: 1,
+  respawnTimer: 0,
+  atkId: null, atkW: "", atkHs: false, atkAt: -99, // who hurt you last (kill credit)
+  dropSeq: 0,
+  netTimer: 0,
+  hudTimer: 0,
+};
+const _planePos = { x: 0, y: 0, z: 0 };
+const _spawn = { x: 0, z: 0 };
+const _lootSpot = new THREE.Vector3();
+const _specIds = [];
+const ELIM_VERB = { zone: "ZONE", self: "SELF", grenade: "FRAG", molotov: "BURNED" };
+
+function brAirborne() { return isBR() && (br.ghost || br.flight !== PHASE_GROUND); }
+function brFlying() { return brAirborne(); }
+/** Watching the match instead of playing it (eliminated, or joined late). */
+function brWatching() { return isBR() && br.state === "match" && (br.ghost || playerHealth <= 0); }
+
+function brWatchedPlayer() {
+  if (!isBR() || br.spectating === null) return null;
+  const p = remotePlayers.players.get(br.spectating);
+  return p?.hasState ? p : null;
+}
+
+function updateFocus(watched) {
+  if (watched) focusPos.copy(watched.root.position);
+  else focusPos.set(characterBody.position.x, characterBody.position.y, characterBody.position.z);
+}
+
+function brName(id) {
+  if (id === net.id) return myName;
+  return remotePlayers.players.get(id)?.name ?? net.players.get(id)?.name ?? "Player";
+}
+function brColor(id) { return net.players.get(id)?.color ?? "#e2a42b"; }
+
+function brPickSpectate(dir) {
+  _specIds.length = 0;
+  for (const id of br.alive) if (id !== net.id && remotePlayers.players.get(id)?.hasState) _specIds.push(id);
+  if (!_specIds.length) { br.spectating = null; return; }
+  const n = _specIds.length, i = _specIds.indexOf(br.spectating);
+  br.spectating = _specIds[(((i + dir) % n) + n) % n];
+}
+
+function brNoteAttacker(id, w, hs) {
+  if (!isBR()) return;
+  br.atkId = id; br.atkW = w; br.atkHs = hs; br.atkAt = clock.elapsedTime;
+}
+
+/** Co-op and battle royale clients follow the host's clock and weather. */
+function applyWorldClock(hr, wx) {
+  if (typeof hr === "number") {
+    const d = Math.abs(env.hour - hr);
+    if (Math.min(d, 24 - d) > 0.05) env.hour = hr;
+  }
+  if (wx && weather.state !== wx) weather.set(wx);
+}
+
+function enterBattleRoyale(welcome) {
+  gameMode = "br";
+  document.body.classList.add("mode-br");
+  localTarget.id = net.id;
+  remotePlayers.pvp = true;
+  for (const p of welcome.players) if (p.id !== net.id) remotePlayers.add(p);
+  zombieManager.clearAll();
+  enemyFire.clear();
+  if (net.isClient) weather.locked = true; // the host's sky
+  brHud.setVisible(true);
+  brEnterWarmup();
+  inventoryUI.feed(net.isHost
+    ? "You're the host. Press ENTER to start (alone is a practice drop)"
+    : `Joined "${welcome.room.slice(3)}" · waiting for the host to start`, "info");
+}
+
+function brWarmSpawn() {
+  const a = Math.random() * Math.PI * 2, r = 4 + Math.random() * 10;
+  _spawn.x = Math.cos(a) * r;
+  _spawn.z = Math.sin(a) * r;
+}
+
+/** Full health, fresh pockets (empty for the drop, a warm-up kit otherwise), at (x, y, z). */
+function brResetPlayer(x, y, z, empty) {
+  playerHealth = MAX_HEALTH;
+  healthTrail = MAX_HEALTH;
+  timeSinceHit = 99;
+  damageFlash = 0;
+  knockbackVel.set(0, 0, 0);
+  characterBody.position.set(x, y, z);
+  characterBody.velocity.set(0, 0, 0);
+  moveVelocity.set(0, 0, 0);
+  camPivot.set(x, y - FEET_OFFSET + cameraRig.pivotHeight, z);
+  inventory.reset(empty);
+  onWeaponChanged(false);
+  cancelThrow();
+  soldier.revive();
+  characterRoot.visible = true;
+  br.atkAt = -99;
+  br.vy = 0;
+}
+
+function brEnterWarmup() {
+  br.state = "warm";
+  br.t = 0; br.countdown = 0; br.endTimer = 0;
+  br.inMatch = false; br.ghost = false; br.started = 0;
+  br.alive.clear();
+  br.route = null; br.circles = null;
+  br.spectating = null; br.respawnTimer = 0; br.outside = false;
+  br.flight = PHASE_GROUND;
+  myChute.visible = false;
+  zoneWall.hide();
+  dropPlane.visible = false;
+  throwables.clear();
+  fireFX.clear();
+  pickups.clear();
+  brHud.hideResult();
+  brHud.setMapOpen(false);
+  brWarmSpawn();
+  brResetPlayer(_spawn.x, FEET_OFFSET + 0.02, _spawn.z, false);
+  killsThisLife = 0;
+}
+
+function brHostStart() {
+  if (!net.isHost || (br.state !== "warm" && br.state !== "count")) return;
+  const seed = (Math.random() * 0xffffffff) >>> 0;
+  const ids = [net.id, ...remotePlayers.players.keys()];
+  net.send({ t: "brstart", seed, ids });
+  brStartMatch(seed, ids, 0);
+}
+
+/** Everyone builds the match from the seed. ids: who's dropping; t: match time (late joiners). */
+function brStartMatch(seed, ids, t) {
+  br.state = "match";
+  br.seed = seed;
+  br.t = t;
+  br.route = planeRoute(seed);
+  br.circles = zoneCircles(seed);
+  zoneAt(br.circles, t, br.zone);
+  br.alive.clear();
+  for (const id of ids) br.alive.add(id);
+  br.started = ids.length;
+  br.inMatch = br.alive.has(net.id);
+  br.ghost = !br.inMatch;
+  br.spectating = null; br.placement = 0; br.zoneTick = 1; br.netTimer = 0; br.outside = false;
+  killsThisLife = 0;
+  throwables.clear();
+  fireFX.clear();
+  pickups.clear();
+  brSpawnLoot(seed);
+  brHud.hideResult();
+
+  planeAt(br.route, t, _planePos);
+  brResetPlayer(_planePos.x, _planePos.y - 2.5, _planePos.z, true);
+  br.flight = br.inMatch ? PHASE_PLANE : PHASE_GROUND;
+  myChute.visible = false;
+  characterRoot.visible = false;
+  // Look along the route, a little down, so you can pick your spot
+  aimYaw = Math.atan2(br.route.dx, br.route.dz);
+  aimPitch = -0.35;
+  if (br.inMatch) {
+    brHud.setMapOpen(true);
+    gameHud.showBanner({ title: "DROP ZONE", sub: "Pick your spot", text: "SPACE jumps. Land, loot, and stay inside the blue zone.", color: "#4da3ff", duration: 5 });
+    sfx.levelStart();
+  } else {
+    gameHud.showBanner({ title: "MATCH IN PROGRESS", sub: "You're spectating until the next one", color: "#4da3ff", duration: 4 });
+  }
+}
+
+function brSpawnLoot(seed) {
+  const spots = [];
+  for (const h of houses.houses) {
+    for (const [lx, lz] of HOUSE_LOOT_SPOTS) {
+      houses._toWorld(h, lx, lz, _lootSpot);
+      spots.push({ x: _lootSpot.x, z: _lootSpot.z });
+    }
+  }
+  lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
+    pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`);
+  });
+}
+
+/** A pickup every player sees, and that disappears for everyone when taken. */
+function brSpawnShared(k, x, z, data) {
+  const id = `${net.id}.${br.dropSeq++}`;
+  pickups.spawn(k, x, z, data, Infinity, id);
+  net.send({
+    t: "drop", k, x: +x.toFixed(2), z: +z.toFixed(2), i: id,
+    a: data && data.ammo !== undefined ? [data.ammo, data.reserve === Infinity ? null : data.reserve] : undefined,
+    c: data?.count,
+  });
+}
+
+/** Your loot spills out around your body for whoever gets there first. */
+function brDropLoot() {
+  const p = characterBody.position;
+  const items = [];
+  for (const id of inventory.ownedWeapons) {
+    const s = inventory.weapons[id];
+    items.push([id, { ammo: s.ammo, reserve: s.reserve }]);
+  }
+  for (const k of THROWABLE_ORDER) if (inventory.throwables[k] > 0) items.push([k, { count: inventory.throwables[k] }]);
+  for (let i = 0; i < inventory.medkits; i++) items.push(["medkit", null]);
+  if (items.length) items.push(["ammo", null]);
+  items.forEach(([k, data], i) => {
+    const a = (i / items.length) * Math.PI * 2;
+    brSpawnShared(k, p.x + Math.cos(a) * 1.5, p.z + Math.sin(a) * 1.5, data);
+  });
+  inventory.reset(true);
+  onWeaponChanged(false);
+}
+
+// ── The drop ─────────────────────────────────────────────────────────────────
+function brJump() {
+  planeAt(br.route, br.t, _planePos);
+  br.flight = PHASE_FALL;
+  br.fallTime = 0;
+  br.vy = -3;
+  // Out of the back ramp
+  characterBody.position.set(_planePos.x - br.route.dx * 8, _planePos.y - 4, _planePos.z - br.route.dz * 8);
+  characterBody.velocity.set(0, 0, 0);
+  moveVelocity.set(br.route.dx * PLANE.speed * 0.3, 0, br.route.dz * PLANE.speed * 0.3);
+  bodyYaw = aimYaw;
+  characterRoot.visible = true;
+  brHud.setMapOpen(false);
+  sfx.throwWhoosh();
+}
+
+function brOpenChute() {
+  br.flight = PHASE_CHUTE;
+  myChute.visible = true;
+  sfx.chuteOpen();
+}
+
+function brLand() {
+  br.flight = PHASE_GROUND;
+  br.vy = 0;
+  myChute.visible = false;
+  moveVelocity.x *= 0.3;
+  moveVelocity.z *= 0.3;
+  characterBody.velocity.y = 0;
+  if (br.state === "match" && !inventory.current) inventoryUI.feed("Landed. Find a weapon!", "info");
+}
+
+/** Replaces the ground controller while in the plane, falling or under the chute. */
+function brUpdateFlight(delta) {
+  if (br.ghost || br.flight === PHASE_PLANE) {
+    characterBody.velocity.set(0, 0, 0);
+    if (!br.ghost && ((jumpQueued && br.t > PLANE.jumpDelay) || br.t >= br.route.duration - 0.2)) brJump();
+    jumpQueued = false;
+    return;
+  }
+  let ix = 0, iz = 0;
+  if (!inventoryOpen) {
+    if (keys.forward)  iz += 1;
+    if (keys.backward) iz -= 1;
+    if (keys.right)    ix += 1;
+    if (keys.left)     ix -= 1;
+  }
+  let fwd, side, down, rate, fallRate;
+  if (br.flight === PHASE_FALL) {
+    br.fallTime += delta;
+    fwd = iz > 0 ? FREEFALL.forward : iz < 0 ? -FREEFALL.back : FREEFALL.drift;
+    side = ix * FREEFALL.side;
+    down = iz > 0 ? FREEFALL.dive : FREEFALL.fall;
+    rate = FREEFALL.steer;
+    fallRate = 2.5;
+    const height = characterBody.position.y - FEET_OFFSET;
+    if (height < FREEFALL.chuteHeight || (jumpQueued && br.fallTime > FREEFALL.manualAfter)) brOpenChute();
+  } else {
+    fwd = iz * CHUTE.speed;
+    side = ix * CHUTE.speed * 0.8;
+    down = CHUTE.fall;
+    rate = CHUTE.steer;
+    fallRate = 4;
+  }
+  jumpQueued = false;
+
+  // Camera-relative: forward = (sin yaw, cos yaw), right = (−cos yaw, sin yaw)
+  const sy = Math.sin(aimYaw), cy = Math.cos(aimYaw);
+  const k = 1 - Math.exp(-rate * delta);
+  moveVelocity.x += ((fwd * sy - side * cy) - moveVelocity.x) * k;
+  moveVelocity.z += ((fwd * cy + side * sy) - moveVelocity.z) * k;
+  br.vy += (-down - br.vy) * (1 - Math.exp(-fallRate * delta));
+  // The world step adds gravity on top; cancel it so the fall speed is what we chose
+  characterBody.velocity.set(moveVelocity.x, br.vy - world.gravity.y * delta, moveVelocity.z);
+
+  bodyYaw += angleDiff(aimYaw, bodyYaw) * (1 - Math.exp(-6 * delta));
+  characterRoot.rotation.y = bodyYaw;
+}
+
+function brAfterStep(delta) {
+  if (br.ghost) {
+    characterBody.position.set(GHOST_PARK.x, GHOST_PARK.y, GHOST_PARK.z);
+    characterBody.velocity.set(0, 0, 0);
+  } else if (br.flight === PHASE_PLANE) {
+    planeAt(br.route, br.t, _planePos);
+    characterBody.position.set(_planePos.x, _planePos.y - 2.5, _planePos.z);
+    characterBody.velocity.set(0, 0, 0);
+  } else if ((br.flight === PHASE_FALL || br.flight === PHASE_CHUTE)
+      && (onGround || characterBody.position.y < FEET_OFFSET + 0.05)) {
+    brLand();
+  }
+  br.skydive += ((br.flight === PHASE_FALL ? 1 : 0) - br.skydive) * (1 - Math.exp(-6 * delta));
+  setSkydivePose(soldier.root, br.skydive);
+  if (br.ghost || br.flight === PHASE_PLANE) characterRoot.visible = false;
+}
+
+function brUpdatePlane(delta) {
+  const r = br.route;
+  const show = br.t < r.duration + 5;
+  dropPlane.visible = show;
+  if (!show) return;
+  const s = br.t * PLANE.speed; // keeps flying past the end of the route
+  updatePlane(dropPlane, r.ax + r.dx * s, PLANE.altitude, r.az + r.dz * s, r.dx, r.dz, delta);
+}
+
+function brZoneDamage(delta) {
+  if (!br.inMatch || playerHealth <= 0 || br.flight === PHASE_PLANE) { br.outside = false; return; }
+  const z = br.zone;
+  const d = Math.hypot(characterBody.position.x - z.x, characterBody.position.z - z.z);
+  br.outside = d > z.r;
+  br.outsideBy = d - z.r;
+  if (!br.outside) { br.zoneTick = 0.6; return; }
+  br.zoneTick -= delta;
+  if (br.zoneTick <= 0) {
+    br.zoneTick = 1;
+    dealDamageToPlayer(z.dps, 0, 0, 0.12);
+  }
+}
+
+// ── Eliminations & results ───────────────────────────────────────────────────
+function brOnLocalDeath() {
+  const recent = br.atkId !== null && clock.elapsedTime - br.atkAt < 10;
+  const msg = {
+    t: "elim", v: net.id,
+    k: recent ? br.atkId : null,
+    w: recent ? br.atkW : br.outside ? "zone" : "self",
+    hs: recent && br.atkHs ? 1 : 0,
+  };
+  if (br.state === "match" && br.inMatch) {
+    br.placement = br.alive.size;
+    brDropLoot();
+    if (document.pointerLockElement) document.exitPointerLock();
+  } else {
+    br.respawnTimer = BR_WARMUP_RESPAWN; // warm-up: straight back in
+  }
+  net.send(msg);
+  brHandleElim(msg);
+}
+
+function brHandleElim({ v, k, w, hs }) {
+  const vName = brName(v);
+  const kName = k !== null && k !== undefined ? brName(k) : null;
+  const verb = hs ? "HEADSHOT" : ELIM_VERB[w] ?? WEAPONS[w]?.short ?? "KILLED";
+  gameHud.killFeed(kName ? `${kName} ▸ ${vName}` : vName, verb, brColor(kName ? k : v), !!hs);
+  if (k === net.id && v !== net.id) {
+    killsThisLife++;
+    showHitMarker(!!hs, true);
+    sfx.kill();
+  }
+  if (br.state !== "match" || !br.alive.has(v)) return;
+  br.alive.delete(v);
+  if (v === net.id) {
+    br.inMatch = false;
+    brHud.showResult({
+      title: "ELIMINATED",
+      sub: kName ? `by ${kName}` : w === "zone" ? "Caught outside the zone" : "",
+      lines: [["PLACE", `#${br.placement || br.alive.size + 1}`], ["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`]],
+      foot: br.alive.size ? "Spectating in a moment…" : "",
+      color: "#ff4b3a",
+      duration: 4.5,
+    });
+  }
+  if (br.spectating === v) br.spectating = null;
+  brCheckWinner();
+}
+
+/** Host: one player left (or nobody, in a practice drop) ends the match. */
+function brCheckWinner() {
+  if (!net.isHost || br.state !== "match") return;
+  const n = br.alive.size;
+  if (n === 0 || (br.started >= 2 && n === 1)) {
+    const w = n === 1 ? br.alive.values().next().value : null;
+    net.send({ t: "brend", w });
+    brShowEnd(w);
+  }
+}
+
+function brShowEnd(w) {
+  br.state = "end";
+  br.endTimer = BR_END_HOLD;
+  br.inMatch = false;
+  br.outside = false;
+  zoneWall.hide();
+  dropPlane.visible = false;
+  const lines = [["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`]];
+  if (w === net.id) {
+    brHud.showResult({ title: "WINNER", sub: "Last one standing", lines: [["PLACE", "#1"], ...lines], color: "#ffd84d" });
+    sfx.levelCleared();
+  } else {
+    brHud.showResult({
+      title: w !== null ? "MATCH OVER" : "NO SURVIVORS",
+      sub: w !== null ? `${brName(w)} is the last one standing` : "The zone took everyone",
+      lines,
+      color: "#6ab4ff",
+    });
+  }
+}
+
+function brOnPlayerLeft(id) {
+  if (br.spectating === id) br.spectating = null;
+  if (br.state === "match" && br.alive.delete(id)) brCheckWinner();
+  if (net.isHost && br.state === "count" && remotePlayers.count === 0) br.state = "warm";
+}
+
+// ── Per frame ────────────────────────────────────────────────────────────────
+function brUpdate(delta) {
+  if (net.isHost) {
+    // Someone else is here: count down to the drop
+    if (br.state === "warm" && remotePlayers.count > 0) { br.state = "count"; br.countdown = BR_AUTO_START; br.netTimer = 0; }
+    else if (br.state === "count" && remotePlayers.count === 0) { br.state = "warm"; br.netTimer = 0; }
+  }
+  if (br.state === "count") {
+    br.countdown = Math.max(0, br.countdown - delta);
+    if (net.isHost && br.countdown <= 0) brHostStart();
+  }
+  if (br.state === "match") {
+    br.t += delta;
+    zoneAt(br.circles, br.t, br.zone);
+    zoneWall.set(br.zone.x, br.zone.z, br.zone.r, br.t);
+    brUpdatePlane(delta);
+    brZoneDamage(delta);
+    // Out of the fight: follow somebody who's still in it
+    if (brWatching() && !brHud.resultShown && (br.spectating === null || !br.alive.has(br.spectating))) brPickSpectate(1);
+  }
+  if (br.state === "end") {
+    br.endTimer = Math.max(0, br.endTimer - delta);
+    brHud.setResultFoot(`Next match in ${Math.ceil(br.endTimer)}`);
+    if (net.isHost && br.endTimer <= 0) {
+      net.send({ t: "brwarm" });
+      brEnterWarmup();
+    }
+  }
+  // Warm-up deaths don't count
+  if ((br.state === "warm" || br.state === "count") && playerHealth <= 0) {
+    br.respawnTimer -= delta;
+    if (br.respawnTimer <= 0) {
+      brWarmSpawn();
+      brResetPlayer(_spawn.x, FEET_OFFSET + 0.02, _spawn.z, false);
+    }
+  }
+  const engine = dropPlane.visible ? THREE.MathUtils.clamp(1 - camera.position.distanceTo(dropPlane.position) / 320, 0, 1) : 0;
+  sfx.setFlight(engine, br.flight === PHASE_FALL ? 1 : br.flight === PHASE_CHUTE ? 0.25 : 0);
+}
+
+/** Host: match state for everyone (and late joiners) twice a second. */
+function brNetTick(delta) {
+  br.netTimer -= delta;
+  if (br.netTimer > 0 || remotePlayers.count === 0) return;
+  br.netTimer = 0.5;
+  net.send({
+    t: "br", s: br.state, seed: br.seed, tm: +br.t.toFixed(2), cd: +br.countdown.toFixed(1),
+    et: +br.endTimer.toFixed(1), al: [...br.alive], hr: +env.hour.toFixed(3), wx: weather.state,
+  });
+}
+
+function brHint() {
+  if (br.state !== "match" || !br.inMatch) return "";
+  if (br.flight === PHASE_PLANE) return br.t < PLANE.jumpDelay ? "GET READY…" : "<kbd>SPACE</kbd> JUMP · <kbd>M</kbd> MAP";
+  if (br.flight === PHASE_FALL) return br.fallTime > FREEFALL.manualAfter ? "<kbd>SPACE</kbd> OPEN PARACHUTE · <kbd>W</kbd> DIVE" : "<kbd>W</kbd> DIVE";
+  if (br.flight === PHASE_CHUTE) return "<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> STEER";
+  if (!inventory.current) return "FIND A WEAPON";
+  return "";
+}
+
+const _mapNext = { x: 0, z: 0, r: 0 };
+const _mapPlane = { x: 0, z: 0, dx: 0, dz: 0 };
+const _mapState = { zone: null, next: null, route: null, plane: null, me: { x: 0, z: 0, yaw: 0 }, obstacles: mapObstacles };
+
+function brUpdateHud(delta) {
+  brHud.update(delta);
+  const watched = brWatchedPlayer();
+  br.hudTimer -= delta;
+  if (br.hudTimer <= 0) {
+    br.hudTimer = 0.1;
+    const players = remotePlayers.count + 1;
+    let status = "", kind = "", alive = null;
+    if (br.state === "warm") {
+      status = `${players}/${BR_MAX_PLAYERS} players · ${net.isHost ? "press ENTER to start" : "waiting for the host"}`;
+    } else if (br.state === "count") {
+      status = `Match starts in ${Math.ceil(br.countdown)}${net.isHost ? " · ENTER: start now" : ""}`;
+      kind = "warn";
+    } else if (br.state === "match") {
+      alive = br.alive.size;
+      const z = br.zone;
+      if (z.final) { status = "Final zone"; kind = "danger"; }
+      else if (z.shrinking) { status = `Zone shrinking · ${fmtClock(z.timeLeft)}`; kind = "danger"; }
+      else { status = `Zone shrinks in ${fmtClock(z.timeLeft)}`; kind = "warn"; }
+    } else {
+      status = "Match over";
+    }
+    brHud.setTop(alive, killsThisLife, status, kind);
+    const outside = br.state === "match" && br.outside && playerHealth > 0;
+    brHud.setOutside(outside, outside ? `OUTSIDE THE ZONE · ${Math.ceil(br.outsideBy)} m · −${br.zone.dps} HP/s` : "");
+    brHud.setHint(brHint());
+    brHud.setSpectating(watched ? watched.name : null, watched?.color);
+  }
+
+  if (!brHud.mapOpen) return;
+  const inMatch = br.state === "match";
+  _mapState.zone = inMatch ? br.zone : null;
+  if (inMatch) {
+    _mapNext.x = br.zone.nx; _mapNext.z = br.zone.nz; _mapNext.r = br.zone.nr;
+  }
+  _mapState.next = inMatch ? _mapNext : null;
+  const planeUp = inMatch && br.t < br.route.duration;
+  _mapState.route = planeUp ? br.route : null;
+  if (planeUp) {
+    planeAt(br.route, br.t, _planePos);
+    _mapPlane.x = _planePos.x; _mapPlane.z = _planePos.z;
+    _mapPlane.dx = br.route.dx; _mapPlane.dz = br.route.dz;
+  }
+  _mapState.plane = planeUp ? _mapPlane : null;
+  _mapState.me.x = focusPos.x;
+  _mapState.me.z = focusPos.z;
+  _mapState.me.yaw = watched ? watched.aimYaw : aimYaw;
+  brHud.drawMap(performance.now(), _mapState);
+}
+
+net.on("br", msg => {
+  if (!isBR() || net.isHost) return;
+  applyWorldClock(msg.hr, msg.wx);
+  if (msg.s === "match") {
+    // Missed the start (or joined late): build the match from the seed
+    if (br.state !== "match" || br.seed !== msg.seed) brStartMatch(msg.seed, msg.al, msg.tm);
+    else if (Math.abs(br.t - msg.tm) > 0.4) br.t = msg.tm;
+  } else if (msg.s === "end") {
+    if (br.state === "match") { br.state = "end"; br.inMatch = false; }
+    br.endTimer = msg.et;
+  } else {
+    if (br.state === "match" || br.state === "end") brEnterWarmup();
+    br.state = msg.s;
+    br.countdown = msg.cd;
+  }
+});
+net.on("brstart", msg => { if (isBR()) brStartMatch(msg.seed, msg.ids, 0); });
+net.on("brend", msg => { if (isBR()) brShowEnd(msg.w ?? null); });
+net.on("brwarm", () => { if (isBR()) brEnterWarmup(); });
+net.on("elim", msg => { if (isBR()) brHandleElim(msg); });
+// Someone shot you: you apply it (you own your health) and remember who for the kill credit
+net.on("pvp", msg => {
+  if (!isBR() || playerHealth <= 0 || br.ghost || br.flight === PHASE_PLANE) return;
+  brNoteAttacker(msg.from, msg.w, !!msg.hs);
+  dealDamageToPlayer(msg.d, 0, 0, msg.hs ? 0.5 : 0.25, msg.sx, msg.sz);
+});
+
+
 // ─── Lobby ────────────────────────────────────────────────────────────────────
 const lobby = new Lobby({
   onSolo(name) {
     myName = name;
+    gameMode = "solo";
     lobby.hide();
   },
   async onCoop(name, room) {
     myName = name;
     const welcome = await net.connect(Net.defaultUrl(), name, room);
+    gameMode = "coop";
     onConnected(welcome);
+    lobby.hide();
+  },
+  async onBattleRoyale(name, room) {
+    myName = name;
+    // Battle royale rooms live apart from the co-op ones with the same code
+    const welcome = await net.connect(Net.defaultUrl(), name, `br-${room}`.slice(0, 24));
+    enterBattleRoyale(welcome);
     lobby.hide();
   },
 });
@@ -2488,13 +3224,18 @@ function animate() {
   const frameMs = rawDelta * 1000;
   const delta = Math.min(rawDelta, 0.05);
 
-  updateCharacterMovement(delta);
-  applyGroundStickForce(delta);
+  if (brFlying()) {
+    brUpdateFlight(delta);
+  } else {
+    updateCharacterMovement(delta);
+    applyGroundStickForce(delta);
+  }
 
   world.step(1 / 60, delta, 3);
 
   checkGrounded();
   snapCharacterToGround();
+  if (isBR()) brAfterStep(delta);
 
   characterRoot.position.set(
     characterBody.position.x,
@@ -2503,7 +3244,9 @@ function animate() {
   );
 
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
-  if (net.isClient) {
+  if (isBR()) {
+    brUpdate(delta);
+  } else if (net.isClient) {
     // Co-op client: mirror the host's monsters instead of simulating them
     monsterSync?.updatePuppets(delta, characterBody.position);
     regenPlayerHealth(5 * delta);
@@ -2516,7 +3259,10 @@ function animate() {
   netTick(delta);
   updateSquad(delta);
 
-  updateThirdPersonCamera(delta);
+  const watched = brWatchedPlayer();
+  if (watched) updateSpectatorCamera(delta, watched);
+  else updateThirdPersonCamera(delta);
+  updateFocus(watched);
   updateSoldier(delta);
   updateWeapon(delta);
   updateThrowAim(delta);
@@ -2536,10 +3282,11 @@ function animate() {
   gameHud.update(delta);
   updateCombatHUD(delta);
 
-  minimap.update(performance.now(), characterBody.position.x, characterBody.position.z, aimYaw);
+  minimap.update(performance.now(), focusPos.x, focusPos.z, watched ? watched.aimYaw : aimYaw);
+  if (isBR()) brUpdateHud(delta);
 
   updateMood(delta);
-  updateGroundChunks(characterBody.position.x, characterBody.position.z);
+  updateGroundChunks(focusPos.x, focusPos.z);
   updateSunShadow();
   renderer.render(scene, camera);
   updateDynamicResolution(frameMs);
@@ -2679,7 +3426,7 @@ async function boot() {
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather;
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, inventory, pickups, get hp() { return playerHealth; }, get kills() { return killsThisLife; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     lobby.show();

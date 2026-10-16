@@ -2,6 +2,7 @@ import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { Soldier } from "../player/Soldier.js";
 import { GROUP_PLAYER, GROUP_NONE } from "../physicsGroups.js";
+import { createParachute, setSkydivePose } from "../br/BrVisuals.js";
 
 // Teammates in co-op: an animated Soldier per remote player, driven by the
 // state packets they send (~20 Hz) and smoothed between packets. Each one gets
@@ -11,6 +12,10 @@ import { GROUP_PLAYER, GROUP_NONE } from "../physicsGroups.js";
 const POS_SMOOTH  = 14;    // exp rate toward the latest (extrapolated) position
 const MAX_EXTRAP  = 0.25;  // seconds of dead reckoning between packets
 const TAG_HEIGHT  = 2.25;  // metres above the feet
+const PVP_TAG_RANGE = 45;  // battle royale: enemy names only show up close (and not through walls)
+
+// Drop phase from the state packet (battle royale)
+export const PHASE_GROUND = 0, PHASE_PLANE = 1, PHASE_FALL = 2, PHASE_CHUTE = 3;
 
 function angleDiff(a, b) {
   let d = (a - b) % (Math.PI * 2);
@@ -59,6 +64,7 @@ export class RemotePlayers {
     this.capsule = capsule;
     this.addCapsule = addCapsule;
     this.players = new Map();
+    this._pvp = false;
     this._targets = [];
     this._v = new THREE.Vector3();
     this._muzzle = new THREE.Vector3();
@@ -75,7 +81,7 @@ export class RemotePlayers {
     canvas.width = 320; canvas.height = 128;
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
-    const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+    const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: this._pvp, transparent: true }));
     tag.renderOrder = 10;
     tag.visible = false;
     this.scene.add(tag);
@@ -88,13 +94,16 @@ export class RemotePlayers {
     body.position.set(0, -500, 0);
     this.world.addBody(body);
 
+    const chute = createParachute();
+    root.add(chute);
+
     const p = {
       id, name, color, root, tag, tex, ctx: canvas.getContext("2d"), body,
       soldier: null, ready: false, hasState: false,
       // latest packet + smoothed values
       tx: 0, ty: 0, tz: 0, vx: 0, vz: 0, extrap: 0,
       bodyYaw: 0, aimYaw: 0, aimPitch: 0, aim: false, fire: false, weapon: "smg",
-      hp: 100, dead: false, vis: 1, kills: 0,
+      hp: 100, dead: false, vis: 1, kills: 0, phase: PHASE_GROUND, chute, skydive: 0,
       tagKey: "",
       target: { id, pos: body.position, vel: { x: 0, z: 0 }, alive: false, vis: 1, local: false, name },
     };
@@ -130,6 +139,16 @@ export class RemotePlayers {
 
   get count() { return this.players.size; }
 
+  /** Battle royale: everyone is an enemy, so name tags stop showing through walls. */
+  set pvp(on) {
+    this._pvp = on;
+    for (const p of this.players.values()) {
+      p.tag.material.depthTest = on;
+      p.tag.material.needsUpdate = true;
+    }
+  }
+  get pvp() { return this._pvp; }
+
   /** Latest state packet from a teammate. */
   applyState(id, s) {
     const p = this.players.get(id);
@@ -150,9 +169,11 @@ export class RemotePlayers {
     if (dead !== p.dead) {
       p.dead = dead;
       if (dead) p.soldier?.die(); else p.soldier?.revive();
-      p.body.collisionFilterGroup = dead ? GROUP_NONE : GROUP_PLAYER;
     }
-    p.target.alive = !dead && p.hasState;
+    p.phase = s.ph ?? PHASE_GROUND;
+    // Dead players and players still in the plane can't be hit
+    p.body.collisionFilterGroup = dead || p.phase === PHASE_PLANE ? GROUP_NONE : GROUP_PLAYER;
+    p.target.alive = !dead && p.hasState && p.phase !== PHASE_PLANE;
     p.target.vis = p.vis;
   }
 
@@ -211,6 +232,11 @@ export class RemotePlayers {
 
       p.root.position.set(b.x, b.y - feetOffset, b.z);
       p.root.rotation.y += angleDiff(p.bodyYaw, p.root.rotation.y) * k;
+      const inPlane = p.phase === PHASE_PLANE;
+      p.root.visible = !inPlane;
+      p.chute.visible = p.phase === PHASE_CHUTE;
+      p.skydive += ((p.phase === PHASE_FALL ? 1 : 0) - p.skydive) * (1 - Math.exp(-6 * delta));
+      if (p.ready) setSkydivePose(p.soldier.root, p.skydive);
 
       if (p.ready) {
         p.root.updateMatrixWorld(true);
@@ -233,9 +259,9 @@ export class RemotePlayers {
         drawTag(p.ctx, p.name, p.color, p.hp / 100, p.dead);
         p.tex.needsUpdate = true;
       }
-      p.tag.visible = true;
       p.tag.position.set(b.x, b.y - feetOffset + TAG_HEIGHT, b.z);
       const dist = camera.position.distanceTo(p.tag.position);
+      p.tag.visible = !inPlane && (!this._pvp || dist < PVP_TAG_RANGE);
       const s = THREE.MathUtils.clamp(dist * 0.055, 0.9, 5);
       p.tag.scale.set(s * 2.5, s, 1);
     }

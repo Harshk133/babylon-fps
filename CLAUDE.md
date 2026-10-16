@@ -59,12 +59,25 @@ Most monsters are the Quake 2 MD2 player models from the three.js examples (`web
 ### Co-op multiplayer (`server/`, `src/net/`)
 
 - **`server/relay.mjs`** is a dumb WebSocket relay: rooms (max 8), names and colours, host election (the longest-connected player takes over if the host leaves), and forwarding (`to: id | "host"`, or everyone else). It's attached to the Vite dev/preview server at `/ws` by the plugin in `vite.config.js`, so the game and the relay share one origin. It can also run standalone.
-- **`Net`** is the client (`on(type, fn)`, `send(msg)`, `isHost` / `isClient`). **`Lobby`** handles name and room entry (`?room=` prefills it), solo or co-op.
+- **`Net`** is the client (`on(type, fn)`, `send(msg)`, `isHost` / `isClient`). **`Lobby`** handles name and room entry (`?room=` prefills it) and the mode: solo, co-op, or battle royale.
 - **Authority:** the host runs `ZombieManager` + `LevelDirector` and streams `mon` snapshots (`MonsterSync`, 12 Hz: 12 numbers per monster) plus `lvl` (2 Hz) and `lev` events. Clients turn their pools into kinematic puppets (`pool.setPuppetMode(true)`), never run AI, and send `hit` / `noise` to the host. Every player streams `st` (20 Hz). `RemotePlayers` renders teammates (Soldier + name-tag sprite + kinematic capsule whose `body.playerTarget` makes them targetable).
 - **Targets:** `ZombieManager` / `EnemyFire` take `getTargets()` (local + remote players) and report hits through `onPlayerHit(target, …)`, which sends `hurt` to a remote target. Monsters pick the seen/nearest player and switch to a much closer visible one.
 - GLB creatures sync like the rest: a flyer's altitude rides in the snapshot's root y, `MonsterSync.ANIMS` gained `walk` (appended, because indices are on the wire), and clients play the procedural deaths locally.
 - **Shared events:** `shot` (teammate tracers and sound), `throw` (every client simulates it; only the host's copy damages monsters, each client damages its own player), `door` / `light` / `world` (state for late joiners), `drop` (host-rolled loot), `kill` (credit to `lastHitBy`), `ef` (host's monster gunfire replayed as `visualOnly`), `wipe`.
 - **Horde scaling:** `LevelDirector.playerCount` multiplies totals (+65% per extra player), max alive (+55%, cap 40) and Warlords (+1 at 3+ players). In co-op, death respawns you next to a teammate; the level restarts only when the whole squad is down for 4 s.
+
+### Battle royale (`src/br/`)
+
+The lobby offers three modes: Solo, Co-op vs Zombies, and Battle Royale. `gameMode` in `main.js` is `"solo" | "coop" | "br"`; `isBR()` gates every difference. Battle royale rooms are `br-<code>` on the same relay (no relay changes), so they never mix with co-op rooms.
+
+- **`BattleRoyale.js`** is pure rules: plane route (`planeRoute` / `planeAt`), zone circles and phases (`ZONE_PHASES`, `zoneCircles`, `zoneAt`), loot layout (`lootPlan`, `BR_FIELD_LOOT`, `BR_HOUSE_LOOT`), and PvP damage (`PVP_DAMAGE`, `PVP_HEADSHOT`). Everything derives from the match seed, so one `brstart { seed, ids }` builds the same match on every client.
+- **`BrVisuals.js`**: the blue zone wall (open cylinder, scrolling shader), the drop plane, parachutes, and `setSkydivePose`. **`BrHud.js`**: alive/kills/zone bar, outside-zone overlay, hints, spectator bar, result screens and the big map (M).
+- **Flow** (host-driven): warm-up (warm-up kit, PvP on, respawn after 3 s) → countdown (auto 25 s once 2+ players are in; the host can press Enter, alone that's a practice drop) → match → results (12 s) → `brwarm`. The host streams `br` at 2 Hz (state, seed, match clock, alive ids, hour, weather); late joiners rebuild the match from it and spectate as a hidden "ghost".
+- **Drop**: `br.flight` is `PHASE_PLANE → PHASE_FALL → PHASE_CHUTE → PHASE_GROUND` (constants in `RemotePlayers.js`, sent as `ph` in `st`). `brUpdateFlight` replaces the ground controller while airborne; the chute opens on Space or by itself at `FREEFALL.chuteHeight`. You start empty-handed (`inventory.reset(true)`, `inventory.current === null`).
+- **PvP**: hitscan adds `GROUP_PLAYER` to the mask (your own capsule is masked out for the ray). The shooter sends one `pvp` per victim per shot; the victim applies it (each player owns their health), remembers the attacker, and on death broadcasts `elim` and spills their loot as shared pickups. Grenades and molotovs credit their owner. The host ends the match when one player is left (or none, in a practice drop).
+- **Shared loot**: pickups take an optional network id; `take { i }` removes one for everyone, `drop` carries `i`, `a` ([ammo, reserve]) and `c` (throwable count).
+- **Spectating**: eliminated players follow living ones (`updateSpectatorCamera`, A/D or click to switch). `focusPos` (you, or whoever you watch) drives the minimap, shadows, ground chunks and pickup culling.
+- Day/night and weather keep running; co-op and battle royale clients follow the host's clock and weather (`applyWorldClock`, `weather.locked`).
 
 ### Deployment
 

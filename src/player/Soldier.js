@@ -197,8 +197,13 @@ export class Soldier {
     tmpMixer.uncacheRoot(this.model);
   }
 
-  /** Shows the gun model for a weapon id and moves the muzzle to its barrel tip. */
+  /** Shows the gun model for a weapon id and moves the muzzle to its barrel tip. null: empty hands. */
   setWeapon(id) {
+    if (id === null) {
+      this.currentGun = null;
+      for (const g of Object.values(this.guns)) g.model.visible = false;
+      return;
+    }
     if (!this.guns[id]) return;
     this.currentGun = id;
     for (const [gid, g] of Object.entries(this.guns)) g.model.visible = gid === id;
