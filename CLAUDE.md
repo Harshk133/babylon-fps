@@ -82,6 +82,12 @@ The lobby offers three modes: Solo, Co-op vs Zombies, and Battle Royale. `gameMo
 - **Spectating**: eliminated players follow living ones (`updateSpectatorCamera`, A/D or click to switch). `focusPos` (you, or whoever you watch) drives the minimap, shadows, ground chunks and pickup culling.
 - Day/night and weather keep running; co-op and battle royale clients follow the host's clock and weather (`applyWorldClock`, `weather.locked`).
 
+### Map, pins & gunfire
+
+- The big map (**M**, `setMapOpen()`, drawn by `BrHud.drawMap`) works in every mode; opening it frees the cursor / touch screen. Click or tap to drop a **pin** (`mapPin`, personal, not synced); clicking the pin or *Clear pin* removes it, and it clears itself when you arrive. The pin gets a beacon (`pinBeacon`), a trail of chevrons floating above the grass (`pinTrail`, instanced, rebuilt every frame toward the pin), an on-screen marker with the distance (`#pin-marker`), and a dashed line on both maps.
+- **Crosshair on target**: `updateCrosshairTarget()` casts the same ray a shot would (crosshair → current gun's `range`, own capsule masked out, `GROUP_PLAYER` only in the BR) about 20 times a second and adds `.on-target` (red) over a living monster or enemy player.
+- **Gunfire**: every remote `shot` calls `noteGunfire()`; shots within `GUNFIRE_MERGE` are one fight, shown as a red zone with its distance on the minimap (pinned to the rim when off-range) and the big map for `GUNFIRE_LIFE` seconds, plus a throttled "Gunfire 47 m NW" alert.
+
 ### Mobile (`src/mobile/`, `android/`, see `MOBILE.md`)
 
 - **Touch** (`TouchControls.js`): on touch devices (`isTouchDevice()`, or `?touch` in the URL) `body.touch` is set and an overlay replaces mouse + keyboard: a floating joystick (sprint at the top edge), a right-side look pad, and buttons that call `setKey()` with the same key codes as the keyboard, so game logic isn't duplicated. There's no pointer lock on phones: `touchPlay.on` stands in for it (`isLocked()`, `requestLock()`, `releaseLock()`, `setTouchPlaying()`). Prompt rows (`InventoryUI.onPromptKey`) and hotbar slots are tappable. `updateTouchUi()` shows only the buttons that make sense (no fire while driving, START for the BR host).

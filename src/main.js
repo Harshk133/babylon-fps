@@ -344,7 +344,7 @@ function updateCombatHUD(delta) {
     if (killsEl) killsEl.textContent = `${killsThisLife}`;
   }
 
-  const showStart = hud.paused && playerHealth > 0 && !inventoryOpen && !lobby?.open && !brWatching();
+  const showStart = hud.paused && playerHealth > 0 && !inventoryOpen && !lobby?.open && !brWatching() && !brHud.mapOpen;
   if (showStart !== hud.shownPaused) {
     hud.shownPaused = showStart;
     startScreenEl?.classList.toggle("visible", showStart);
@@ -724,8 +724,9 @@ function setKey(code, pressed, repeat) {
   if (pressed) {
     if (code === "Tab" || code === "KeyI") { setInventoryOpen(!inventoryOpen); return; }
     if (code === "Escape" && inventoryOpen) { setInventoryOpen(false); return; }
+    if (code === "KeyM" && !lobby.open) { setMapOpen(!brHud.mapOpen); return; }
+    if (code === "Escape" && brHud.mapOpen) { setMapOpen(false); return; }
     if (isBR() && !lobby.open) {
-      if (code === "KeyM") { brHud.setMapOpen(!brHud.mapOpen); return; }
       if (code === "Enter" && net.isHost && (br.state === "warm" || br.state === "count")) { brHostStart(); return; }
       if (brWatching()) {
         if (code === "KeyA" || code === "ArrowLeft") brPickSpectate(-1);
@@ -764,6 +765,7 @@ window.addEventListener("keyup", e => setKey(e.code, false, false));
 canvas.addEventListener("click", () => {
   sfx.unlock();
   if (brWatching()) { brPickSpectate(1); return; }
+  if (brHud.mapOpen) { setMapOpen(false); return; }
   if (playerHealth > 0 && !inventoryOpen && !lobby?.open) requestLock();
 });
 let wheelCooldown = 0;
@@ -1317,6 +1319,50 @@ function fireShot(def) {
   makeNoise(characterBody.position.x, characterBody.position.z, def.alertRadius, "shot");
   if (net.connected) {
     net.send({ t: "shot", w: def.sound, f: [+_muzzle.x.toFixed(2), +_muzzle.y.toFixed(2), +_muzzle.z.toFixed(2)], h: shotPoints });
+  }
+}
+
+// ─── Crosshair: red when a shot from here would hit ───────────────────────────
+// A ray from the crosshair out to the current gun's range, ~20 times a second
+// (same start point and filters as a real shot): red over a monster, or over
+// an enemy player in the battle royale. Walls block it, glass doesn't.
+const TARGET_CHECK_INTERVAL = 0.05;
+const _tgtDir = new THREE.Vector3();
+const _tgtFrom = new CANNON.Vec3();
+const _tgtTo = new CANNON.Vec3();
+const _tgtResult = new CANNON.RaycastResult();
+const targetOpts = { collisionFilterMask: GROUP_WORLD | GROUP_ZOMBIE, skipBackfaces: true };
+const crosshairTarget = { timer: 0, on: false };
+
+function updateCrosshairTarget(delta) {
+  crosshairTarget.timer -= delta;
+  if (crosshairTarget.timer > 0) return;
+  crosshairTarget.timer = TARGET_CHECK_INTERVAL;
+  let onTarget = false;
+  const def = currentDef();
+  if (def && isLocked() && playerHealth > 0 && !brAirborne() && !drive.on && !sprinting) {
+    camera.getWorldDirection(_tgtDir);
+    const startT = Math.max(0,
+      (camPivot.x - camera.position.x) * _tgtDir.x +
+      (camPivot.y - camera.position.y) * _tgtDir.y +
+      (camPivot.z - camera.position.z) * _tgtDir.z);
+    _tgtFrom.set(camera.position.x + _tgtDir.x * startT, camera.position.y + _tgtDir.y * startT, camera.position.z + _tgtDir.z * startT);
+    _tgtTo.set(_tgtFrom.x + _tgtDir.x * def.range, _tgtFrom.y + _tgtDir.y * def.range, _tgtFrom.z + _tgtDir.z * def.range);
+    targetOpts.collisionFilterMask = GROUP_WORLD | GROUP_ZOMBIE | (isBR() ? GROUP_PLAYER : 0);
+    const ownGroup = characterBody.collisionFilterGroup;
+    characterBody.collisionFilterGroup = 0; // never your own capsule
+    _tgtResult.reset();
+    const hit = world.raycastClosest(_tgtFrom, _tgtTo, targetOpts, _tgtResult);
+    characterBody.collisionFilterGroup = ownGroup;
+    if (hit) {
+      const b = _tgtResult.body;
+      const t = b.playerTarget;
+      onTarget = (b.zombie && !b.zombie.dying) || (isBR() && !!t && !t.local && t.alive);
+    }
+  }
+  if (onTarget !== crosshairTarget.on) {
+    crosshairTarget.on = onTarget;
+    crosshairEl?.classList.toggle("on-target", onTarget);
   }
 }
 
@@ -1900,6 +1946,8 @@ const minimap = new Minimap(document.getElementById("minimap"), {
   fires: () => throwables.fires,
   obstacles: () => mapObstacles,
   players: () => (isBR() ? NO_PLAYERS : remotePlayers.mapList()),
+  gunfire: () => gunfire,
+  pin: () => (brWatching() ? null : mapPin),
   zone: () => (isBR() && br.state === "match" ? br.zone : null),
 });
 
@@ -3119,6 +3167,7 @@ function brStartMatch(seed, ids, t) {
   pickups.clear();
   brSpawnLoot(seed);
   rickshaw?.reset();
+  gunfire.length = 0;
   brHud.hideResult();
 
   planeAt(br.route, t, _planePos);
@@ -3453,10 +3502,6 @@ function brHint() {
   return "";
 }
 
-const _mapNext = { x: 0, z: 0, r: 0 };
-const _mapPlane = { x: 0, z: 0, dx: 0, dz: 0 };
-const _mapState = { zone: null, next: null, route: null, plane: null, me: { x: 0, z: 0, yaw: 0 }, obstacles: mapObstacles };
-
 function brUpdateHud(delta) {
   brHud.update(delta);
   const watched = brWatchedPlayer();
@@ -3485,26 +3530,6 @@ function brUpdateHud(delta) {
     brHud.setHint(brHint());
     brHud.setSpectating(watched ? watched.name : null, watched?.color);
   }
-
-  if (!brHud.mapOpen) return;
-  const inMatch = br.state === "match";
-  _mapState.zone = inMatch ? br.zone : null;
-  if (inMatch) {
-    _mapNext.x = br.zone.nx; _mapNext.z = br.zone.nz; _mapNext.r = br.zone.nr;
-  }
-  _mapState.next = inMatch ? _mapNext : null;
-  const planeUp = inMatch && br.t < br.route.duration;
-  _mapState.route = planeUp ? br.route : null;
-  if (planeUp) {
-    planeAt(br.route, br.t, _planePos);
-    _mapPlane.x = _planePos.x; _mapPlane.z = _planePos.z;
-    _mapPlane.dx = br.route.dx; _mapPlane.dz = br.route.dz;
-  }
-  _mapState.plane = planeUp ? _mapPlane : null;
-  _mapState.me.x = focusPos.x;
-  _mapState.me.z = focusPos.z;
-  _mapState.me.yaw = watched ? watched.aimYaw : aimYaw;
-  brHud.drawMap(performance.now(), _mapState);
 }
 
 net.on("br", msg => {
@@ -3557,6 +3582,238 @@ const lobby = new Lobby({
     lobby.hide();
   },
 });
+
+// ─── Map: pins and gunfire ────────────────────────────────────────────────────
+// Other players' shots mark red "gunfire" zones on the minimap and the big map
+// (with how far away they are), so you can find a fight or avoid it. On the
+// big map (M) you can click / tap to pin a place: a beacon stands there, a
+// dashed trail on the ground leads to it, and a marker on screen shows how far.
+const GUNFIRE_LIFE = 10;          // seconds a zone stays after the last shot
+const GUNFIRE_MERGE = 22;         // shots this close together are one fight
+const PIN_REACHED = 4;            // metres: you've arrived, the pin clears
+const TRAIL_SPACING = 2.6;
+const TRAIL_MAX = 48;             // dashes (about 120 m of trail)
+const gunfire = [];               // [{ x, z, r, life, shots }]
+let mapPin = null;                // { x, z }
+let gunfireAlertAt = 0;
+const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+/** Compass direction of (dx, dz): north is +z, east is −x (as on the minimap). */
+function compassDir(dx, dz) {
+  const deg = (Math.atan2(-dx, dz) * 180 / Math.PI + 360) % 360;
+  return COMPASS[Math.round(deg / 45) % 8];
+}
+
+function noteGunfire(x, z) {
+  for (const f of gunfire) {
+    if (Math.hypot(f.x - x, f.z - z) < GUNFIRE_MERGE) {
+      f.x += (x - f.x) * 0.15;
+      f.z += (z - f.z) * 0.15;
+      f.shots++;
+      f.life = GUNFIRE_LIFE;
+      f.r = Math.min(26, 10 + f.shots * 0.4);
+      return;
+    }
+  }
+  if (gunfire.length >= 8) gunfire.shift();
+  gunfire.push({ x, z, r: 10, life: GUNFIRE_LIFE, shots: 1 });
+  // A new fight somewhere: say where (not too often)
+  const now = performance.now();
+  if (now > gunfireAlertAt && playerHealth > 0) {
+    gunfireAlertAt = now + 6000;
+    const dx = x - characterBody.position.x, dz = z - characterBody.position.z;
+    inventoryUI.feed(`Gunfire ${Math.round(Math.hypot(dx, dz))} m ${compassDir(dx, dz)}`, "info");
+  }
+}
+
+function updateGunfire(delta) {
+  for (let i = gunfire.length - 1; i >= 0; i--) {
+    gunfire[i].life -= delta;
+    if (gunfire[i].life <= 0) gunfire.splice(i, 1);
+  }
+}
+
+// Remote players' shots (teammates in co-op, everyone in the battle royale)
+net.on("shot", msg => { if (msg.f) noteGunfire(msg.f[0], msg.f[2]); });
+
+// ── The pin's beacon, ground trail and screen marker
+const pinBeacon = new THREE.Group();
+{
+  const beam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.22, 0.22, 70, 8, 1, true).translate(0, 35, 0),
+    new THREE.MeshBasicMaterial({ color: 0xffd84d, transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, side: THREE.DoubleSide }),
+  );
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.9, 1.25, 32).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0xffd84d, transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide }),
+  );
+  ring.position.y = 0.08;
+  pinBeacon.add(beam, ring);
+  pinBeacon.userData.ring = ring;
+  pinBeacon.visible = false;
+  scene.add(pinBeacon);
+}
+// Glowing chevrons pointing at the pin, floating just above the tall grass
+const chevron = new THREE.Shape();
+chevron.moveTo(0, 0.42);
+chevron.lineTo(0.42, -0.08);
+chevron.lineTo(0.28, -0.22);
+chevron.lineTo(0, 0.12);
+chevron.lineTo(-0.28, -0.22);
+chevron.lineTo(-0.42, -0.08);
+chevron.closePath();
+const pinTrail = new THREE.InstancedMesh(
+  new THREE.ShapeGeometry(chevron).rotateX(Math.PI / 2), // flat, tip toward +z
+  new THREE.MeshBasicMaterial({
+    color: 0xffd84d, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending,
+    depthWrite: false, side: THREE.DoubleSide,
+  }),
+  TRAIL_MAX,
+);
+pinTrail.count = 0;
+pinTrail.frustumCulled = false;
+pinTrail.renderOrder = 1;
+scene.add(pinTrail);
+const _trailM = new THREE.Matrix4();
+const _trailQ = new THREE.Quaternion();
+const _trailP = new THREE.Vector3();
+const _trailS = new THREE.Vector3(1, 1, 1);
+const _yAxis = new THREE.Vector3(0, 1, 0);
+const _pinScreen = new THREE.Vector3();
+const pinMarkerEl = document.getElementById("pin-marker");
+const pinDistEl = document.getElementById("pin-dist");
+const pinUi = { shown: null, dist: -1, x: -1, y: -1 };
+
+function setPin(x, z) {
+  // Keep it on the map
+  const r = Math.hypot(x, z);
+  if (r > PLAY_RADIUS - 2) { x *= (PLAY_RADIUS - 2) / r; z *= (PLAY_RADIUS - 2) / r; }
+  mapPin = { x, z };
+  pinBeacon.position.set(x, groundHeight(x, z), z);
+  pinBeacon.updateMatrixWorld(true);
+  sfx.click();
+  const d = Math.hypot(x - characterBody.position.x, z - characterBody.position.z);
+  inventoryUI.feed(`Pinned a place ${Math.round(d)} m away`, "info");
+}
+
+function clearPin() {
+  if (!mapPin) return;
+  mapPin = null;
+  sfx.click();
+}
+
+/** Opens / closes the big map. Opening frees the cursor (or the touch screen) so you can place a pin. */
+function setMapOpen(open) {
+  if (open === brHud.mapOpen) return;
+  brHud.setMapOpen(open);
+  if (open) {
+    input.fire = false;
+    input.aim = false;
+    releaseLock();
+  } else if (playerHealth > 0 && !inventoryOpen && !lobby.open && !brWatching()) {
+    requestLock();
+  }
+}
+
+brHud.onMapClick = (x, z, onPin) => (onPin ? clearPin() : setPin(x, z));
+brHud.onClearPin = clearPin;
+brHud.onClose = () => setMapOpen(false);
+
+function updatePin() {
+  const show = !!mapPin && !brWatching() && playerHealth > 0;
+  pinBeacon.visible = show;
+  if (!show || brHud.mapOpen) {
+    pinTrail.count = 0;
+    setPinMarker(false);
+    return;
+  }
+  const p = characterBody.position;
+  const dx = mapPin.x - p.x, dz = mapPin.z - p.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < PIN_REACHED && !brAirborne()) {
+    mapPin = null;
+    sfx.pickup(false);
+    inventoryUI.feed("You reached your pin", "info");
+    pinBeacon.visible = false;
+    pinTrail.count = 0;
+    setPinMarker(false);
+    return;
+  }
+  pinBeacon.userData.ring.scale.setScalar(1 + Math.sin(clock.elapsedTime * 4) * 0.12);
+
+  // Dashes along the ground toward the pin, crawling forward
+  const ux = dx / dist, uz = dz / dist;
+  _trailQ.setFromAxisAngle(_yAxis, Math.atan2(ux, uz));
+  const scroll = (clock.elapsedTime * 2.4) % TRAIL_SPACING;
+  let n = 0;
+  if (!brAirborne()) {
+    for (let i = 0; i < TRAIL_MAX; i++) {
+      const d = 3 + scroll + i * TRAIL_SPACING;
+      if (d > dist - 1.5) break;
+      const x = p.x + ux * d, z = p.z + uz * d;
+      _trailP.set(x, groundHeight(x, z) + 1.0, z);
+      pinTrail.setMatrixAt(n++, _trailM.compose(_trailP, _trailQ, _trailS));
+    }
+  }
+  pinTrail.count = n;
+  if (n) pinTrail.instanceMatrix.needsUpdate = true;
+
+  // On-screen marker above the pin, held at the screen edge when it's behind you
+  _pinScreen.set(mapPin.x, pinBeacon.position.y + 2.5, mapPin.z).project(camera);
+  const W = window.innerWidth, H = window.innerHeight;
+  let sx = (_pinScreen.x * 0.5 + 0.5) * W, sy = (-_pinScreen.y * 0.5 + 0.5) * H;
+  if (_pinScreen.z > 1) { sx = W - sx; sy = H - 70; }
+  sx = THREE.MathUtils.clamp(sx, 30, W - 30);
+  sy = THREE.MathUtils.clamp(sy, 40, H - 70);
+  setPinMarker(true, Math.round(sx), Math.round(sy), Math.round(dist));
+}
+
+function setPinMarker(show, x, y, dist) {
+  if (show !== pinUi.shown) {
+    pinUi.shown = show;
+    pinMarkerEl?.classList.toggle("on", show);
+  }
+  if (!show || !pinMarkerEl) return;
+  if (x !== pinUi.x || y !== pinUi.y) {
+    pinUi.x = x; pinUi.y = y;
+    pinMarkerEl.style.transform = `translate(${x}px, ${y}px)`;
+  }
+  if (dist !== pinUi.dist) {
+    pinUi.dist = dist;
+    pinDistEl.textContent = `${dist} m`;
+  }
+}
+
+const _mapNext = { x: 0, z: 0, r: 0 };
+const _mapPlane = { x: 0, z: 0, dx: 0, dz: 0 };
+const _mapState = {
+  zone: null, next: null, route: null, plane: null, me: { x: 0, z: 0, yaw: 0 },
+  obstacles: mapObstacles, gunfire, pin: null,
+};
+
+/** The big map, in every mode: zone + plane in the battle royale, gunfire and your pin everywhere. */
+function updateMapOverlay(watched) {
+  if (!brHud.mapOpen) return;
+  const inMatch = isBR() && br.state === "match";
+  _mapState.zone = inMatch ? br.zone : null;
+  if (inMatch) {
+    _mapNext.x = br.zone.nx; _mapNext.z = br.zone.nz; _mapNext.r = br.zone.nr;
+  }
+  _mapState.next = inMatch ? _mapNext : null;
+  const planeUp = inMatch && br.t < br.route.duration;
+  _mapState.route = planeUp ? br.route : null;
+  if (planeUp) {
+    planeAt(br.route, br.t, _planePos);
+    _mapPlane.x = _planePos.x; _mapPlane.z = _planePos.z;
+    _mapPlane.dx = br.route.dx; _mapPlane.dz = br.route.dz;
+  }
+  _mapState.plane = planeUp ? _mapPlane : null;
+  _mapState.pin = mapPin;
+  _mapState.me.x = focusPos.x;
+  _mapState.me.z = focusPos.z;
+  _mapState.me.yaw = watched ? watched.aimYaw : aimYaw;
+  brHud.drawMap(performance.now(), _mapState);
+}
 
 // ─── Touch controls & gyroscope (phones / tablets) ────────────────────────────
 const gyro = new Gyro();
@@ -3649,7 +3906,7 @@ function updateTouchUi() {
   touch.show("swapW", !busy && inventory.ownedWeapons.length > 1);
   touch.show("throw", !busy);
   touch.show("swapT", !busy);
-  touch.show("map", isBR());
+  touch.show("map", true);
   touch.show("start", isBR() && net.isHost && (br.state === "warm" || br.state === "count"));
   touch.show("gyro", gyro.available);
   touch.lit("aim", input.aim);
@@ -3764,10 +4021,14 @@ function animate() {
   updatePlayerNoise(delta);
   updateLevelHud();
   gameHud.update(delta);
+  updateCrosshairTarget(delta);
   updateCombatHUD(delta);
 
+  updateGunfire(delta);
+  updatePin();
   minimap.update(performance.now(), focusPos.x, focusPos.z, watched ? watched.aimYaw : aimYaw);
   if (isBR()) brUpdateHud(delta);
+  updateMapOverlay(watched);
 
   updateMood(delta);
   updateRickshawFx();

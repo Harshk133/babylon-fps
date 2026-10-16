@@ -1,6 +1,8 @@
 // Battle royale HUD: alive / kills / zone status bar, the "outside the zone"
-// overlay, context hints, the spectator bar, result screens and the big map
-// (M). Builds its own DOM; every setter only writes when the value changes.
+// overlay, context hints, the spectator bar and result screens. Also the big
+// map (M), which every mode uses: zone, plane route, gunfire, and a pin you
+// place by clicking / tapping. Builds its own DOM; setters only write when the
+// value changes.
 
 const MAP_WORLD_R = 265;   // metres from the map centre to its edge
 const MAP_HZ = 12;
@@ -10,6 +12,29 @@ function el(tag, id, cls) {
   if (id) e.id = id;
   if (cls) e.className = cls;
   return e;
+}
+
+/** A map pin whose tip is at (x, y). */
+export function drawPin(ctx, x, y, scale = 1) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+  ctx.fillStyle = "#ffd84d";
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(-3, -6, -7, -9, -7, -14);
+  ctx.arc(0, -14, 7, Math.PI, 0);
+  ctx.bezierCurveTo(7, -9, 3, -6, 0, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#3a2a00";
+  ctx.beginPath();
+  ctx.arc(0, -14, 2.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 
 export class BrHud {
@@ -48,14 +73,41 @@ export class BrHud {
     this.map = el("div", "br-map");
     this.mapCanvas = document.createElement("canvas");
     const mapHead = el("div", null, "br-map-head");
-    mapHead.innerHTML = "MAP <span><kbd>M</kbd> close</span>";
+    mapHead.innerHTML = "MAP <span class=\"br-map-tip\">Click / tap to pin a place</span>";
+    this.clearPinBtn = el("button", null, "br-map-clear");
+    this.clearPinBtn.type = "button";
+    this.clearPinBtn.textContent = "Clear pin";
+    const closeBtn = el("button", null, "br-map-close");
+    closeBtn.type = "button";
+    closeBtn.innerHTML = "<kbd>M</kbd> Close";
+    mapHead.append(this.clearPinBtn, closeBtn);
     this.map.append(mapHead, this.mapCanvas);
     this.mapCtx = this.mapCanvas.getContext("2d");
     this.mapOpen = false;
     this._mapNext = 0;
+    this._k = 1;
+    this._c = 0;
+    /** (x, z, pinHit) when the map is clicked; pinHit = the click landed on the current pin. */
+    this.onMapClick = null;
+    this.onClearPin = null;
+    this.onClose = null;
+    this.mapCanvas.addEventListener("pointerdown", e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const r = this.mapCanvas.getBoundingClientRect();
+      const px = e.clientX - r.left, py = e.clientY - r.top;
+      const x = (this._c - px) / this._k, z = (this._c - py) / this._k;
+      const pin = this._lastPin;
+      const hit = !!pin && Math.hypot(this._c - pin.x * this._k - px, this._c - pin.z * this._k - py) < 14;
+      this.onMapClick?.(x, z, hit);
+      this._mapNext = 0;
+    });
+    this.clearPinBtn.addEventListener("pointerdown", e => { e.stopPropagation(); this.onClearPin?.(); this._mapNext = 0; });
+    closeBtn.addEventListener("pointerdown", e => { e.stopPropagation(); this.onClose?.(); });
+    this.map.addEventListener("pointerdown", e => e.stopPropagation());
 
-    this.root.append(this.warn, this.top, this.hint, this.spec, this.result, this.map);
-    document.body.append(this.root);
+    this.root.append(this.warn, this.top, this.hint, this.spec, this.result);
+    document.body.append(this.root, this.map); // the map works outside the battle royale too
     this._c = {};
   }
 
@@ -143,8 +195,9 @@ export class BrHud {
   }
 
   /**
-   * s: { zone, next, route, plane, me:{x,z,yaw}, obstacles, pickups? }
+   * s: { zone, next, route, plane, me:{x,z,yaw}, obstacles, gunfire, pin }
    * zone / next: { x, z, r } or null. route: { ax, az, bx, bz } or null.
+   * gunfire: [{ x, z, r, life }] recent shooting. pin: { x, z } or null.
    */
   drawMap(now, s) {
     if (!this.mapOpen || now < this._mapNext) return;
@@ -156,6 +209,10 @@ export class BrHud {
     const ctx = this.mapCtx;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const S = css, c = S / 2, k = (S / 2 - 6) / MAP_WORLD_R;
+    this._k = k;
+    this._c = c;
+    this._lastPin = s.pin;
+    this.clearPinBtn.hidden = !s.pin;
     // North (+Z) up, east (−X) right, like the minimap compass
     const X = x => c - x * k, Y = z => c - z * k;
 
@@ -232,6 +289,44 @@ export class BrHud {
       ctx.fill();
       ctx.restore();
     }
+    // Gunfire: red zones with how far away they are
+    const pulse = 0.5 + 0.5 * Math.sin(now / 160);
+    ctx.font = "600 15px 'Teko', 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const f of s.gunfire ?? []) {
+      const fade = Math.min(1, f.life / 3);
+      const r = Math.max(7, f.r * k);
+      ctx.fillStyle = `rgba(255, 40, 30, ${(0.22 + pulse * 0.18) * fade})`;
+      ctx.strokeStyle = `rgba(255, 70, 50, ${0.9 * fade})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(X(f.x), Y(f.z), r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      if (s.me) {
+        ctx.fillStyle = `rgba(255, 210, 200, ${fade})`;
+        ctx.fillText(`${Math.round(Math.hypot(f.x - s.me.x, f.z - s.me.z))} m`, X(f.x), Y(f.z) - r - 8);
+      }
+    }
+
+    // Pin: a dashed route from you, the distance, and the marker
+    if (s.pin && s.me) {
+      ctx.strokeStyle = "#ffd84d";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([7, 6]);
+      ctx.lineDashOffset = -now / 40;
+      ctx.beginPath();
+      ctx.moveTo(X(s.me.x), Y(s.me.z));
+      ctx.lineTo(X(s.pin.x), Y(s.pin.z));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
+      drawPin(ctx, X(s.pin.x), Y(s.pin.z), 1.2);
+      ctx.fillStyle = "#ffd84d";
+      ctx.fillText(`${Math.round(Math.hypot(s.pin.x - s.me.x, s.pin.z - s.me.z))} m`, X(s.pin.x), Y(s.pin.z) + 12);
+    }
+
     if (s.me) {
       ctx.save();
       ctx.translate(X(s.me.x), Y(s.me.z));

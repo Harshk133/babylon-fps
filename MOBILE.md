@@ -21,6 +21,7 @@ landscape app with touch controls and gyroscope aiming.
 | On-screen prompts | Tap them: *Pick up*, *Drive auto-rickshaw*, *Get out*, *Fill petrol*, doors, lights |
 | Top row | **❚❚** pause · **BAG** inventory · **GYRO** gyroscope aiming · flashlight · **MAP** (battle royale) |
 | **START** | Battle royale host: start the match |
+| **MAP**, then tap the map | Pin a place: follow the yellow chevrons / marker. Tap the pin (or *Clear pin*) to remove it. Red circles are gunfire, with their distance |
 
 **Gyroscope:** tap **GYRO**, then turn the phone left / right to look left /
 right and tilt it to look up / down (like PUBG Mobile). It remembers the setting.

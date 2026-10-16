@@ -628,6 +628,13 @@ body {
   box-shadow: 0 0 2px rgba(0, 0, 0, 0.9);
 }
 
+/* Something your gun can hit is under the crosshair (in range, nothing in the way) */
+#crosshair.on-target .ch,
+#crosshair.on-target .ch-dot {
+  background: #ff2a1a;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.9), 0 0 6px rgba(255, 40, 20, 0.85);
+}
+
 /* ── Hit Marker ───────────────────────────────────────────────────────────── */
 #hitmarker-wrap {
   position: fixed;
@@ -2327,3 +2334,46 @@ body.touch #inventory { overflow-y: auto !important; }
 @media (orientation: portrait) {
   body.touch #rotate-hint { display: flex; }
 }
+
+/* ── Big map: works in every mode, header with pin controls ───────────────── */
+#br-map { font-family: var(--font-hud); color: #fff; user-select: none; }
+#br-map canvas { cursor: crosshair; touch-action: none; }
+.br-map-head { align-items: center; gap: 10px; }
+.br-map-tip { flex: 1; font-size: 15px; letter-spacing: 0.08em; color: var(--bone-dim); }
+.br-map-clear, .br-map-close {
+  padding: 3px 10px 1px;
+  font: inherit;
+  font-size: 16px;
+  letter-spacing: 0.1em;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.br-map-clear { color: #ffd84d; border-color: rgba(255, 216, 77, 0.5); }
+.br-map-clear[hidden] { display: none; }
+.br-map-close kbd { font-size: 12px; }
+body.touch .br-map-close kbd { display: none; }
+
+/* ── Pin marker on screen ─────────────────────────────────────────────────── */
+#pin-marker {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 105;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  width: 90px;
+  margin: -34px 0 0 -45px; /* centred on the pin */
+  pointer-events: none;
+  font-family: var(--font-hud);
+  font-size: 17px;
+  letter-spacing: 0.06em;
+  color: #ffd84d;
+  text-shadow: 0 1px 3px #000;
+}
+#pin-marker.on { display: flex; }
+#pin-marker svg { width: 22px; height: 29px; filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.6)); }
+#pin-marker span { padding: 1px 6px 0; background: rgba(0, 0, 0, 0.6); border-radius: 3px; }

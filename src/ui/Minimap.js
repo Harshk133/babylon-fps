@@ -2,6 +2,8 @@
 // and facing up; the world turns around them. Redrawn at a capped rate (not
 // every frame) and only touches the heading DOM when it changes.
 
+import { drawPin } from "../br/BrHud.js";
+
 const MAP_RANGE   = 60;    // metres from centre to edge
 const REDRAW_HZ   = 30;
 const EDGE_RANGE  = 160;   // weapon pickups this close but off-map get an edge marker
@@ -23,6 +25,8 @@ export class Minimap {
    *   pickups()   → [{ x, z, def:{category} }]
    *   fires()     → [{ active, x, z, time }]
    *   obstacles() → [{ type:"box", x, z, w, d, rot } | { type:"circle", x, z, r }]
+   *   gunfire()   → [{ x, z, r, life }] recent shooting (red zones)
+   *   pin()       → { x, z } or null: the place you pinned on the big map
    */
   constructor(root, sources) {
     this.sources = sources;
@@ -259,6 +263,55 @@ export class Minimap {
       ctx.stroke();
       ctx.fill();
       ctx.restore();
+    }
+
+    // ── Gunfire: red zones; off the map they sit on the rim with the distance
+    ctx.font = "700 10px 'Segoe UI', system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const f of this.sources.gunfire?.() ?? []) {
+      const dx = f.x - px, dz = f.z - pz;
+      const dist = Math.hypot(dx, dz);
+      const fade = Math.min(1, f.life / 3);
+      let fx = mx(f.x, f.z), fy = my(f.x, f.z);
+      let r = Math.max(5, f.r * k);
+      if (dist > MAP_RANGE * 0.95) {
+        const a = Math.atan2(fy - c, fx - c);
+        fx = c + Math.cos(a) * (R - 9); fy = c + Math.sin(a) * (R - 9);
+        r = 6;
+      }
+      ctx.fillStyle = `rgba(255, 40, 30, ${(0.25 + pulse * 0.25) * fade})`;
+      ctx.strokeStyle = `rgba(255, 80, 60, ${0.9 * fade})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(fx, fy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = `rgba(255, 220, 210, ${fade})`;
+      ctx.fillText(`${Math.round(dist)}m`, fx, fy - r - 6);
+    }
+
+    // ── Pin: dashed line from you; on the rim when it's further than the map shows
+    const pin = this.sources.pin?.();
+    if (pin) {
+      const dist = Math.hypot(pin.x - px, pin.z - pz);
+      let tx = mx(pin.x, pin.z), ty = my(pin.x, pin.z);
+      const off = dist > MAP_RANGE * 0.95;
+      if (off) {
+        const a = Math.atan2(ty - c, tx - c);
+        tx = c + Math.cos(a) * (R - 6); ty = c + Math.sin(a) * (R - 6);
+      }
+      ctx.strokeStyle = "rgba(255, 216, 77, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(c, c);
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      drawPin(ctx, tx, ty + (off ? 6 : 0), 0.8);
+      ctx.fillStyle = "#ffd84d";
+      ctx.fillText(`${Math.round(dist)}m`, tx, ty + (off ? -12 : 8));
     }
 
     // ── View cone + player arrow
