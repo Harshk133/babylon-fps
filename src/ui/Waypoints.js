@@ -1,5 +1,6 @@
 // Pins out in the world: a light pillar standing on each pin (pooled, always in
-// the scene so it never compiles a shader mid-game), an on-screen marker with
+// the scene so it never compiles a shader mid-game), a dashed trail of glowing
+// chevrons along the ground from you to your own pin, an on-screen marker with
 // the distance that sticks to the screen edge when the pin is off to the side,
 // and the PUBG-style compass tape along the top of the screen with every pin's
 // bearing on it. DOM is only written when a value it shows changes.
@@ -14,6 +15,35 @@ const COMPASS_FOV = 120;  // degrees of heading shown across the tape
 const COMPASS_HZ  = 20;
 const EDGE_PAD    = 34;   // px kept between an edge-clamped marker and the screen edge
 const LABELS = { 0: "N", 45: "NE", 90: "E", 135: "SE", 180: "S", 225: "SW", 270: "W", 315: "NW" };
+const TRAIL_DASHES = 44;      // chevrons in the trail to your pin (≈ 115 m of it)
+const TRAIL_GAP    = 2.6;     // metres between them
+const TRAIL_START  = 2.2;     // the first one, ahead of your feet
+const TRAIL_SPEED  = 2.4;     // m/s they crawl toward the pin
+const TRAIL_LIFT   = 0.32;    // above the ground, so the grass doesn't swallow them
+const _m4 = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _up = new THREE.Vector3(0, 1, 0);
+const _one = new THREE.Vector3(1, 1, 1);
+const _p = new THREE.Vector3();
+const _col = new THREE.Color();
+
+function chevronTexture() {
+  const c = document.createElement("canvas");
+  c.width = 32; c.height = 48;
+  const g = c.getContext("2d");
+  g.strokeStyle = "#fff";
+  g.lineWidth = 7;
+  g.lineCap = "round";
+  g.lineJoin = "round";
+  g.shadowColor = "#fff";
+  g.shadowBlur = 6;
+  g.beginPath();
+  g.moveTo(5, 36); g.lineTo(16, 14); g.lineTo(27, 36);
+  g.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
 const _v = new THREE.Vector3();
 
@@ -57,6 +87,20 @@ export class Waypoints {
     }
     this.pins = new Map();
 
+    // Dashed trail to your pin: one instanced mesh, the tip of each chevron toward the pin
+    const dashGeo = new THREE.PlaneGeometry(0.6, 0.9).rotateX(-Math.PI / 2).rotateY(Math.PI);
+    this.trail = new THREE.InstancedMesh(dashGeo, new THREE.MeshBasicMaterial({
+      map: chevronTexture(), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+      side: THREE.DoubleSide, forceSinglePass: true, fog: false,
+    }), TRAIL_DASHES);
+    this.trail.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.trail.setColorAt(0, _col.set(1, 1, 1));
+    this.trail.count = 0;
+    this.trail.frustumCulled = false;
+    this.trail.renderOrder = 3;
+    scene.add(this.trail);
+    this.trailColor = new THREE.Color(0xffcc33);
+
     // Compass tape
     this.compass = document.createElement("div");
     this.compass.id = "compass";
@@ -78,6 +122,7 @@ export class Waypoints {
   set(id, pin) {
     if (pin) this.pins.set(id, pin);
     else this.pins.delete(id);
+    if (id === "me" && pin) this.trailColor.set(pin.color);
     // Give every pin a pooled slot
     const ids = [...this.pins.keys()].slice(0, MAX_PINS);
     this.slots.forEach((s, i) => {
@@ -95,6 +140,33 @@ export class Waypoints {
     this._cKey = "";
   }
 
+  /** Chevrons along the ground from you toward your pin, crawling forward and fading out. */
+  _updateTrail(now, me) {
+    const pin = this.pins.get("me");
+    const t = this.trail;
+    if (!pin || !this.visible) { t.count = 0; return; }
+    const dx = pin.x - me.x, dz = pin.z - me.z;
+    const dist = Math.hypot(dx, dz);
+    const reach = Math.min(dist - 1.5, TRAIL_START + TRAIL_GAP * (TRAIL_DASHES - 1));
+    if (reach < TRAIL_START) { t.count = 0; return; }
+    const nx = dx / dist, nz = dz / dist;
+    _q.setFromAxisAngle(_up, Math.atan2(nx, nz));
+    const crawl = ((now / 1000) * TRAIL_SPEED) % TRAIL_GAP;
+    let n = 0;
+    for (let d = TRAIL_START + crawl; d <= reach && n < TRAIL_DASHES; d += TRAIL_GAP) {
+      const x = me.x + nx * d, z = me.z + nz * d;
+      _p.set(x, groundHeight(x, z) + TRAIL_LIFT, z);
+      t.setMatrixAt(n, _m4.compose(_p, _q, _one));
+      // Brightest near you, fading toward the end of the trail (additive: dimmer = fainter)
+      const fade = Math.min(1, (d - TRAIL_START + 0.6) / 1.5) * (1 - 0.75 * (d / (reach + 1)));
+      t.setColorAt(n, _col.copy(this.trailColor).multiplyScalar(fade));
+      n++;
+    }
+    t.count = n;
+    t.instanceMatrix.needsUpdate = true;
+    t.instanceColor.needsUpdate = true;
+  }
+
   setVisible(on) {
     if (on === this.visible) return;
     this.visible = on;
@@ -104,6 +176,7 @@ export class Waypoints {
 
   /** me: { x, z, yaw } (yaw: forward = (sin, cos)). */
   update(now, me, camera) {
+    this._updateTrail(now, me);
     const W = innerWidth, H = innerHeight;
     for (const s of this.slots) {
       if (s.id === null) continue;

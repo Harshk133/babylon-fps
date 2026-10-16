@@ -35,6 +35,23 @@ const PHASES = [
   [4.6, "Night"], [7.2, "Dawn"], [17, "Day"], [19.8, "Dusk"], [24, "Night"],
 ];
 
+// How long each stretch of the clock lasts in real minutes. Days are long and
+// nights short, so most of a session is played in daylight with a night
+// coming round now and then: ≈ 8 min day, 1.5 dusk, 3 night, 1 dawn.
+const SEGMENTS = [
+  [4.6, 7.2, 1],     // dawn
+  [7.2, 17, 8],      // day
+  [17, 19.8, 1.5],   // dusk
+  [19.8, 28.6, 3],   // night (19:48 → 04:36)
+];
+
+/** In-game hours per real second at this hour. */
+function hoursPerSecond(hour) {
+  const h = hour < SEGMENTS[0][0] ? hour + 24 : hour;
+  for (const [a, b, minutes] of SEGMENTS) if (h >= a && h < b) return (b - a) / (minutes * 60);
+  return 24 / (16 * 60);
+}
+
 const BLOOD_MOON = new THREE.Color(0xff3a22);
 const PALE_MOON = new THREE.Color(0xdfe6ff);
 const BLOOD_FOG = new THREE.Color(0x2a0a08);
@@ -107,14 +124,14 @@ const FRAG = /* glsl */ `
 
 export class Environment {
   /**
-   * lights: { hemi, ambient, sun }. dayMinutes: real minutes per full 24 h.
+   * lights: { hemi, ambient, sun }. A game starts in the morning; SEGMENTS
+   * sets how long each part of the day lasts.
    */
-  constructor({ scene, renderer, lights, startHour = 18.2, dayMinutes = 16 }) {
+  constructor({ scene, renderer, lights, startHour = 8 }) {
     this.scene = scene;
     this.renderer = renderer;
     this.lights = lights;
     this.hour = startHour;
-    this.dayMinutes = dayMinutes;
     this.timeScale = 1;
     this.paused = false;
     this.bloodMoon = false;
@@ -185,7 +202,7 @@ export class Environment {
   /** weather: { cloud 0..1, rain 0..1, flash 0..1 }. camera: the sky follows it. */
   update(delta, camera, weather) {
     if (!this.paused) {
-      this.hour = (this.hour + delta * this.timeScale * 24 / (this.dayMinutes * 60)) % 24;
+      this.hour = (this.hour + delta * this.timeScale * hoursPerSecond(this.hour)) % 24;
     }
     const night = this.hour >= 19.8 || this.hour < 5;
     if (night && !this._wasNight) {

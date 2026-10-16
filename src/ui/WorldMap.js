@@ -3,10 +3,9 @@
 // and drop plane, and pins. Tap / click the map to drop your pin, tap it again
 // to lift it; drag to pan, pinch / wheel / ± to zoom.
 //
-// With the mouse captured (pointer lock) there's no real cursor, so main.js
-// feeds mouse movement into a virtual one (cursorMove / cursorButton) and the
-// game keeps running underneath, as in PUBG. Builds its own DOM and only
-// redraws while open.
+// On desktop, opening it frees the captured mouse (main.js setMapOpen) so it
+// works with the real cursor, while the game keeps running underneath, as in
+// PUBG. Builds its own DOM and only redraws while open.
 
 import { groundHeight, PLAY_RADIUS } from "../world/Terrain.js";
 
@@ -55,7 +54,6 @@ export class WorldMap {
     this.zoom = 1;
     this.cx = 0;
     this.cz = 0;
-    this.cursor = { x: 0, y: 0, on: false, down: false, moved: 0 };
     this._ptrs = new Map();
     this._tap = null;
     this._pinch = null;
@@ -139,8 +137,6 @@ export class WorldMap {
     this._tap = this._pinch = null;
     if (open) {
       if (!this._relief) this._relief = this._buildRelief();
-      this.cursor.x = this.cursor.y = this._size() / 2;
-      this.cursor.down = false;
       this._next = 0;
     }
   }
@@ -266,35 +262,6 @@ export class WorldMap {
     if (t.moved) return;
     if (t.button === 2) this.clearMine();
     else this._tapAt(t.x, t.y);
-  }
-
-  // ── Virtual cursor (mouse captured by pointer lock) ─────────────────────────
-
-  cursorMove(dx, dy) {
-    const c = this.cursor, S = this._size();
-    c.on = true;
-    if (c.down) {
-      c.moved += Math.abs(dx) + Math.abs(dy);
-      if (c.moved > DRAG_PX) { this._pan(dx, dy); return; } // drag the map under a still cursor
-    }
-    c.x = Math.max(0, Math.min(S, c.x + dx));
-    c.y = Math.max(0, Math.min(S, c.y + dy));
-    this._next = 0;
-  }
-
-  cursorButton(button, down) {
-    const c = this.cursor;
-    c.on = true;
-    if (button === 2) { if (down) this.clearMine(); return; }
-    if (button !== 0) return;
-    if (down) { c.down = true; c.moved = 0; return; }
-    if (c.down && c.moved <= DRAG_PX) this._tapAt(c.x, c.y);
-    c.down = false;
-  }
-
-  cursorWheel(deltaY) {
-    const c = this.cursor;
-    this.zoomBy(deltaY < 0 ? 1.25 : 0.8, c.x, c.y);
   }
 
   // ── Terrain picture ─────────────────────────────────────────────────────────
@@ -466,7 +433,6 @@ export class WorldMap {
     ctx.textAlign = "left";
     ctx.fillText(`${cell} m`, 20, S - 25);
 
-    if (this.cursor.on && !this.opts.touch) this._drawCursor(ctx);
     this._updateInfo(me);
   }
 
@@ -566,18 +532,6 @@ export class WorldMap {
     ctx.stroke();
     ctx.fill();
     ctx.restore();
-  }
-
-  _drawCursor(ctx) {
-    const { x, y } = this.cursor;
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(x - 10, y); ctx.lineTo(x - 3, y);
-    ctx.moveTo(x + 3, y); ctx.lineTo(x + 10, y);
-    ctx.moveTo(x, y - 10); ctx.lineTo(x, y - 3);
-    ctx.moveTo(x, y + 3); ctx.lineTo(x, y + 10);
-    ctx.stroke();
   }
 
   _updateInfo(me) {

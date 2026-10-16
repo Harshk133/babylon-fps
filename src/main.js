@@ -264,7 +264,8 @@ function requestLock() {
   }
   // Newer browsers return a promise that rejects if the lock is refused
   const p = canvas.requestPointerLock();
-  if (p && p.catch) p.catch(() => {});
+  // Refused (e.g. no user gesture): show the pause screen rather than a frozen game
+  if (p && p.catch) p.catch(() => onLockChange());
 }
 
 function releaseLock() {
@@ -802,7 +803,9 @@ function angleDiff(a, b) {
 // ─── Input ────────────────────────────────────────────────────────────────────
 const input = { fire: false, aim: false, firePressed: false };
 let touchPlaying = false;
-const isLocked = () => touchPlaying || document.pointerLockElement === canvas;
+// mapHoldsPlay: the big map has freed the mouse on desktop, but the game is still on
+let mapHoldsPlay = false;
+const isLocked = () => touchPlaying || mapHoldsPlay || document.pointerLockElement === canvas;
 
 const SLOT_KEYS = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4, Digit5: 5 };
 
@@ -873,7 +876,7 @@ canvas.addEventListener("click", () => {
 let wheelCooldown = 0;
 window.addEventListener("wheel", e => {
   if (!isLocked() || e.deltaY === 0) return;
-  if (worldMap.open) { worldMap.cursorWheel(e.deltaY); return; }
+  if (worldMap.open) return; // the map zooms with its own wheel handler
   if (playerHealth <= 0) return;
   const now = performance.now();
   if (now < wheelCooldown) return;
@@ -884,12 +887,11 @@ window.addEventListener("wheel", e => {
 }, { passive: true });
 canvas.addEventListener("mousedown", e => {
   if (!isLocked()) return;
-  if (worldMap.open) { worldMap.cursorButton(e.button, true); return; }
+  if (worldMap.open) return;
   if (e.button === 0) { input.fire = true; input.firePressed = true; }
   if (e.button === 2) input.aim = true;
 });
 window.addEventListener("mouseup", e => {
-  if (worldMap.open) worldMap.cursorButton(e.button, false);
   if (e.button === 0) input.fire = false;
   if (e.button === 2) input.aim = false;
 });
@@ -904,7 +906,7 @@ function onLockChange() {
 document.addEventListener("pointerlockchange", onLockChange);
 document.addEventListener("mousemove", e => {
   if (!isLocked() || IS_TOUCH) return;
-  if (worldMap.open) { worldMap.cursorMove(e.movementX, e.movementY); return; }
+  if (worldMap.open) return;
   lookBy(e.movementX, e.movementY);
 });
 
@@ -2156,6 +2158,16 @@ function setMapOpen(open) {
     input.aim = false;
     cancelThrow();
     touch?.reset();
+    // Desktop: free the mouse, so the map gets a real cursor (a crosshair over
+    // the map, the arrow over its buttons). The game keeps running underneath.
+    if (!IS_TOUCH && document.pointerLockElement === canvas) {
+      mapHoldsPlay = true;
+      document.exitPointerLock();
+    }
+  } else if (mapHoldsPlay) {
+    // Closed with M or the Close button (both user gestures): take the mouse back to aim
+    mapHoldsPlay = false;
+    requestLock();
   }
 }
 
