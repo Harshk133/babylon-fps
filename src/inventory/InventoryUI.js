@@ -52,6 +52,8 @@ export class InventoryUI {
     for (const id of WEAPON_ORDER) {
       const def = WEAPONS[id];
       const slot = el("div", "hb-slot");
+      slot.dataset.hb = "weapon";
+      slot.dataset.id = id;
       slot.append(el("span", "hb-key", `${def.slot}`));
       const img = el("img", "hb-icon");
       img.src = this.icons[id];
@@ -67,6 +69,8 @@ export class InventoryUI {
     this.tslots = {};
     for (const kind of THROWABLE_ORDER) {
       const t = el("div", "hb-tslot");
+      t.dataset.hb = "throwable";
+      t.dataset.id = kind;
       const img = el("img", "hb-ticon");
       img.src = this.icons[kind];
       img.alt = THROWABLES[kind].name;
@@ -76,12 +80,14 @@ export class InventoryUI {
       this.tslots[kind] = { slot: t, count, cache: {} };
     }
     const med = el("div", "hb-tslot hb-med");
+    med.dataset.hb = "medkit";
     const medIcon = el("span", "hb-medicon", "+");
     const medCount = el("span", "hb-count", "0");
     med.append(medIcon, medCount, el("kbd", "hb-kbd", "H"));
     itemsRow.append(med);
     this.medSlot = { slot: med, count: medCount, cache: {} };
     const fuel = el("div", "hb-tslot hb-fuel");
+    fuel.dataset.hb = "fuel";
     const fuelIcon = el("img", "hb-ticon");
     fuelIcon.src = this.icons.fuel;
     fuelIcon.alt = FUEL_CAN.name;

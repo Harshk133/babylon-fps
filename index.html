@@ -3,7 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#050303" />
     <title>Survive the Horde</title>
     <!-- HUD type: Teko (numbers, labels), Creepster (titles), Special Elite (flavour text).
          Offline / LAN play falls back to the system fonts. -->
@@ -193,29 +195,41 @@
     <!-- Start / pause screen -->
     <div id="start-screen" class="visible">
       <h1>SURVIVE THE HORDE</h1>
-      <p class="start-cta">Click to play</p>
-      <div class="controls">
+      <p class="start-cta"><span class="desk-only">Click</span><span class="touch-only">Tap</span> to play</p>
+      <div class="touch-controls touch-only">
+        <div><b>Left thumb</b><span>Move: drag past the ring to lock sprint</span></div>
+        <div><b>Right thumb</b><span>Drag to look; fire and throw buttons look too</span></div>
+        <div><b>Gyroscope</b><span>Turn or tilt the phone to aim (⚙ to tune or switch off)</span></div>
+        <div><b>Hotbar</b><span>Tap a gun, grenade, medkit or petrol can</span></div>
+        <div><b>Prompts</b><span>Tap them to pick up, open doors, drive</span></div>
+        <div><b>Map</b><span>Map button: tap the map to pin a spot, then follow the compass</span></div>
+        <div><b>Stance</b><span>Crouch and prone buttons under fire: harder to see and to hit</span></div>
+      </div>
+      <div class="controls desk-only">
         <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>Move</span></div>
         <div><kbd>Shift</kbd><span>Sprint</span></div>
         <div><kbd>Mouse</kbd><span>Look / aim</span></div>
         <div><kbd>LMB</kbd><span>Fire</span></div>
         <div><kbd>RMB</kbd><span>Aim down sights</span></div>
         <div><kbd>R</kbd><span>Reload</span></div>
-        <div><kbd>Space</kbd><span>Jump</span></div>
+        <div><kbd>Space</kbd><span>Jump (or stand up)</span></div>
+        <div><kbd>C</kbd><span>Crouch</span></div>
+        <div><kbd>Z</kbd><span>Go prone: lie on the ground (you can still shoot)</span></div>
         <div><kbd>1</kbd>–<kbd>5</kbd><span>Switch weapon / wheel</span></div>
         <div><kbd>E</kbd><span>Pick up weapon</span></div>
         <div><kbd>G</kbd><span>Hold to aim, release to throw</span></div>
         <div><kbd>Q</kbd><span>Grenade ⇄ Molotov</span></div>
         <div><kbd>H</kbd><span>Use medkit</span></div>
-        <div><kbd>O</kbd>/<kbd>C</kbd><span>Open / close door</span></div>
-        <div><kbd>L</kbd><span>Light switch</span></div>
+        <div><kbd>O</kbd><span>Open / close door</span></div>
+        <div><kbd>L</kbd><span>Light switch (one on each floor)</span></div>
         <div><kbd>V</kbd><span>Drive / leave the auto-rickshaw</span></div>
         <div><kbd>T</kbd><span>Fill the rickshaw with a petrol can</span></div>
         <div><kbd>F</kbd><span>Flashlight</span></div>
         <div><kbd>Tab</kbd><span>Inventory</span></div>
+        <div><kbd>M</kbd><span>Map: click to pin a spot</span></div>
         <div><kbd>Esc</kbd><span>Pause</span></div>
       </div>
-      <p class="start-tip br-tip">Battle royale: <kbd>Space</kbd> jumps from the plane, then opens your parachute. Hold <kbd>W</kbd> to dive. <kbd>M</kbd> opens the map. Stay inside the blue zone; it keeps shrinking.</p>
+      <p class="start-tip br-tip">Battle royale: <kbd>Space</kbd> jumps from the plane, then opens your parachute. Hold <kbd>W</kbd> to dive. Stay inside the blue zone; it keeps shrinking.</p>
       <p class="start-tip horde-tip">Monsters hunt by sight and sound; hellhounds hunt by scent. The dark hides you, but your flashlight doesn't. Rain covers your footsteps. Clear each level to face worse.</p>
     </div>
 
@@ -223,7 +237,7 @@
     <div id="death-screen">
       <h1>YOU DIED</h1>
       <p class="death-score"><span id="death-kills">0</span> zombies put down</p>
-      <p class="death-cta">Click to rise again</p>
+      <p class="death-cta"><span class="desk-only">Click</span><span class="touch-only">Tap</span> to rise again</p>
     </div>
 
     <div id="app">

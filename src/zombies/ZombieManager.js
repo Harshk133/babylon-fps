@@ -24,6 +24,7 @@ const CORPSE_SINK_TIME  = 1.5;
 const CORPSE_SINK_DEPTH = 1.2;
 const BURN_DPS          = 26;
 const CORPSE_BURN_TIME  = 3.0;
+const TARGET_CENTRE     = 0.9;  // a player target's pos is its body centre, this far above its feet
 
 // ─── Senses ───────────────────────────────────────────────────────────────────
 const SENSE_INTERVAL   = 0.25; // seconds between sight checks (each is a raycast)
@@ -101,7 +102,8 @@ export class ZombieManager {
     this.onSpotted = null;     // (monster) first time a monster spots the player
     this.onDoorBang = null;    // (x, z)
     this.onCrash = null;       // (monster) a dead flyer hit the ground
-    this.navigate = null;      // (zx, zz, tx, tz, out, big) → 0 | 1 | 2
+    this.navigate = null;      // (zx, zz, tx, tz, out, big, zy, ty) → 0 | 1 | 2 (zy / ty: feet heights)
+    this.surfaceAt = null;     // (x, z, feetY, terrainY) → height walked on (house floors, stairs)
     this.canSpawnAt = null;    // (x, z) → bool
 
     this._chasers = [];
@@ -173,6 +175,7 @@ export class ZombieManager {
     m.nav = 0;
     m.navTimer = Math.random() * NAV_INTERVAL;
     m.navPoint ??= { x: 0, z: 0, fx: 0, fz: 0 };
+    m.surfY = null;          // floor height it last walked on (set by _pinToGround)
     m.navTarget ??= { x: 0, z: 0 };
     m.state = "wander";
     m.stateTimer = 0;
@@ -376,7 +379,7 @@ export class ZombieManager {
       }
     }
     _eyeFrom.set(p.x, m.root.position.y + def.height * 0.85, p.z);
-    _eyeTo.set(pp.x, pp.y + 0.4, pp.z);
+    _eyeTo.set(pp.x, pp.y + (t.eyeOff ?? 0.4), pp.z); // lower when crouched / prone (Stance.js)
     _eyeRes.reset();
     if (this.world.raycastClosest(_eyeFrom, _eyeTo, losOpts, _eyeRes)) return 0;
     return peripheral * (1.5 - dist / range);
@@ -527,7 +530,8 @@ export class ZombieManager {
       if (m.navTimer <= 0 || moved) {
         m.navTimer = NAV_INTERVAL;
         m.navTarget.x = tx; m.navTarget.z = tz;
-        m.nav = this.navigate(p.x, p.z, tx, tz, m.navPoint, !!m.def.bigBody);
+        // navTY: the chase's target feet height (else stay on this floor)
+        m.nav = this.navigate(p.x, p.z, tx, tz, m.navPoint, !!m.def.bigBody, m.root.position.y, m.navTY ?? m.root.position.y);
       }
     } else m.nav = 0;
     const wx = m.nav ? m.navPoint.x : tx;
@@ -626,7 +630,9 @@ export class ZombieManager {
   }
 
   _meleeAttack(m, delta, dist, nx, nz) {
-    const inRange = dist <= m.attackRange && m.staggerTimer <= 0 && m.target?.alive;
+    // No biting through a floor or ceiling: the target must be on about the same level
+    const level = m.target ? Math.abs(m.target.pos.y - TARGET_CENTRE - m.root.position.y) < 1.7 : false;
+    const inRange = dist <= m.attackRange && m.staggerTimer <= 0 && m.target?.alive && level;
     if (!inRange) {
       m.attackTimer = Math.min(m.attackTimer, m.attackInterval * 0.3);
       return false;
@@ -657,11 +663,15 @@ export class ZombieManager {
       if (m.navTimer <= 0) {
         m.navTimer = NAV_INTERVAL;
         const p = m.body.position;
-        m.nav = this.navigate(p.x, p.z, tx, tz, m.navPoint, !!m.def.bigBody);
+        // Feet heights, so monsters take the stairs to someone on the other floor
+        m.navTY = tracking ? pp.y - TARGET_CENTRE : m.root.position.y;
+        m.nav = this.navigate(p.x, p.z, tx, tz, m.navPoint, !!m.def.bigBody, m.root.position.y, m.navTY);
       }
       if (m.nav) {
         m.isAttacker = false;
+        m.navTY = tracking ? pp.y - TARGET_CENTRE : m.root.position.y;
         this._moveTo(m, tx, tz, m.speed, delta, true);
+        m.navTY = null;
         return;
       }
     }
@@ -801,7 +811,7 @@ export class ZombieManager {
     // Aim lags behind the target: moving targets are harder to hit
     const lag = 1 - Math.exp(-4 * delta);
     m.aimX += (pp.x - m.aimX) * lag;
-    m.aimY += (pp.y + 0.15 - m.aimY) * lag;
+    m.aimY += (pp.y + (m.target.aimOff ?? 0.15) - m.aimY) * lag; // chest height for the target's stance
     m.aimZ += (pp.z - m.aimZ) * lag;
 
     m.gunTimer -= delta;
@@ -878,7 +888,8 @@ export class ZombieManager {
     }
     const body = m.body;
     body.velocity.set(0, 0, 0);
-    const g = groundHeight(body.position.x, body.position.z);
+    // Corpses stay on the floor they died on; falling flyers drop to the terrain
+    const g = m.def.flying || m.surfY === null ? groundHeight(body.position.x, body.position.z) : m.surfY;
     body.position.y = g + m.visualOffY;
     let lift = 0;
     if (m.deathStyle) {
@@ -920,9 +931,17 @@ export class ZombieManager {
   // Monsters walk on the terrain surface (groundHeight); pinning Y means no
   // amount of crowd pressure can lift one onto the player or another monster.
   // Flyers hold their altitude (flyY) above the ground the same way.
+  /** Height walked on at (x, z) for something with its feet at y: terrain, or a house floor / stairs. */
+  _surface(x, z, y) {
+    const g = groundHeight(x, z);
+    return this.surfaceAt ? this.surfaceAt(x, z, y, g) : g;
+  }
+
   _pinToGround(m) {
     const body = m.body;
-    const g = groundHeight(body.position.x, body.position.z);
+    const g = m.def.flying ? groundHeight(body.position.x, body.position.z)
+      : this._surface(body.position.x, body.position.z, m.root.position.y);
+    m.surfY = g;
     body.position.y = g + m.visualOffY + m.flyY;
     body.velocity.y = 0;
     m.root.position.set(body.position.x, g + m.flyY, body.position.z);

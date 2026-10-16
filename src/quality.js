@@ -3,9 +3,13 @@
 // The choice is read once at startup (some of it, like antialiasing, can only
 // be set when the renderer is created), so changing it reloads the page.
 //
+// Phones and tablets get their own tuning of each preset (TOUCH_TUNING).
+//
 // Only purely visual things scale here. Anything with a collider (trees,
 // boulders, houses) is identical on every preset, so battle royale loot,
 // which skips spots on colliders, comes out the same for every player.
+
+import { IS_TOUCH } from "./input/TouchControls.js";
 
 const KEY = "babylon-fps:quality";
 
@@ -24,6 +28,9 @@ export const QUALITY_PRESETS = {
     terrainStep: 2,       // render every 2nd heightmap point (physics always uses all of them)
     mountainSegments: 96,
     anisotropy: 1,
+    fireLights: 1,        // point lights shared by molotov fires
+    houseLights: 1,       // point lights shared by lit houses
+    wreckLight: false,    // the flickering light on the nearest burning wreck
   },
   medium: {
     label: "Medium",
@@ -39,6 +46,9 @@ export const QUALITY_PRESETS = {
     terrainStep: 1,
     mountainSegments: 160,
     anisotropy: 4,
+    fireLights: 2,
+    houseLights: 2,
+    wreckLight: true,
   },
   high: {
     label: "High",
@@ -54,8 +64,52 @@ export const QUALITY_PRESETS = {
     terrainStep: 1,
     mountainSegments: 224,
     anisotropy: 8,
+    fireLights: 2,
+    houseLights: 2,
+    wreckLight: true,
   },
 };
+
+// Phones: tile GPUs resolve MSAA on-chip, so antialiasing is close to free,
+// and the screens are so dense that rendering at 1 CSS pixel looks smeared.
+// What they can't afford is per-pixel lighting (every point light costs every
+// lit pixel, even at intensity 0) and overdraw (grass, rain, mist). So the
+// touch presets trade those for resolution, which is what you actually see.
+const TOUCH_TUNING = {
+  low: {
+    pixelRatioMax: 1.25,
+    pixelRatioMin: 0.85,
+    grass: 1600,
+    pebbles: 60,
+    rain: 1500,
+    mist: 18,
+  },
+  medium: {
+    antialias: true,
+    pixelRatioMax: 1.6,
+    pixelRatioMin: 1,
+    grass: 3800,
+    pebbles: 120,
+    rain: 2800,
+    mist: 30,
+    fireLights: 1,
+    houseLights: 1,
+    wreckLight: false,
+  },
+  high: {
+    antialias: true,
+    pixelRatioMax: 2,
+    pixelRatioMin: 1.1,
+    shadowEvery: 2,
+    grass: 7000,
+    pebbles: 200,
+    rain: 4500,
+    mist: 45,
+    fireLights: 1,
+    houseLights: 1,
+  },
+};
+if (IS_TOUCH) for (const [name, tuning] of Object.entries(TOUCH_TUNING)) Object.assign(QUALITY_PRESETS[name], tuning);
 
 function gpuName() {
   try {
@@ -76,10 +130,26 @@ export function detectQuality() {
   const mem = navigator.deviceMemory ?? 8;       // GB (Chrome/Edge only; others report nothing)
   const cores = navigator.hardwareConcurrency ?? 4;
   if (/swiftshader|llvmpipe|software|microsoft basic/.test(gpu)) return "low";
+  if (IS_TOUCH) return detectPhoneQuality(gpu, mem, cores);
   const integrated = /intel|uhd|iris|hd graphics|mali|adreno|powervr|apple gpu|vega [0-9] |radeon\(tm\) graphics/.test(gpu);
   if (mem <= 4 || cores <= 4) return "low";
   if (integrated || mem <= 8) return "medium";
   return "high";
+}
+
+/**
+ * Phones all report "integrated" GPUs, so sort them by GPU family instead:
+ * Adreno 730+ / Mali-G710+ / Immortalis / Xclipse / Apple are flagships,
+ * Adreno 6xx and Mali-G76..G78 are mid-range, the rest is budget.
+ */
+function detectPhoneQuality(gpu, mem, cores) {
+  if (mem <= 3 || cores <= 4) return "low";
+  const adreno = +(gpu.match(/adreno[^0-9]*(\d{3})/)?.[1] ?? 0);
+  const maliG = +(gpu.match(/mali-g(\d{2,3})/)?.[1] ?? 0);
+  if (adreno >= 730 || maliG >= 710 || /immortalis|xclipse|apple gpu/.test(gpu)) return "high";
+  if (adreno >= 640 || (maliG >= 76 && maliG < 100) || maliG >= 610) return "medium";
+  if (adreno || maliG || /powervr|mali/.test(gpu)) return "low";
+  return "medium"; // the WebView hid the GPU name
 }
 
 export function savedQuality() {

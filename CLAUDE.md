@@ -18,6 +18,8 @@ npm run build-house-kit            # Pack public/models/house/source/** into hou
 npm run coop                       # Dev server on the LAN (vite --host); co-op relay at /ws
 npm run coop:preview               # Same, but a production build
 npm run relay                      # Standalone relay (PORT, default 8787) for hosting elsewhere
+npm run android:sync               # vite build --mode android (.env.android: RELAY_URL) + cap sync
+npm run android:apk                # ...then gradlew assembleDebug (needs JAVA_HOME = JDK 21, ANDROID_HOME)
 ```
 
 No test runner is configured.
@@ -71,13 +73,20 @@ Most monsters are the Quake 2 MD2 player models from the three.js examples (`web
 The lobby offers three modes: Solo, Co-op vs Zombies, and Battle Royale. `gameMode` in `main.js` is `"solo" | "coop" | "br"`; `isBR()` gates every difference. Battle royale rooms are `br-<code>` on the same relay (no relay changes), so they never mix with co-op rooms.
 
 - **`BattleRoyale.js`** is pure rules: plane route (`planeRoute` / `planeAt`), zone circles and phases (`ZONE_PHASES`, `zoneCircles`, `zoneAt`), loot layout (`lootPlan`, `BR_FIELD_LOOT`, `BR_HOUSE_LOOT`), and PvP damage (`PVP_DAMAGE`, `PVP_HEADSHOT`). Everything derives from the match seed, so one `brstart { seed, ids }` builds the same match on every client.
-- **`BrVisuals.js`**: the blue zone wall (open cylinder, scrolling shader), the drop plane, parachutes, and `setSkydivePose`. **`BrHud.js`**: alive/kills/zone bar, outside-zone overlay, hints, spectator bar, result screens and the big map (M).
+- **`BrVisuals.js`**: the blue zone wall (open cylinder, scrolling shader), the drop plane, parachutes, and `setSkydivePose`. **`BrHud.js`**: alive/kills/zone bar, outside-zone overlay, hints, spectator bar and result screens. The big map is the shared `WorldMap` (zone, next circle, plane route via `_mapState`).
 - **Flow** (host-driven): warm-up (warm-up kit, PvP on, respawn after 3 s) → countdown (auto 25 s once 2+ players are in; the host can press Enter, alone that's a practice drop) → match → results (12 s) → `brwarm`. The host streams `br` at 2 Hz (state, seed, match clock, alive ids, hour, weather); late joiners rebuild the match from it and spectate as a hidden "ghost".
 - **Drop**: `br.flight` is `PHASE_PLANE → PHASE_FALL → PHASE_CHUTE → PHASE_GROUND` (constants in `RemotePlayers.js`, sent as `ph` in `st`). `brUpdateFlight` replaces the ground controller while airborne; the chute opens on Space or by itself at `FREEFALL.chuteHeight`. You start empty-handed (`inventory.reset(true)`, `inventory.current === null`).
 - **PvP**: hitscan adds `GROUP_PLAYER` to the mask (your own capsule is masked out for the ray). The shooter sends one `pvp` per victim per shot; the victim applies it (each player owns their health), remembers the attacker, and on death broadcasts `elim` and spills their loot as shared pickups. Grenades and molotovs credit their owner. The host ends the match when one player is left (or none, in a practice drop).
 - **Shared loot**: pickups take an optional network id; `take { i }` removes one for everyone, `drop` carries `i`, `a` ([ammo, reserve]) and `c` (throwable count).
 - **Spectating**: eliminated players follow living ones (`updateSpectatorCamera`, A/D or click to switch). `focusPos` (you, or whoever you watch) drives the minimap, shadows, ground chunks and pickup culling.
 - Day/night and weather keep running; co-op and battle royale clients follow the host's clock and weather (`applyWorldClock`, `weather.locked`).
+
+### Touch controls & Android app (`src/input/`, `android/`)
+
+- **`TouchControls.js`** turns on for phones/tablets and the Capacitor app (`IS_TOUCH`; `?touch=1` forces it on desktop) and adds `body.touch`. It never changes game state itself: `main.js` reads `moveX` / `moveY` / `sprint` (analog joystick; drag past the ring to lock sprint) and gets everything else through callbacks, mostly `key(code, pressed)` → `setKey()`, so every button behaves exactly like its key. Drag on the right (and on the fire / throw buttons) calls `lookBy()`, the same function the mouse uses; the gyroscope (`devicemotion` rotationRate, mapped by screen angle) calls `turnBy()` in radians. Hotbar slots (`data-hb`) and the context prompt rows are tappable. Settings (look speed, gyro mode/sensitivity, invert, button size/opacity) live in localStorage.
+- **Locking:** touch has no pointer lock, so `isLocked()` is `touchPlaying || pointerLockElement === canvas`. Always go through `requestLock()` / `releaseLock()` / `onLockChange()`, never `exitPointerLock()` directly. `updateTouch()` feeds the overlay a context object each frame; it only touches the DOM when that changes.
+- **`touch.css`** re-lays the HUD around the thumbs with CSS `zoom`. `zoom` scales an element's offsets too, so offsets there are written as screen px ÷ zoom. style.css has `* { overflow: hidden }`; the touch layer opts out.
+- **Android:** Capacitor 8 (`capacitor.config.json`, `webDir: dist`). `MainActivity` keeps the screen on, hides the system bars and forwards the back button as a `androidback` window event. The app runs at `https://localhost`, so the relay URL must be baked in (`.env.android`) and the relay's `ALLOWED_ORIGINS` (if set) must include `https://localhost`.
 
 ### Deployment
 
@@ -105,13 +114,17 @@ Four named `CANNON.Material` instances: `ground`, `character`, `static`, `monste
 
 ### Graphics quality (`src/quality.js`)
 
-`QUALITY` is chosen once at startup: the lobby's Graphics picker (saved in localStorage; changing it reloads) or "auto", which detects the device (`navigator.deviceMemory`, cores, GPU name; software or 4 GB / 4-core machines get Low). Presets set antialiasing, pixel-ratio range for dynamic resolution, shadows (off / every other frame / every frame), grass, pebble, rain and mist counts, terrain render density, mountain detail and texture anisotropy. Only visual things may differ between presets: anything with a collider must be identical, or battle royale loot (placed by `isOpenGround`) would differ between players.
+`QUALITY` is chosen once at startup: the lobby's Graphics picker (saved in localStorage; changing it reloads) or "auto", which detects the device (`navigator.deviceMemory`, cores, GPU name; software or 4 GB / 4-core machines get Low). Presets set antialiasing, pixel-ratio range for dynamic resolution, shadows (off / every other frame / every frame), grass, pebble, rain and mist counts, terrain render density, mountain detail and texture anisotropy. Only visual things may differ between presets: anything with a collider must be identical, or battle royale loot (placed by `isOpenGround`) would differ between players. Presets also set the point-light budget (`fireLights`, `houseLights`, `wreckLight`): every light costs every lit pixel even at intensity 0. On touch devices `TOUCH_TUNING` overrides each preset (MSAA and a higher pixel ratio, less grass/rain/mist, fewer lights) and auto-detect sorts phones by GPU family (`detectPhoneQuality`). Dynamic resolution only lowers the pixel ratio when the frame is GPU-bound: if game logic alone takes most of the frame (typical on phones), a lower resolution would just blur it.
 
 ### World assets
 
 `loadWorld()` in `main.js` loads GLB/WRL models and registers them in `editableModels` via `createEditableModel()` (the autorickshaw GLB is the drivable vehicle instead). Each editable model gets a lil-gui folder for live position/rotation/scale tuning. The "Log Coordinates to Console" button prints JSON of all positions so they can be hardcoded.
 
 Scatter positions use a seeded LCG RNG (`makeLCG(0xdeadbeef)`) so the world layout is deterministic across reloads.
+
+### Stances (`src/player/Stance.js`)
+
+**C** crouches, **Z** goes prone (each again, Space or sprinting stands you up; Space from prone goes to crouch). `STANCES` sets move speed, camera pivot height, how visible / loud you are, and the monsters' aim and eye offsets (`target.aimOff`, `target.eyeOff`). `setCapsuleStance` turns the capsule's cylinder off and drops its top sphere (rays skip shapes with `collisionResponse = false`), so lower stances are much harder to hit. Rising checks headroom (`roomToRise`). You can fire from every stance. Teammates get the stance through `st.sn`. `Soldier.stance`: crouch bends the legs and drops the hips; prone tips `soldier.model` onto its belly, leans the chest via the spine aim and swings the arms back up (`_raiseArms`). Touch has crouch / prone buttons under the fire button.
 
 ### Player (`src/player/Soldier.js` + `main.js`)
 
@@ -141,13 +154,21 @@ Over-the-shoulder camera with pointer lock: smoothed pivot follow, hip/aim/sprin
 
 ### Houses (`src/world/Houses.js`)
 
-Enterable houses built from Kenney's CC0 Building Kit and Furniture Kit. The source GLBs and licences are in `public/models/house/source/`, and `npm run build-house-kit` packs them into one `house-kit.glb` (top-level nodes `b_<piece>` / `f_<piece>`; the door keeps its `open` / `close` clips).
+Enterable two-story houses built from Kenney's CC0 Building Kit (kenney.nl/assets/building-kit, the full kit has stairs, low walls, trims and detailed windows) and Furniture Kit. The source GLBs and licences are in `public/models/house/source/`, and `npm run build-house-kit` packs them into one `house-kit.glb` (top-level nodes `b_<piece>` / `f_<piece>`; the door keeps its `open` / `close` clips).
 
-- Every house shares one layout (`WALLS`, `FURNITURE`, `CEILING_LAMPS`). Static pieces are merged into one mesh per material once and reused, so a house is about 10 draw calls. Houses are scaled ×`HOUSE_SCALE` (1.2) so 2.4 m zombies fit through doors and under ceilings. `_toLocal()` / `_toWorld()` convert between world metres and kit units, and all layout constants are in kit units.
+- Ground floor: living room + kitchen, door on +Z, stairs (`stairs-closed`) along the back wall climbing toward −X. Upper floor (`WALLS_UP`, surface `UP_Y`): windows on nearly every segment for camping and shooting out, a railing round the stairwell (`HOLE`, `RAILING`). Furniture, lamps (`CEILING_LAMPS` [x, z, floor]) and `HOUSE_LOOT_SPOTS` [x, z, floor] carry a floor index; `lootSpot(h, spot, out)` gives world x/y/z.
+- Every house shares one layout (`WALLS`, `WALLS_UP`, `FURNITURE`, `CEILING_LAMPS`). Kit pieces are converted to plain Float32 before merging (newer exports are quantized). Static pieces are merged into one mesh per material once and reused, so a house is about 10 draw calls. Houses are scaled ×`HOUSE_SCALE` (1.2) so 2.4 m zombies fit through doors and under ceilings. `_toLocal()` / `_toWorld()` convert between world metres and kit units, and all layout constants are in kit units.
 - Physics: one compound static body per house with a 0.4 m thick box per wall section (doorway jambs plus lintel; windows framed). Window holes are separate `GROUP_GLASS` bodies: they block the player and zombies but not bullets, grenades, the camera or grenade blasts. The door leaf is a kinematic box synced from the animated `door` node. Furniture gets oriented boxes. Everything uses the frictionless `staticMaterial`.
-- Interaction: **O** / **C** open and close the nearest door (plays the kit clip; reversing mid-swing mirrors the time). **L** toggles the light switch inside (lever flips, lamp emissive on). Two shared point lights go to the nearest lit houses. Prompts are shown through `InventoryUI.setPrompts()`.
+- Interaction: **O** opens / closes the nearest door (ground floor only; plays the kit clip; reversing mid-swing mirrors the time). **L** toggles the light switch of the floor you're on: `h.floors[i]` = { lightOn, lampMat, lever, switchWorld }, `toggleLight(floor)`, net `light { h, f, on }`, `world.lights` is per house [ground, upstairs]. The shared point lights (`QUALITY.houseLights`) go to the nearest lit floors. `interaction(x, z, feetY)`, `level(h, feetY)`, `floorAt(x, feetY, z)`. Prompts are shown through `InventoryUI.setPrompts()`.
+- Stairs: the player walks a tilted box (ramp) collider plus a solid block under the high half; the ground snap steps up ledges (`STEP_UP`). The ramp is a separate body with `collisionFilterMask: ~GROUP_ZOMBIE`: monsters are pinned to `surfaceAt(x, z, feetY, terrainY)` (stairs with a 0.45 m lead, upper floor when already up there, else ground) via `ZombieManager.surfaceAt`, and `navigate(..., zy, ty)` routes them to the foot / top of the stairs and round the stairwell. Melee needs the target on about the same level.
 - Zombie pathing: `ZombieManager.navigate` is set to `houses.navigate()`, re-planned every 0.15 s per zombie. Zombies route around houses and editable props (`navObstacles`) via corner waypoints, line up with the doorway before walking through, and at a closed door return `2`: they bang on it (`onDoorBang` sound) and never attack through walls. `canSpawnAt` keeps spawns out of houses. `doorAssist()` nudges the player toward the door centreline.
 - Grenade damage is shielded (×0.15) when a `GROUP_WORLD` ray from the blast to the target is blocked.
+
+### World map & pins (`src/ui/WorldMap.js`, `src/ui/Waypoints.js`)
+
+- **M** or the touch map button opens `WorldMap` in every mode (`setMapOpen()` in `main.js`): a shaded-relief picture of `groundHeight` (rendered once, on first open), buildings, trees, wrecks, the rickshaw, teammates and the BR overlays. Tap / click drops your pin, tapping it again lifts it; drag pans, pinch / wheel / ± zooms. With pointer lock the mouse drives a virtual cursor (`cursorMove` / `cursorButton` / `cursorWheel`), so the game never pauses.
+- `setPin(id, x, z, share)` keeps `WorldMap`, `Waypoints` and the minimap's `pinList` in sync. Co-op shares pins (`pin` message, `c: 1` lifts it); the BR doesn't. Reaching your pin (4 m) lifts it.
+- `Waypoints`: pooled light pillars at pins (always in the scene), on-screen distance markers clamped to the screen edge, and the compass tape at the top centre with every pin's bearing.
 
 ### Minimap (`src/ui/Minimap.js`)
 
@@ -161,6 +182,8 @@ A rotating radar on a 2D canvas, top right. It draws zombies (pulsing when chasi
 - VRML imports: strip the `Background` sky spheres (radius 10000), or they swallow the bounding box and collider.
 - **cannon-es `Cylinder` is Y-aligned.** Don't rotate it 90° on X (old cannon.js habit): that lays capsules and tree trunks sideways.
 - cannon `Box` collides with its convex polyhedron: after changing `halfExtents` call `updateConvexPolyhedronRepresentation()`. `createEditableModel()` does, and supports `perMeshColliders` (the WRL house) and `trunkCollider` (trees).
+- **Draw calls are the phone bottleneck.** Static multi-part models go through `mergeStaticMeshes()` (`src/world/MergeStatic.js`: one mesh per material, after colliders are measured). Transparent `DoubleSide` materials need `forceSinglePass: true`, or three.js draws them twice and re-resolves the shader every frame (`warmUpGpu()` sweeps loaded models). Far pickups draw only their beam (`MODEL_RANGE`).
+- Parked pool objects set `matrixWorldAutoUpdate = false` (monsters, their markers, pickups) so the scene's matrix update skips them. The physics world uses `ObjectCollisionMatrix` (the default array one is n²/2 and cleared every step).
 - **No per-frame heap allocation** in hot loops — reuse `THREE.Vector3`, `CANNON.Vec3`, etc.
 - **Zombie pool only** — never `scene.add()` / `scene.remove()` per spawn/death.
 - **AI distance tiers**: run full AI logic only for zombies within ~15 m; reduce update frequency at 15–40 m; skip or sleep at 80 m+.

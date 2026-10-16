@@ -10,6 +10,7 @@ const INTERACT_RADIUS = 2.2;   // weapons: shows the [E] prompt
 const AUTO_RADIUS     = 1.4;   // ammo / throwables / medkits: walk over to collect
 const BLINK_TIME      = 5;     // timed drops blink for their last few seconds
 const FAR_SKIP        = 90;    // don't animate (or draw) pickups this far away
+const MODEL_RANGE     = 40;    // past this only the light beam is drawn (1 draw call instead of ~6)
 
 const CATEGORY_COLOR = {
   weapon:    0xffa630,
@@ -57,11 +58,11 @@ export class Pickups {
     for (const [cat, color] of Object.entries(CATEGORY_COLOR)) {
       this._ringMats[cat] = new THREE.MeshBasicMaterial({
         color, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, depthWrite: false,
-        side: THREE.DoubleSide,
+        side: THREE.DoubleSide, forceSinglePass: true, // additive: no back-then-front pass needed
       });
       this._beamMats[cat] = new THREE.MeshBasicMaterial({
         color, map: beamTex, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending,
-        depthWrite: false, side: THREE.DoubleSide, fog: false,
+        depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true, fog: false,
       });
     }
 
@@ -96,11 +97,15 @@ export class Pickups {
     beam.renderOrder = 1;
     root.add(beam);
 
+    // Only the spinner animates: freeze every other local matrix (the root's is
+    // rebuilt on spawn)
+    root.traverse(o => { if (o !== spinner) { o.updateMatrix(); o.matrixAutoUpdate = false; } });
     root.position.y = HIDE_Y;
     root.visible = false;
+    root.matrixWorldAutoUpdate = false;
     this.scene.add(root);
 
-    const entry = { kind, def, root, spinner, active: false, x: 0, z: 0, life: Infinity, data: null, phase: 0, id: null };
+    const entry = { kind, def, root, spinner, ring, active: false, x: 0, y: 0, z: 0, life: Infinity, data: null, phase: 0, id: null };
     this.pools[kind].push(entry);
     return entry;
   }
@@ -109,8 +114,9 @@ export class Pickups {
    * kind: key of PICKUP_KINDS. data: { ammo, reserve } for guns, { count } for throwables.
    * life: seconds before it despawns (Infinity for placed world loot).
    * id: optional network id, so a pickup taken by one player vanishes for all.
+   * y: floor height (upstairs in a house); default the terrain at (x, z).
    */
-  spawn(kind, x, z, data = null, life = Infinity, id = null) {
+  spawn(kind, x, z, data = null, life = Infinity, id = null, y = null) {
     if (this.active.length >= MAX_ACTIVE || !this.pools[kind]) return null;
     if (id !== null && this.byId.has(id)) return null;
     let entry = this.pools[kind].find(e => !e.active) ?? this._create(kind);
@@ -122,8 +128,11 @@ export class Pickups {
     entry.id = id;
     if (id !== null) this.byId.set(id, entry);
     entry.phase = Math.random() * Math.PI * 2;
-    entry.root.position.set(x, groundHeight(x, z), z);
+    entry.y = y ?? groundHeight(x, z);
+    entry.root.position.set(x, entry.y, z);
+    entry.root.updateMatrix();
     entry.root.visible = true;
+    entry.root.matrixWorldAutoUpdate = true;
     entry.spinner.rotation.y = entry.phase;
     this.active.push(entry);
     return entry;
@@ -134,6 +143,7 @@ export class Pickups {
     entry.active = false;
     entry.root.visible = false;
     entry.root.position.y = HIDE_Y;
+    entry.root.matrixWorldAutoUpdate = false;
     if (entry.id !== null) { this.byId.delete(entry.id); entry.id = null; }
     const i = this.active.indexOf(entry);
     if (i >= 0) this.active.splice(i, 1);
@@ -149,7 +159,8 @@ export class Pickups {
     for (let i = this.active.length - 1; i >= 0; i--) this.release(this.active[i]);
   }
 
-  update(delta, px, pz) {
+  /** py: the player's feet height (only loot on the same floor can be picked up). */
+  update(delta, px, pz, py = null) {
     this._time += delta;
     const pulse = 0.55 + Math.sin(this._time * 4) * 0.2;
     for (const cat in this._ringMats) this._ringMats[cat].opacity = pulse;
@@ -170,11 +181,19 @@ export class Pickups {
       } else {
         e.root.visible = near;
       }
+      e.root.matrixWorldAutoUpdate = e.root.visible;
       if (!near) continue;
+      // Far loot: just the beam, so a field of it doesn't cost hundreds of draw calls
+      const close = d2 <= MODEL_RANGE * MODEL_RANGE;
+      e.spinner.visible = close;
+      e.spinner.matrixWorldAutoUpdate = close; // far: skip the model's matrices too
+      e.ring.visible = close;
+      if (!close) continue;
 
       e.phase += delta;
       e.spinner.rotation.y += delta * 1.3;
       e.spinner.position.y = HOVER_HEIGHT + Math.sin(e.phase * 2.2) * 0.08;
+      if (py !== null && Math.abs(e.y - py) > 1.4) continue; // the other floor of a house
 
       if (e.def.category === "weapon") {
         if (d2 < best) { best = d2; this.nearestWeapon = e; }

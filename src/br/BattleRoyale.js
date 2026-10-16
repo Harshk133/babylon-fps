@@ -157,7 +157,7 @@ export function lootPlan(seed, houseSpots, isOpen) {
   const out = [];
   for (const s of houseSpots) {
     if (rng() < 0.25) continue;
-    out.push({ kind: BR_HOUSE_LOOT[Math.floor(rng() * BR_HOUSE_LOOT.length)], x: s.x, z: s.z });
+    out.push({ kind: BR_HOUSE_LOOT[Math.floor(rng() * BR_HOUSE_LOOT.length)], x: s.x, y: s.y, z: s.z });
   }
   for (const [kind, count] of Object.entries(BR_FIELD_LOOT)) {
     for (let n = 0; n < count; n++) {

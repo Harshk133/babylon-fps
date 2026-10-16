@@ -317,8 +317,9 @@ body {
   z-index: 950;
   opacity: 0;
   background: radial-gradient(ellipse at center, transparent 40%, rgba(120, 0, 0, 0.65) 100%);
-  animation: heartbeat 1.1s ease-in-out infinite;
 }
+/* A filter animation repaints the whole screen every frame: only while it's visible */
+#low-health.on { animation: heartbeat 1.1s ease-in-out infinite; }
 
 @keyframes heartbeat {
   0%, 100% { filter: brightness(0.8); }
@@ -2075,39 +2076,6 @@ body.mode-br #boss-bar { display: none !important; }
   color: rgba(255, 255, 255, 0.6);
 }
 
-#br-map {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  z-index: 1200;
-  transform: translate(-50%, -50%);
-  display: none;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px;
-  background: rgba(8, 10, 8, 0.88);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-top: 3px solid #3d9bff;
-  border-radius: 6px;
-}
-
-#br-map.on { display: flex; }
-
-.br-map-head {
-  display: flex;
-  justify-content: space-between;
-  font-size: 20px;
-  letter-spacing: 0.2em;
-}
-
-.br-map-head span { font-size: 15px; color: var(--bone-dim); }
-
-#br-map canvas {
-  display: block;
-  width: min(440px, calc(100vw - 52px), calc(100vh - 90px));
-  height: min(440px, calc(100vw - 52px), calc(100vh - 90px));
-}
-
 /* ── Graphics quality picker (lobby) ──────────────────────────────────────── */
 .lobby-field select {
   padding: 9px 10px;
@@ -2156,3 +2124,197 @@ body.mode-br #boss-bar { display: none !important; }
 .veh-keys kbd { font-size: 10px; }
 
 .feed-fuel { border-right-color: #37e0c8; }
+
+/* ── World map (M / map button) ──────────────────────────────────────────── */
+#world-map {
+  position: fixed;
+  inset: 0;
+  z-index: 1700; /* over the HUD and the touch controls */
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: max(12px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
+  background: radial-gradient(ellipse at center, rgba(12, 14, 10, 0.82), rgba(4, 5, 4, 0.94));
+  color: var(--bone);
+  font-family: var(--font-hud);
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+}
+#world-map.on { display: flex; }
+#world-map * { overflow: visible; }
+
+.wm-frame {
+  position: relative;
+  flex: none;
+  border: 2px solid rgba(232, 220, 203, 0.35);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  overflow: hidden !important;
+}
+.wm-frame canvas {
+  display: block;
+  width: min(calc(100vh - 28px), calc(100vw - 300px), 760px);
+  height: min(calc(100vh - 28px), calc(100vw - 300px), 760px);
+  cursor: crosshair;
+  touch-action: none;
+}
+.wm-zoom {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wm-zoom button {
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(232, 220, 203, 0.4);
+  border-radius: 8px;
+  background: rgba(10, 8, 6, 0.75);
+  color: var(--bone);
+  font: 600 24px/1 var(--font-hud);
+  cursor: pointer;
+}
+.wm-zoom button:active { background: rgba(226, 164, 43, 0.5); }
+
+.wm-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 240px;
+  max-height: 100%;
+}
+.wm-title {
+  font-size: 34px;
+  font-weight: 600;
+  line-height: 0.9;
+  letter-spacing: 0.22em;
+  color: var(--amber);
+}
+.wm-pin {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border-left: 3px solid var(--amber);
+  font-size: 22px;
+  letter-spacing: 0.06em;
+}
+.wm-pin-dot {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(232, 220, 203, 0.6);
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+}
+.wm-help {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--bone-dim);
+}
+.wm-help kbd {
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 3px;
+  font-size: 11px;
+}
+.wm-legend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  font-size: 17px;
+  letter-spacing: 0.04em;
+  color: var(--bone-dim);
+}
+.wm-legend span { display: flex; align-items: center; gap: 7px; }
+.wm-legend i { width: 12px; height: 12px; flex: none; }
+.lg-me    { background: #fff; clip-path: polygon(50% 0, 100% 100%, 50% 75%, 0 100%); }
+.lg-mate  { background: #4dd2ff; clip-path: polygon(50% 0, 100% 100%, 50% 75%, 0 100%); }
+.lg-house { background: #d9c9a8; border: 1px solid #3a2c1e; }
+.lg-tree  { background: #1e2c16; border-radius: 50%; box-shadow: 0 0 0 1px rgba(255,255,255,0.25); }
+.lg-fire  { background: radial-gradient(circle, #ffb446, rgba(255,60,10,0)); border-radius: 50%; }
+.lg-car   { background: #ffd23a; border-radius: 3px; }
+.wm-buttons { display: flex; gap: 10px; margin-top: auto; }
+.wm-buttons button {
+  flex: 1;
+  padding: 9px 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--amber);
+  color: #1a0e06;
+  font: 600 21px/1 var(--font-hud);
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+.wm-buttons button.wm-ghost { background: rgba(255, 255, 255, 0.1); color: var(--bone); }
+.wm-buttons button:disabled { opacity: 0.35; }
+
+/* ── Compass tape (top centre) ───────────────────────────────────────────── */
+#compass {
+  position: fixed;
+  top: 4px;
+  left: 50%;
+  z-index: 110;
+  width: min(360px, 46vw);
+  height: 48px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+}
+#compass.off { display: none; }
+#compass canvas { display: block; width: 100%; height: 34px; filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.9)); }
+.cp-deg {
+  position: absolute;
+  left: 50%;
+  top: 32px;
+  transform: translateX(-50%);
+  padding: 1px 6px 0;
+  background: rgba(0, 0, 0, 0.45);
+  border-top: 2px solid var(--amber);
+  font: 600 15px/1 var(--font-hud);
+  letter-spacing: 0.08em;
+  color: #fff;
+}
+/* Desktop: the level / battle royale bars sit under the compass */
+body:not(.touch) #level-hud { top: 56px; }
+body:not(.touch) #br-top { top: 54px; }
+body:not(.touch) #threat { top: 124px; }
+body:not(.touch) #boss-bar { top: 168px; }
+
+/* ── Pin markers on screen ───────────────────────────────────────────────── */
+.wp-mark {
+  --c: #ffcc33;
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 105;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  margin: -30px 0 0 -40px;
+  width: 80px;
+  pointer-events: none;
+  font: 600 16px/1 var(--font-hud);
+  letter-spacing: 0.06em;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+  will-change: transform;
+}
+.wp-mark.on { display: flex; }
+.wp-mark i {
+  width: 16px;
+  height: 16px;
+  background: var(--c);
+  border: 2px solid rgba(0, 0, 0, 0.7);
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+}
+.wp-mark span { margin-top: 3px; }
+.wp-mark.edge { opacity: 0.85; }
+.wp-mark:not(.mine) i { width: 12px; height: 12px; }

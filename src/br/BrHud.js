@@ -1,9 +1,8 @@
 // Battle royale HUD: alive / kills / zone status bar, the "outside the zone"
-// overlay, context hints, the spectator bar, result screens and the big map
-// (M). Builds its own DOM; every setter only writes when the value changes.
+// overlay, context hints, the spectator bar and result screens (the big map is
+// ui/WorldMap.js). Builds its own DOM; every setter only writes when the value changes.
 
-const MAP_WORLD_R = 265;   // metres from the map centre to its edge
-const MAP_HZ = 12;
+import { IS_TOUCH } from "../input/TouchControls.js";
 
 function el(tag, id, cls) {
   const e = document.createElement(tag);
@@ -33,7 +32,7 @@ export class BrHud {
     this.spec = el("div", "br-spec");
     this.specName = el("span", null, "br-spec-name");
     const specKeys = el("span", null, "br-spec-keys");
-    specKeys.innerHTML = "<kbd>A</kbd><kbd>D</kbd> or click: next player";
+    specKeys.innerHTML = IS_TOUCH ? "◀ ▶ or tap: next player" : "<kbd>A</kbd><kbd>D</kbd> or click: next player";
     this.spec.append(el("span", null, "br-spec-label"), this.specName, specKeys);
     this.spec.firstChild.textContent = "SPECTATING";
 
@@ -45,16 +44,7 @@ export class BrHud {
     this.result.append(this.resTitle, this.resSub, this.resLines, this.resFoot);
     this._resultTimer = 0;
 
-    this.map = el("div", "br-map");
-    this.mapCanvas = document.createElement("canvas");
-    const mapHead = el("div", null, "br-map-head");
-    mapHead.innerHTML = "MAP <span><kbd>M</kbd> close</span>";
-    this.map.append(mapHead, this.mapCanvas);
-    this.mapCtx = this.mapCanvas.getContext("2d");
-    this.mapOpen = false;
-    this._mapNext = 0;
-
-    this.root.append(this.warn, this.top, this.hint, this.spec, this.result, this.map);
+    this.root.append(this.warn, this.top, this.hint, this.spec, this.result);
     document.body.append(this.root);
     this._c = {};
   }
@@ -67,7 +57,7 @@ export class BrHud {
 
   setVisible(on) {
     this._set("vis", on, v => this.root.classList.toggle("on", v));
-    if (!on) { this.setMapOpen(false); this.hideResult(); }
+    if (!on) this.hideResult();
   }
 
   /** kind: "" | "warn" | "danger" colours the status line. */
@@ -128,133 +118,10 @@ export class BrHud {
 
   get resultShown() { return this.result.classList.contains("on"); }
 
-  setMapOpen(open) {
-    if (open === this.mapOpen) return;
-    this.mapOpen = open;
-    this.map.classList.toggle("on", open);
-    this._mapNext = 0;
-  }
-
   update(delta) {
     if (this._resultTimer > 0) {
       this._resultTimer -= delta;
       if (this._resultTimer <= 0) this.result.classList.remove("on");
     }
-  }
-
-  /**
-   * s: { zone, next, route, plane, me:{x,z,yaw}, obstacles, pickups? }
-   * zone / next: { x, z, r } or null. route: { ax, az, bx, bz } or null.
-   */
-  drawMap(now, s) {
-    if (!this.mapOpen || now < this._mapNext) return;
-    this._mapNext = now + 1000 / MAP_HZ;
-    const cv = this.mapCanvas;
-    const css = cv.clientWidth || 440;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    if (cv.width !== Math.round(css * dpr)) { cv.width = cv.height = Math.round(css * dpr); }
-    const ctx = this.mapCtx;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const S = css, c = S / 2, k = (S / 2 - 6) / MAP_WORLD_R;
-    // North (+Z) up, east (−X) right, like the minimap compass
-    const X = x => c - x * k, Y = z => c - z * k;
-
-    ctx.clearRect(0, 0, S, S);
-    ctx.fillStyle = "#1d2416";
-    ctx.fillRect(0, 0, S, S);
-    // Grid every 50 m
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let g = -250; g <= 250; g += 50) {
-      ctx.moveTo(X(g), 0); ctx.lineTo(X(g), S);
-      ctx.moveTo(0, Y(g)); ctx.lineTo(S, Y(g));
-    }
-    ctx.stroke();
-
-    for (const o of s.obstacles) {
-      if (o.type === "circle") {
-        if (o.r < 1.5) continue;
-        ctx.fillStyle = "rgba(90,120,60,0.45)";
-        ctx.beginPath();
-        ctx.arc(X(o.x), Y(o.z), Math.max(1.2, o.r * k), 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        ctx.save();
-        ctx.translate(X(o.x), Y(o.z));
-        ctx.rotate(Math.PI - o.rot);
-        ctx.fillStyle = "rgba(215,195,160,0.75)";
-        ctx.fillRect(-o.w * k / 2, -o.d * k / 2, o.w * k, o.d * k);
-        ctx.restore();
-      }
-    }
-
-    if (s.zone) {
-      // Everything outside the zone is tinted blue
-      ctx.fillStyle = "rgba(40,110,255,0.32)";
-      ctx.beginPath();
-      ctx.rect(0, 0, S, S);
-      ctx.arc(X(s.zone.x), Y(s.zone.z), Math.max(0, s.zone.r * k), 0, Math.PI * 2, true);
-      ctx.fill("evenodd");
-      ctx.strokeStyle = "#4da3ff";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(X(s.zone.x), Y(s.zone.z), Math.max(0, s.zone.r * k), 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    if (s.next) {
-      ctx.strokeStyle = "#ffffff";
-      ctx.setLineDash([6, 4]);
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(X(s.next.x), Y(s.next.z), Math.max(0, s.next.r * k), 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    if (s.route) {
-      ctx.strokeStyle = "rgba(255,230,120,0.85)";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([10, 6]);
-      ctx.beginPath();
-      ctx.moveTo(X(s.route.ax), Y(s.route.az));
-      ctx.lineTo(X(s.route.bx), Y(s.route.bz));
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    if (s.plane) {
-      ctx.save();
-      ctx.translate(X(s.plane.x), Y(s.plane.z));
-      ctx.rotate(Math.atan2(-s.plane.dx, s.plane.dz));
-      ctx.fillStyle = "#ffe066";
-      ctx.beginPath();
-      ctx.moveTo(0, -9); ctx.lineTo(7, 5); ctx.lineTo(0, 2); ctx.lineTo(-7, 5);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    }
-    if (s.me) {
-      ctx.save();
-      ctx.translate(X(s.me.x), Y(s.me.z));
-      // Heading: forward (sin yaw, cos yaw) in world → (−sin, −cos) on screen
-      ctx.rotate(-s.me.yaw);
-      ctx.fillStyle = "#fff";
-      ctx.strokeStyle = "#e2a42b";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(0, -8); ctx.lineTo(6, 6); ctx.lineTo(0, 3); ctx.lineTo(-6, 6);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-    }
-    // Compass letters
-    ctx.font = "700 13px 'Teko', 'Segoe UI', sans-serif";
-    ctx.fillStyle = "rgba(255,255,255,0.7)";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("N", c, 12);
-    ctx.fillText("S", c, S - 10);
-    ctx.fillText("E", S - 10, c);
-    ctx.fillText("W", 10, c);
   }
 }

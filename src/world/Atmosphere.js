@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { terrainUniforms, TERRAIN_GLSL } from "./Terrain.js";
+import { QUALITY } from "../quality.js";
 
 // Mood: low ground mist that drifts around the player, and burning wrecks
 // that pour smoke into the sky. Like FireFX, every particle's motion comes
@@ -178,10 +179,14 @@ export class Atmosphere {
     this.smoke = null;
     this.flames = null;
     this._puff = puff;
-    // One firelight, moved to the burning wreck nearest the player
-    this.light = new THREE.PointLight(0xff7a30, 0, 18, 1.5);
-    this.light.position.set(0, -500, 0);
-    scene.add(this.light);
+    // One firelight, moved to the burning wreck nearest the player (presets
+    // short on per-pixel lighting skip it: the flames still glow)
+    this.light = null;
+    if (QUALITY.wreckLight) {
+      this.light = new THREE.PointLight(0xff7a30, 0, 18, 1.5);
+      this.light.position.set(0, -500, 0);
+      scene.add(this.light);
+    }
   }
 
   /** Fixed burning spots: [{ x, y, z, scale }]. Call once, after the world is placed. */
@@ -259,6 +264,7 @@ export class Atmosphere {
     }
 
     // Firelight on the nearest wreck in range
+    if (!this.light) return;
     let best = null, bd = LIGHT_RANGE * LIGHT_RANGE;
     for (const s of this.sources) {
       const d = (s.x - camPos.x) ** 2 + (s.z - camPos.z) ** 2;

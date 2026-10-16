@@ -10,6 +10,7 @@ build/
 .env
 .env.*
 !.env.example
+!.env.android
 
 # Assets: commit only what the game loads (~10 MB, optimized). The heavy
 # originals stay local; regenerate the .opt files with `npm run optimize-assets`.
@@ -48,3 +49,6 @@ dist-ssr
 *.sln
 *.sw?
 
+
+# Android build output
+*.apk

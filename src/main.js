@@ -12,6 +12,8 @@ import { Sfx } from "./combat/Sfx.js";
 import { Throwables } from "./combat/Throwables.js";
 import { FireFX } from "./combat/FireFX.js";
 import { Minimap } from "./ui/Minimap.js";
+import { WorldMap } from "./ui/WorldMap.js";
+import { Waypoints } from "./ui/Waypoints.js";
 import { Houses, HOUSE_LOOT_SPOTS } from "./world/Houses.js";
 import { EnemyFire } from "./combat/EnemyFire.js";
 import { LevelDirector } from "./zombies/LevelDirector.js";
@@ -26,6 +28,7 @@ import { buildTerrain, groundHeight, PLAY_RADIUS } from "./world/Terrain.js";
 import { Backdrop } from "./world/Backdrop.js";
 import { Grass } from "./world/Grass.js";
 import { scatterRocks } from "./world/Rocks.js";
+import { mergeStaticMeshes } from "./world/MergeStatic.js";
 import { Rickshaw, RICKSHAW } from "./vehicles/Rickshaw.js";
 import { QUALITY, QUALITY_NAME, QUALITY_SETTING, QUALITY_PRESETS, saveQuality } from "./quality.js";
 import { Net } from "./net/Net.js";
@@ -47,6 +50,8 @@ import { Inventory } from "./inventory/Inventory.js";
 import { InventoryUI } from "./inventory/InventoryUI.js";
 import { Pickups } from "./pickups/Pickups.js";
 import { renderItemIcon } from "./items/ItemModels.js";
+import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
+import { STANCES, setCapsuleStance } from "./player/Stance.js";
 import { GROUP_WORLD, GROUP_PLAYER, GROUP_ZOMBIE } from "./physicsGroups.js";
 
 // ─── Game mode ────────────────────────────────────────────────────────────────
@@ -67,6 +72,7 @@ const CAPSULE_HEIGHT      = CHARACTER_HEIGHT - CHARACTER_RADIUS * 2;
 const CAPSULE_HALF_HEIGHT = CAPSULE_HEIGHT / 2;
 const FEET_OFFSET         = CAPSULE_HALF_HEIGHT + CHARACTER_RADIUS;
 const GROUND_SNAP_DISTANCE = 0.08;
+const STEP_UP             = 0.3;   // the controller climbs ledges this high (stairs, door sills)
 const MOVE_ACCEL          = 14;    // exp-blend rates: a little weight, still responsive
 const MOVE_DECEL          = 12;
 const AIR_CONTROL         = 2;
@@ -165,7 +171,10 @@ function updatePlayerHealthUI(delta) {
   const low = brWatching() ? 0 : Math.round(THREE.MathUtils.clamp((40 - playerHealth) / 40, 0, 1) * 20) / 20;
   if (low !== hudCache.low) {
     hudCache.low = low;
-    if (lowHealthEl) lowHealthEl.style.opacity = `${low}`;
+    if (lowHealthEl) {
+      lowHealthEl.style.opacity = `${low}`;
+      lowHealthEl.classList.toggle("on", low > 0); // its pulse animation only runs while it shows
+    }
   }
 }
 
@@ -204,6 +213,7 @@ function regenPlayerHealth(amount) {
 }
 
 function onPlayerDeath() {
+  setStance("stand", true);
   cameraTrauma = 1;
   soldier.die();
   sfx.hurt();
@@ -213,7 +223,7 @@ function onPlayerDeath() {
   if (isBR()) { brOnLocalDeath(); return; }
   if (deathKillsEl) deathKillsEl.textContent = `${killsThisLife}`;
   if (deathScreenEl) deathScreenEl.classList.add("visible");
-  if (document.pointerLockElement) document.exitPointerLock();
+  releaseLock();
 }
 
 function respawnPlayer() {
@@ -237,15 +247,42 @@ function respawnPlayer() {
   enemyFire.clear();
   killsThisLife = 0;
   soldier.revive();
+  setStance("stand", true);
   if (!net.connected) director?.restart(); // solo: same level, from the top
   if (deathScreenEl) deathScreenEl.classList.remove("visible");
   requestLock();
 }
 
 function requestLock() {
+  // Touch screens have no pointer lock: "locked" is just the playing state
+  if (IS_TOUCH) {
+    if (touchPlaying) return;
+    touchPlaying = true;
+    goFullscreen();
+    onLockChange();
+    return;
+  }
   // Newer browsers return a promise that rejects if the lock is refused
   const p = canvas.requestPointerLock();
   if (p && p.catch) p.catch(() => {});
+}
+
+function releaseLock() {
+  if (IS_TOUCH) {
+    if (!touchPlaying) return;
+    touchPlaying = false;
+    onLockChange();
+    return;
+  }
+  if (document.pointerLockElement) document.exitPointerLock();
+}
+
+/** Mobile browsers: go fullscreen and sideways on the first tap (the Android app already is). */
+function goFullscreen() {
+  if (IS_NATIVE || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  document.documentElement.requestFullscreen({ navigationUI: "hide" })
+    .then(() => screen.orientation?.lock?.("landscape"))
+    .catch(() => {});
 }
 
 // ─── Combat HUD ───────────────────────────────────────────────────────────────
@@ -402,12 +439,20 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 // headroom, so a heavy moment (big horde, explosions) costs sharpness, not FPS.
 const MAX_PIXEL_RATIO = Math.min(window.devicePixelRatio, QUALITY.pixelRatioMax);
 const MIN_PIXEL_RATIO = Math.min(QUALITY.pixelRatioMin, MAX_PIXEL_RATIO);
-const perf = { ratio: MAX_PIXEL_RATIO, avg: 16.7, slow: 0, fast: 0 };
+const perf = { ratio: MAX_PIXEL_RATIO, avg: 16.7, logic: 8, slow: 0, fast: 0 };
 renderer.setPixelRatio(perf.ratio);
 
-function updateDynamicResolution(frameMs) {
+/**
+ * frameMs: time since the last frame. logicMs: JavaScript spent on the game
+ * (physics, AI, animation) before drawing. When that alone eats most of the
+ * frame, the CPU is the limit (typical on phones) and a lower resolution would
+ * only blur the picture without making it any faster, so it stays sharp.
+ */
+function updateDynamicResolution(frameMs, logicMs) {
   perf.avg += (Math.min(frameMs, 100) - perf.avg) * 0.05;
-  if (perf.avg > 20) { perf.slow += frameMs; perf.fast = 0; }
+  perf.logic += (Math.min(logicMs, 100) - perf.logic) * 0.05;
+  const cpuBound = perf.logic > perf.avg * 0.6;
+  if (perf.avg > 20 && !cpuBound) { perf.slow += frameMs; perf.fast = 0; }
   else if (perf.avg < 14) { perf.fast += frameMs; perf.slow = 0; }
   else { perf.slow = 0; perf.fast = 0; }
 
@@ -423,7 +468,9 @@ function updateDynamicResolution(frameMs) {
 }
 // Low: no shadow map at all. Medium: redrawn every other frame. High: every frame.
 renderer.shadowMap.enabled = QUALITY.shadows;
-renderer.shadowMap.type = QUALITY_NAME === "high" ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+// (PCFSoftShadowMap is gone from three r18x: it only warns and falls back, and
+// combined with the every-other-frame redraw it broke rendering on phones)
+renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.shadowMap.autoUpdate = QUALITY.shadowEvery === 1;
 // Two passes per frame: distant mountains + sky (Backdrop), then the game scene
 renderer.autoClear = false;
@@ -440,6 +487,11 @@ world.broadphase = new CANNON.SAPBroadphase(world);
 world.allowSleep = true;
 world.solver.iterations = 8;
 world.solver.tolerance = 0.0001;
+// cannon's default collision matrix is an n²/2 array cleared every step: with
+// ~440 bodies that's ~96k entries wiped up to 3× a frame. The object matrix only
+// stores pairs that actually touch.
+world.collisionMatrix = new CANNON.ObjectCollisionMatrix();
+world.collisionMatrixPrevious = new CANNON.ObjectCollisionMatrix();
 
 const groundMaterial    = new CANNON.Material("ground");
 const characterMaterial = new CANNON.Material("character");
@@ -641,6 +693,45 @@ let onGround      = false;
 let jumpQueued    = false;
 let sprinting     = false;
 
+// ─── Stance: C crouches, Z goes prone (lying on the ground), as in PUBG ───────
+// Each key again (or Space, or sprinting) gets you back up. Lower stances are
+// slower and quieter, harder to spot and far harder to hit (Stance.js), and
+// you can shoot from all of them.
+let stance = "stand";
+let stanceEye = STANCES.stand.eye;   // smoothed camera pivot height
+const STANCE_RANK = { stand: 0, crouch: 1, prone: 2 };
+const _headFrom = new CANNON.Vec3(), _headTo = new CANNON.Vec3(), _headRes = new CANNON.RaycastResult();
+const headRayOpts = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
+
+/** Room above to rise into `next`? (a table, the stairs or a ceiling can be in the way) */
+function roomToRise(next) {
+  const top = STANCES[next].top ?? CAPSULE_HALF_HEIGHT;
+  const p = characterBody.position;
+  _headFrom.set(p.x, p.y - 0.3, p.z);
+  _headTo.set(p.x, p.y + top + CHARACTER_RADIUS + 0.05, p.z);
+  _headRes.reset();
+  return !world.raycastClosest(_headFrom, _headTo, headRayOpts, _headRes);
+}
+
+/** force: skip the headroom check (death, respawn, driving, the drop). */
+function setStance(next, force = false) {
+  if (next === stance) return true;
+  if (!force && STANCE_RANK[next] < STANCE_RANK[stance] && !roomToRise(next)) {
+    inventoryUI.feed("No room to stand up here", "info");
+    return false;
+  }
+  stance = next;
+  setCapsuleStance(characterBody, stance, CAPSULE_HALF_HEIGHT);
+  soldier.stance = stance;
+  return true;
+}
+
+/** C / Z: that stance, or back up to standing if you're already in it. */
+function toggleStance(which) {
+  if (playerHealth <= 0 || drive.on || brAirborne()) return;
+  setStance(stance === which ? "stand" : which);
+}
+
 // ─── Camera Rig (over-the-shoulder) ───────────────────────────────────────────
 // Aim direction = (sin yaw·cos pitch, sin pitch, cos yaw·cos pitch); +pitch looks up.
 const cameraRig = {
@@ -688,7 +779,8 @@ function angleDiff(a, b) {
 
 // ─── Input ────────────────────────────────────────────────────────────────────
 const input = { fire: false, aim: false, firePressed: false };
-const isLocked = () => document.pointerLockElement === canvas;
+let touchPlaying = false;
+const isLocked = () => touchPlaying || document.pointerLockElement === canvas;
 
 const SLOT_KEYS = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4, Digit5: 5 };
 
@@ -711,8 +803,9 @@ function setKey(code, pressed, repeat) {
   if (pressed) {
     if (code === "Tab" || code === "KeyI") { setInventoryOpen(!inventoryOpen); return; }
     if (code === "Escape" && inventoryOpen) { setInventoryOpen(false); return; }
+    if (code === "KeyM" && !lobby.open && (isLocked() || brWatching() || worldMap.open)) { setMapOpen(!worldMap.open); return; }
+    if (code === "Escape" && worldMap.open) { setMapOpen(false); return; }
     if (isBR() && !lobby.open) {
-      if (code === "KeyM") { brHud.setMapOpen(!brHud.mapOpen); return; }
       if (code === "Enter" && net.isHost && (br.state === "warm" || br.state === "count")) { brHostStart(); return; }
       if (brWatching()) {
         if (code === "KeyA" || code === "ArrowLeft") brPickSpectate(-1);
@@ -732,8 +825,9 @@ function setKey(code, pressed, repeat) {
       case "KeyG": beginThrow(); break;
       case "KeyQ": cycleThrowable(); break;
       case "KeyH": useMedkit(); break;
-      case "KeyO": useDoor(true); break;
-      case "KeyC": useDoor(false); break;
+      case "KeyO": if (nearDoor) useDoor(!nearDoor.doorOpen); break;
+      case "KeyC": toggleStance("crouch"); break;
+      case "KeyZ": toggleStance("prone"); break;
       case "KeyL": useLightSwitch(); break;
       case "KeyF": toggleTorch(); break;
       case "KeyV": toggleRickshaw(); break;
@@ -750,12 +844,15 @@ window.addEventListener("keydown", e => {
 window.addEventListener("keyup", e => setKey(e.code, false, false));
 canvas.addEventListener("click", () => {
   sfx.unlock();
+  if (touch?.settingsEl.classList.contains("on")) return;
   if (brWatching()) { brPickSpectate(1); return; }
   if (playerHealth > 0 && !inventoryOpen && !lobby?.open) requestLock();
 });
 let wheelCooldown = 0;
 window.addEventListener("wheel", e => {
-  if (!isLocked() || playerHealth <= 0 || e.deltaY === 0) return;
+  if (!isLocked() || e.deltaY === 0) return;
+  if (worldMap.open) { worldMap.cursorWheel(e.deltaY); return; }
+  if (playerHealth <= 0) return;
   const now = performance.now();
   if (now < wheelCooldown) return;
   wheelCooldown = now + 120;
@@ -765,29 +862,105 @@ window.addEventListener("wheel", e => {
 }, { passive: true });
 canvas.addEventListener("mousedown", e => {
   if (!isLocked()) return;
+  if (worldMap.open) { worldMap.cursorButton(e.button, true); return; }
   if (e.button === 0) { input.fire = true; input.firePressed = true; }
   if (e.button === 2) input.aim = true;
 });
 window.addEventListener("mouseup", e => {
+  if (worldMap.open) worldMap.cursorButton(e.button, false);
   if (e.button === 0) input.fire = false;
   if (e.button === 2) input.aim = false;
 });
 window.addEventListener("contextmenu", e => e.preventDefault());
-document.addEventListener("pointerlockchange", () => {
-  if (!isLocked()) { input.fire = false; input.aim = false; }
+function onLockChange() {
+  if (!isLocked()) { input.fire = false; input.aim = false; cancelThrow(); if (!brWatching()) setMapOpen(false); }
   hud.paused = !isLocked();
   // The first level starts when you first click into the game
   // (co-op clients follow the host's levels instead)
   if (isLocked() && director && director.state === "idle" && !net.isClient && !isBR()) director.start(1);
-});
+}
+document.addEventListener("pointerlockchange", onLockChange);
 document.addEventListener("mousemove", e => {
-  if (!isLocked()) return;
-  if (drive.on && (e.movementX || e.movementY)) drive.lastMouse = performance.now() / 1000;
-  const s = THREE.MathUtils.lerp(cameraRig.sensitivity, cameraRig.aimSensitivity, aimBlend);
-  aimYaw   -= e.movementX * s;
-  aimPitch -= e.movementY * s;
-  aimPitch  = THREE.MathUtils.clamp(aimPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+  if (!isLocked() || IS_TOUCH) return;
+  if (worldMap.open) { worldMap.cursorMove(e.movementX, e.movementY); return; }
+  lookBy(e.movementX, e.movementY);
 });
+
+/** Mouse / touch-drag look, in mouse pixels. */
+function lookBy(dx, dy) {
+  if (drive.on && (dx || dy)) drive.lastMouse = performance.now() / 1000;
+  const s = THREE.MathUtils.lerp(cameraRig.sensitivity, cameraRig.aimSensitivity, aimBlend);
+  aimYaw   -= dx * s;
+  aimPitch -= dy * s;
+  aimPitch  = THREE.MathUtils.clamp(aimPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+}
+
+/** Gyro look, in radians; slowed down while scoped, like the mouse. */
+function turnBy(yaw, pitch) {
+  if (drive.on && Math.abs(yaw) > 0.004) drive.lastMouse = performance.now() / 1000;
+  const s = THREE.MathUtils.lerp(1, cameraRig.aimSensitivity / cameraRig.sensitivity, aimBlend);
+  aimYaw   += yaw * s;
+  aimPitch += pitch * s;
+  aimPitch  = THREE.MathUtils.clamp(aimPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+}
+
+// ─── Touch controls (phones, tablets, the Android app) ────────────────────────
+const touch = IS_TOUCH ? new TouchControls({
+  key: (code, pressed) => setKey(code, pressed, false),
+  look: (dx, dy) => { if (isLocked()) lookBy(dx, dy); },
+  turn: (yaw, pitch) => { if (isLocked()) turnBy(yaw, pitch); },
+  fire(down) {
+    if (down && isLocked()) { input.fire = true; input.firePressed = true; }
+    else input.fire = false;
+  },
+  aim(on) { input.aim = on && isLocked(); },
+  hotbar({ hb, id }) {
+    if (playerHealth <= 0) return;
+    if (hb === "weapon") {
+      if (inventory.has(id)) equipWeapon(id);
+      else inventoryUI.feed(`${WEAPONS[id].name} not found yet`, "info");
+    } else if (hb === "throwable") {
+      if (inventory.selectedThrowable !== id) cycleThrowable();
+    } else if (hb === "medkit") useMedkit();
+    else if (hb === "fuel") refuelRickshaw();
+  },
+  pause: () => releaseLock(),
+  unlock: () => sfx.unlock(),
+}) : null;
+
+// Android back button: close the settings / inventory / map, otherwise pause
+window.addEventListener("androidback", () => {
+  if (touch?.settingsEl.classList.contains("on")) touch.showSettings(false);
+  else if (inventoryOpen) setInventoryOpen(false);
+  else if (worldMap.open) setMapOpen(false);
+  else releaseLock();
+});
+
+const _touchCtx = {
+  playing: false, alive: true, aiming: false, inventoryOpen: false, lobby: false, spectating: false,
+  br: false, canStart: false, driving: false, airborne: false, jumpLabel: "", throwCount: 0, stance: "stand",
+};
+function updateTouch() {
+  if (!touch) return;
+  const c = _touchCtx;
+  c.playing = isLocked();
+  c.alive = playerHealth > 0 && !brWatching();
+  c.aiming = aimBlend > 0.5 || throwAiming;
+  c.inventoryOpen = inventoryOpen;
+  c.lobby = !!lobby?.open;
+  c.spectating = brWatching();
+  c.br = isBR();
+  c.canStart = isBR() && net.isHost && (br.state === "warm" || br.state === "count");
+  c.driving = drive.on;
+  c.airborne = brAirborne();
+  c.stance = stance;
+  c.jumpLabel = drive.on ? "BRAKE"
+    : stance !== "stand" ? "STAND"
+    : !isBR() || br.flight === PHASE_GROUND ? "JUMP"
+    : br.flight === PHASE_PLANE ? "JUMP" : br.flight === PHASE_FALL ? "CHUTE" : "";
+  c.throwCount = inventory.throwables[inventory.selectedThrowable] ?? 0;
+  touch.update(c);
+}
 
 // ─── Ground Check ─────────────────────────────────────────────────────────────
 function checkGrounded() {
@@ -817,7 +990,7 @@ function snapCharacterToGround() {
   rayTo    .set(characterBody.position.x, characterBody.position.y - FEET_OFFSET - 0.45, characterBody.position.z);
   if (world.raycastClosest(rayOrigin, rayTo, groundRayOpts, rayResult)) {
     const d = rayResult.distance - FEET_OFFSET;
-    if (Math.abs(d) < GROUND_SNAP_DISTANCE) characterBody.position.y -= d;
+    if (d < GROUND_SNAP_DISTANCE && d > -STEP_UP) characterBody.position.y -= d;
   }
   if (characterBody.velocity.y < 0) characterBody.velocity.y = 0;
 }
@@ -832,12 +1005,16 @@ function updateCharacterMovement(delta) {
     if (keys.backward) iz -= 1;
     if (keys.right)    ix += 1;
     if (keys.left)     ix -= 1;
+    if (touch) { ix += touch.moveX; iz += touch.moveY; }
   }
   const len = Math.hypot(ix, iz);
   const movingInput = len > 0;
+  const analog = Math.min(1, len); // keys always give 1; the joystick less near its centre
   if (movingInput) { ix /= len; iz /= len; }
 
-  sprinting = alive && keys.run && iz > 0.5 && !input.fire && !input.aim;
+  sprinting = alive && (keys.run || !!touch?.sprint) && iz > 0.5 && !input.fire && !input.aim;
+  // Sprinting gets you up off the ground first
+  if (sprinting && stance !== "stand" && !setStance("stand")) sprinting = false;
 
   let speed = 0;
   if (sprinting) {
@@ -846,6 +1023,8 @@ function updateCharacterMovement(delta) {
     const ax = Math.abs(ix), az = Math.abs(iz);
     speed = (az * (iz >= 0 ? JOG_SPEED : BACKPEDAL_SPEED) + ax * STRAFE_SPEED) / (ax + az);
     if (input.aim) speed *= AIM_MOVE_MULTIPLIER;
+    speed *= STANCES[stance].speed;
+    speed *= analog;
   }
 
   // forward = (sin yaw, cos yaw), right = (−cos yaw, sin yaw)
@@ -872,7 +1051,9 @@ function updateCharacterMovement(delta) {
     characterBody.velocity.z += _doorPull.z;
   }
 
-  if (jumpQueued && onGround && alive) {
+  // Jump from a crouch stands you up; from prone, to a crouch
+  if (jumpQueued && alive && stance !== "stand") setStance(stance === "prone" ? "crouch" : "stand");
+  else if (jumpQueued && onGround && alive) {
     characterBody.velocity.y = JUMP_VELOCITY;
     onGround = false;
   }
@@ -901,7 +1082,8 @@ function updateSoldier(delta) {
   soldier.update(delta, {
     localForward: onGround ? vx * sy + vz * cy : 0,
     localRight:   onGround ? -vx * cy + vz * sy : 0,
-    aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5),
+    // Prone always holds the gun up (the arms are what you lie on)
+    aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone"),
     firing: timeSinceShot < 0.12,
     aimYawOffset: angleDiff(aimYaw + recoilYaw, bodyYaw),
     aimPitch: aimPitch + recoilPitch,
@@ -939,7 +1121,7 @@ function updateTorch(delta) {
   if (!torch.manual) torch.on = env.darkness > 0.55;
   if (env.darkness > 0.55 && !torch.hinted) {
     torch.hinted = true;
-    inventoryUI.feed("Night falls. F toggles your flashlight (they can see it)", "info");
+    inventoryUI.feed(`Night falls. ${IS_TOUCH ? "The torch button" : "F"} toggles your flashlight (they can see it)`, "info");
   }
   const want = torch.on && playerHealth > 0 && !brWatching() ? 1 : 0;
   torch.level += (want - torch.level) * (1 - Math.exp(-14 * delta));
@@ -1026,7 +1208,8 @@ function updateThirdPersonCamera(delta) {
   const ky  = 1 - Math.exp(-cameraRig.followY * delta);
   camPivot.x += (characterBody.position.x - camPivot.x) * kxz;
   camPivot.z += (characterBody.position.z - camPivot.z) * kxz;
-  camPivot.y += (characterBody.position.y - FEET_OFFSET + cameraRig.pivotHeight - camPivot.y) * ky;
+  stanceEye += (STANCES[stance].eye - stanceEye) * (1 - Math.exp(-10 * delta));
+  camPivot.y += (characterBody.position.y - FEET_OFFSET + stanceEye - camPivot.y) * ky;
 
   recoilPitch *= Math.exp(-10 * delta);
   recoilYaw   *= Math.exp(-12 * delta);
@@ -1322,7 +1505,7 @@ function beginThrow() {
   if (throwCooldown > 0 || throwAiming || brAirborne() || drive.on) return;
   const kind = inventory.selectedThrowable;
   if (inventory.throwables[kind] <= 0) {
-    inventoryUI.feed(`No ${THROWABLES[kind].name}s — press Q to switch`, "info", kind);
+    inventoryUI.feed(`No ${THROWABLES[kind].name}s — ${IS_TOUCH ? "tap ⇄" : "press Q"} to switch`, "info", kind);
     return;
   }
   throwAiming = true;
@@ -1492,7 +1675,8 @@ function interact() {
 }
 
 function updatePickups(delta) {
-  pickups.update(delta, focusPos.x, focusPos.z);
+  // Feet height: only loot on your floor of a house can be picked up
+  pickups.update(delta, focusPos.x, focusPos.z, brWatching() ? null : characterBody.position.y - FEET_OFFSET);
   const canLoot = playerHealth > 0 && !brAirborne() && !brWatching();
   if (canLoot) {
     for (let i = pickups.touching.length - 1; i >= 0; i--) collectPickup(pickups.touching[i]);
@@ -1506,11 +1690,11 @@ function updatePickups(delta) {
       promptRows[n++] = "E";
       promptRows[n++] = inventory.has(e.kind) ? `Take ammo · ${e.def.label}` : `Pick up ${e.def.label}`;
     }
-    const near = houses?.interaction(characterBody.position.x, characterBody.position.z);
+    const near = houses?.interaction(characterBody.position.x, characterBody.position.z, characterBody.position.y - FEET_OFFSET);
     nearDoor = near?.door ?? null;
     nearSwitch = near?.sw ?? null;
     if (nearDoor) {
-      promptRows[n++] = nearDoor.doorOpen ? "C" : "O";
+      promptRows[n++] = "O";
       promptRows[n++] = nearDoor.doorOpen ? "Close door" : "Open door";
     }
     if (nearSwitch) {
@@ -1552,7 +1736,7 @@ function useDoor(open) {
 function useLightSwitch() {
   if (!nearSwitch) return;
   houses.toggleLight(nearSwitch);
-  net.send({ t: "light", h: houses.houses.indexOf(nearSwitch), on: nearSwitch.lightOn });
+  net.send({ t: "light", h: houses.houses.indexOf(nearSwitch.house), f: nearSwitch.index, on: nearSwitch.lightOn });
 }
 
 function dropWeapon(id) {
@@ -1561,8 +1745,9 @@ function dropWeapon(id) {
   if (!slot) return;
   const x = characterBody.position.x + Math.sin(bodyYaw) * 1.3;
   const z = characterBody.position.z + Math.cos(bodyYaw) * 1.3;
-  if (isBR()) brSpawnShared(id, x, z, { ammo: slot.ammo, reserve: slot.reserve });
-  else pickups.spawn(id, x, z, { ammo: slot.ammo, reserve: slot.reserve });
+  const y = floorY(x, z, characterBody.position.y - FEET_OFFSET);
+  if (isBR()) brSpawnShared(id, x, z, { ammo: slot.ammo, reserve: slot.reserve }, y);
+  else pickups.spawn(id, x, z, { ammo: slot.ammo, reserve: slot.reserve }, Infinity, null, y);
   inventoryUI.feed(`Dropped ${WEAPONS[id].name}`, "info", id);
   if (inventory.current !== prev) onWeaponChanged();
 }
@@ -1577,9 +1762,15 @@ const DROP_TABLE = [
 ];
 const DROP_GUNS = ["shotgun", "rifle", "sniper", "smg"];
 
-function spawnDrop(k, x, z, life) {
-  pickups.spawn(k, x, z, pickupData(k), life);
-  net.send({ t: "drop", k, x: +x.toFixed(2), z: +z.toFixed(2), l: life });
+/** Floor height for something dropped at (x, z) by someone with their feet at y. */
+function floorY(x, z, feetY) {
+  const g = groundHeight(x, z);
+  return houses ? houses.surfaceAt(x, z, feetY + 0.3, g) : g;
+}
+
+function spawnDrop(k, x, z, life, y = groundHeight(x, z)) {
+  pickups.spawn(k, x, z, pickupData(k), life, null, y);
+  net.send({ t: "drop", k, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), l: life });
 }
 
 const BOSS_STASH   = ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov"];
@@ -1592,7 +1783,8 @@ function rollZombieDrop(zombie) {
     // The Warlord and dragons drop a stash
     stash.forEach((k, i) => {
       const a = (i / stash.length) * Math.PI * 2;
-      spawnDrop(k, p0.x + Math.cos(a) * 2.6, p0.z + Math.sin(a) * 2.6, DROP_LIFETIME * 2);
+      const x = p0.x + Math.cos(a) * 2.6, z = p0.z + Math.sin(a) * 2.6;
+      spawnDrop(k, x, z, DROP_LIFETIME * 2, floorY(x, z, zombie.root.position.y));
     });
     return;
   }
@@ -1602,7 +1794,7 @@ function rollZombieDrop(zombie) {
     if (r < chance) {
       const k = kind === "gun" ? DROP_GUNS[(Math.random() * DROP_GUNS.length) | 0] : kind;
       const p = zombie.body.position;
-      spawnDrop(k, p.x, p.z, DROP_LIFETIME);
+      spawnDrop(k, p.x, p.z, DROP_LIFETIME, floorY(p.x, p.z, zombie.root.position.y));
       return;
     }
     r -= chance;
@@ -1644,11 +1836,11 @@ function spawnWorldLoot() {
   // A little something inside every house
   const spot = new THREE.Vector3();
   houses?.houses.forEach((h, i) => {
-    for (const [lx, lz] of HOUSE_LOOT_SPOTS) {
+    for (const s of HOUSE_LOOT_SPOTS) {
       if (lootRng() < 0.35) continue;
       const kind = HOUSE_LOOT[(i * 3 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
-      houses._toWorld(h, lx, lz, spot);
-      pickups.spawn(kind, spot.x, spot.z, pickupData(kind));
+      houses.lootSpot(h, s, spot);
+      pickups.spawn(kind, spot.x, spot.z, pickupData(kind), Infinity, null, spot.y);
     }
   });
   for (const [kind, x, z] of STARTER_LOOT) pickups.spawn(kind, x, z, pickupData(kind));
@@ -1678,7 +1870,7 @@ function setInventoryOpen(open) {
     input.fire = false;
     input.aim = false;
     cancelThrow();
-    if (document.pointerLockElement) document.exitPointerLock();
+    releaseLock();
   } else if (playerHealth > 0) {
     requestLock();
   }
@@ -1752,7 +1944,7 @@ function updatePlayerNoise(delta) {
   if (stepTimer <= 0) {
     stepTimer = step[1];
     // Rain drowns out footsteps
-    makeNoise(characterBody.position.x, characterBody.position.z, step[0] * (1 - weather.rain * 0.35), "step");
+    makeNoise(characterBody.position.x, characterBody.position.z, step[0] * (1 - weather.rain * 0.35) * STANCES[stance].noise, "step");
   }
 }
 
@@ -1764,8 +1956,9 @@ function playerVisibility() {
   let v = 1;
   if (sprinting) v *= 1.25;
   else if (Math.hypot(moveVelocity.x, moveVelocity.z) < 0.5) v *= 0.85;
-  const h = houses?.houseAt(characterBody.position.x, characterBody.position.z);
-  if (h && !h.lightOn) v *= 0.45;
+  const floor = houses?.floorAt(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
+  if (floor && !floor.lightOn) v *= 0.45;
+  v *= STANCES[stance].vis;
   v *= 1 - env.darkness * (torch.level > 0.5 ? 0.1 : 0.5);
   v *= 1 - weather.rain * 0.25;
   return v;
@@ -1882,7 +2075,78 @@ const minimap = new Minimap(document.getElementById("minimap"), {
   obstacles: () => mapObstacles,
   players: () => (isBR() ? NO_PLAYERS : remotePlayers.mapList()),
   zone: () => (isBR() && br.state === "match" ? br.zone : null),
+  pins: () => pinList,
 });
+
+// ─── World map + pins ─────────────────────────────────────────────────────────
+// M (or the map button) opens the full map; tap / click it to drop a pin. Your
+// pin shows as a light pillar in the world, a marker with the distance, on the
+// compass and the minimap. Co-op squads see each other's pins.
+const PIN_COLOR = "#ffcc33";
+const PIN_REACHED = 4;           // metres: arriving at your pin lifts it
+const pinList = [];              // every pin, for the minimap
+const _mapMe = { x: 0, z: 0, yaw: 0 };
+function mapMe() {
+  const w = brWatchedPlayer();
+  _mapMe.x = focusPos.x;
+  _mapMe.z = focusPos.z;
+  _mapMe.yaw = w ? w.aimYaw : aimYaw;
+  return _mapMe;
+}
+const worldMap = new WorldMap({
+  me: mapMe,
+  players: () => (isBR() ? NO_PLAYERS : remotePlayers.mapList()),
+  obstacles: () => mapObstacles,
+  fires: () => atmosphere.sources,
+  vehicle: () => rickshaw?.footprint ?? null,
+  br: () => (isBR() ? _mapState : null),
+}, {
+  touch: IS_TOUCH,
+  onPin: (x, z) => setPin("me", x, z, true),
+  onClear: () => setPin("me", null, null, true),
+  onClose: () => setMapOpen(false),
+});
+const waypoints = new Waypoints(scene);
+
+/** x === null lifts the pin. id: "me" or a teammate's net id. */
+function setPin(id, x, z, share = false) {
+  const p = x === null ? null : {
+    x, z,
+    color: id === "me" ? (net.connected && !isBR() ? net.players.get(net.id)?.color ?? PIN_COLOR : PIN_COLOR) : net.players.get(id)?.color ?? "#ffffff",
+    label: id === "me" ? null : net.players.get(id)?.name ?? null,
+  };
+  worldMap.setPin(id, p);
+  waypoints.set(id, p);
+  pinList.length = 0;
+  for (const q of worldMap.pins.values()) pinList.push(q);
+  if (id === "me" && p) sfx.click();
+  // Squadmates see your pin; in the battle royale everyone's an enemy
+  if (share && gameMode === "coop" && net.connected) net.send(p ? { t: "pin", x: Math.round(x * 10) / 10, z: Math.round(z * 10) / 10 } : { t: "pin", c: 1 });
+}
+
+function setMapOpen(open) {
+  if (open === worldMap.open) return;
+  worldMap.setOpen(open);
+  if (open) {
+    // Let go of everything held: the map takes the whole screen
+    input.fire = false;
+    input.aim = false;
+    cancelThrow();
+    touch?.reset();
+  }
+}
+
+function updatePins(now) {
+  const me = mapMe();
+  const mine = worldMap.myPin;
+  if (mine && !brWatching() && Math.hypot(mine.x - me.x, mine.z - me.z) < PIN_REACHED) {
+    setPin("me", null, null, true);
+    inventoryUI.feed("You reached your pin", "info");
+  }
+  worldMap.update(now);
+  waypoints.setVisible((isLocked() || brWatching()) && !lobby?.open && !worldMap.open);
+  waypoints.update(now, me, camera);
+}
 
 // ─── Model Registry & Lil-GUI Controls ────────────────────────────────────────
 const editableModels = {};
@@ -1941,6 +2205,8 @@ function createEditableModel({
     boxes.push({ c: tmpBox.getCenter(new THREE.Vector3()), h: tmpBox.getSize(new THREE.Vector3()).multiplyScalar(0.5) });
   }
   const modelCenter = new THREE.Box3().setFromObject(root).getCenter(new THREE.Vector3());
+  // Colliders are measured: now bake the parts into one mesh per material
+  mergeStaticMeshes(object3D);
 
   const body = new CANNON.Body({ mass: 0, material: staticMaterial });
   for (const b of boxes) body.addShape(new CANNON.Box(new CANNON.Vec3(b.h.x, b.h.y, b.h.z)), new CANNON.Vec3(b.c.x, b.c.y, b.c.z));
@@ -2014,6 +2280,9 @@ function createEditableModel({
 }
 
 function setupGui() {
+  // The scene-tuning panel is a desktop tool; on phones it's hidden but its
+  // listen() controllers would still poll every frame
+  if (IS_TOUCH) return;
   const gui = new GUI({ title: "🎯 Scene Assets & Locations" });
   gui.close();
 
@@ -2129,10 +2398,14 @@ async function loadWorld() {
   const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf] = await Promise.all([
     settle(loadGLB("/models/autorickshaw_3d_model_free.glb")),
     settle(vrmlLoader.loadAsync("/models/house.wrl")),
-    gltfLoader.loadAsync("/models/house/house-kit.glb"),
+    // ?v=: bump when the kit changes (/models is cached for a day, a stale kit would miss pieces)
+    gltfLoader.loadAsync("/models/house/house-kit.glb?v=2"),
     loadGLB("/trees/old_tree_with_vine_3d_model_free.glb"),
     loadGLB("/trees/dreftwood tree.glb"),
   ]);
+  // Every tree clone shares these: one mesh per material instead of dozens of parts
+  mergeStaticMeshes(treeAGltf.scene);
+  mergeStaticMeshes(treeBGltf.scene);
 
 
   if (wrlScene) {
@@ -2380,6 +2653,8 @@ const _allTargets = [];
 function getTargets() {
   localTarget.alive = playerHealth > 0;
   localTarget.vis = playerVisibility();
+  localTarget.aimOff = STANCES[stance].aimOff;
+  localTarget.eyeOff = STANCES[stance].eyeOff;
   _allTargets.length = 0;
   _allTargets.push(localTarget);
   for (const t of remotePlayers.targets()) _allTargets.push(t);
@@ -2466,7 +2741,7 @@ net.on("joined", msg => {
   updateSquadPlayerCount();
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
-    if (net.isHost) net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.lightOn), veh: rickshawState() });
+    if (net.isHost) net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: rickshawState() });
     return;
   }
   if (net.isHost) {
@@ -2474,7 +2749,7 @@ net.on("joined", msg => {
     net.send({
       t: "world", to: msg.p.id,
       doors: houses.houses.map(h => h.doorOpen),
-      lights: houses.houses.map(h => h.lightOn),
+      lights: houses.houses.map(h => h.floors.map(f => f.lightOn)),
       veh: rickshawState(),
     });
   }
@@ -2482,6 +2757,7 @@ net.on("joined", msg => {
 net.on("left", msg => {
   const name = remotePlayers.players.get(msg.id)?.name ?? "A player";
   remotePlayers.remove(msg.id);
+  if (worldMap.pins.has(msg.id)) setPin(msg.id, null);
   if (rickshaw?.driver === msg.id) rickshaw.releaseRemote();
   inventoryUI.feed(`${name} left`, "info");
   updateSquadPlayerCount();
@@ -2501,16 +2777,31 @@ net.on("disconnect", () => {
 });
 
 net.on("st", msg => remotePlayers.applyState(msg.from, msg));
+net.on("pin", msg => {
+  if (gameMode !== "coop") return;
+  const fresh = !worldMap.pins.has(msg.from);
+  setPin(msg.from, msg.c ? null : msg.x, msg.c ? null : msg.z);
+  if (!msg.c && fresh) inventoryUI.feed(`${net.players.get(msg.from)?.name ?? "A teammate"} marked a spot`, "info");
+});
 net.on("shot", msg => remotePlayers.shot(msg.from, msg, characterBody.position));
 net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz));
 net.on("throw", msg => {
   throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.from);
 });
 net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
-net.on("light", msg => { const h = houses.houses[msg.h]; if (h && h.lightOn !== msg.on) houses.toggleLight(h); });
+net.on("light", msg => {
+  const f = houses.houses[msg.h]?.floors[msg.f ?? 0];
+  if (f && f.lightOn !== msg.on) houses.toggleLight(f);
+});
 net.on("world", msg => {
   msg.doors.forEach((o, i) => { if (houses.houses[i]) houses.setDoor(houses.houses[i], o); });
-  msg.lights.forEach((on, i) => { const h = houses.houses[i]; if (h && h.lightOn !== on) houses.toggleLight(h); });
+  // Per house: [ground, upstairs] (a plain boolean from an older client: the ground floor)
+  msg.lights.forEach((ons, i) => {
+    [].concat(ons).forEach((on, fi) => {
+      const f = houses.houses[i]?.floors[fi];
+      if (f && f.lightOn !== on) houses.toggleLight(f);
+    });
+  });
   if (msg.veh && rickshaw && rickshaw.driver === null) {
     [rickshaw.x, rickshaw.z, rickshaw.yaw, rickshaw.fuel] = msg.veh;
   }
@@ -2518,7 +2809,7 @@ net.on("world", msg => {
 net.on("drop", msg => {
   // a: [ammo, reserve] of a dropped gun (null reserve = ∞) · c: throwable count · i: shared loot id
   const data = msg.a ? { ammo: msg.a[0], reserve: msg.a[1] ?? Infinity } : msg.c ? { count: msg.c } : pickupData(msg.k);
-  pickups.spawn(msg.k, msg.x, msg.z, data, msg.l ?? Infinity, msg.i ?? null);
+  pickups.spawn(msg.k, msg.x, msg.z, data, msg.l ?? Infinity, msg.i ?? null, msg.y ?? null);
 });
 net.on("take", msg => pickups.releaseById(msg.i));
 net.on("kill", msg => {
@@ -2579,7 +2870,7 @@ function netTick(delta) {
       by: +bodyYaw.toFixed(3), ay: +aimYaw.toFixed(3), ap: +aimPitch.toFixed(3),
       aim: input.aim ? 1 : 0, fire: timeSinceShot < 0.15 ? 1 : 0,
       w: inventory.current, hp: Math.max(0, Math.round(playerHealth)), dead: playerHealth <= 0 ? 1 : 0,
-      vis: +playerVisibility().toFixed(2), k: killsThisLife,
+      vis: +playerVisibility().toFixed(2), k: killsThisLife, sn: STANCE_RANK[stance],
       ph: isBR() ? (br.ghost ? PHASE_PLANE : br.flight) : PHASE_GROUND,
       veh: drive.on
         ? [+rickshaw.x.toFixed(2), +rickshaw.z.toFixed(2), +rickshaw.yaw.toFixed(3), +rickshaw.speed.toFixed(2), +rickshaw.fuel.toFixed(1)]
@@ -2699,6 +2990,7 @@ function toggleRickshaw() {
   rickshaw.remote = null;
   characterBody.collisionResponse = false; // the rickshaw's box carries you
   soldier.seated = true;
+  setStance("stand", true);
   cancelThrow();
   weapon.reloading = false;
   moveVelocity.set(0, 0, 0);
@@ -2706,8 +2998,9 @@ function toggleRickshaw() {
   drive.lastMouse = 0;
   sfx.equip();
   inventoryUI.feed(rickshaw.empty
-    ? "Out of petrol: find a petrol can, then press T"
-    : "W/S drive · A/D steer · Space brake · V get out", rickshaw.empty ? "info" : "fuel", "fuel");
+    ? `Out of petrol: find a petrol can, then ${IS_TOUCH ? "tap it in the hotbar" : "press T"}`
+    : IS_TOUCH ? "Joystick: drive & steer · BRAKE · tap Get out" : "W/S drive · A/D steer · Space brake · V get out",
+    rickshaw.empty ? "info" : "fuel", "fuel");
 }
 
 function exitRickshaw() {
@@ -2741,12 +3034,16 @@ function updateDriving(delta) {
   if (!inventoryOpen && playerHealth > 0) {
     throttle = (keys.forward ? 1 : 0) - (keys.backward ? 1 : 0);
     steer = (keys.left ? 1 : 0) - (keys.right ? 1 : 0);
+    if (touch) {
+      throttle = THREE.MathUtils.clamp(throttle + touch.moveY, -1, 1);
+      steer = THREE.MathUtils.clamp(steer - touch.moveX, -1, 1);
+    }
   }
   const now = performance.now() / 1000;
   if (throttle !== 0 && rickshaw.empty && now > drive.emptyNotice) {
     drive.emptyNotice = now + 4;
     sfx.sputter();
-    inventoryUI.feed("Out of petrol! Press T with a petrol can", "info", "fuel");
+    inventoryUI.feed(`Out of petrol! ${IS_TOUCH ? "Tap the petrol can in the hotbar" : "Press T with a petrol can"}`, "info", "fuel");
   }
   const crash = rickshaw.drive(delta, { throttle, steer, handbrake: keys.jump }, solidAt);
   jumpQueued = false;
@@ -2982,7 +3279,7 @@ function enterBattleRoyale(welcome) {
   brHud.setVisible(true);
   brEnterWarmup();
   inventoryUI.feed(net.isHost
-    ? "You're the host. Press ENTER to start (alone is a practice drop)"
+    ? `You're the host. ${IS_TOUCH ? "Tap START MATCH" : "Press ENTER"} to start (alone is a practice drop)`
     : `Joined "${welcome.room.slice(3)}" · waiting for the host to start`, "info");
 }
 
@@ -3008,6 +3305,7 @@ function brResetPlayer(x, y, z, empty) {
   onWeaponChanged(false);
   cancelThrow();
   soldier.revive();
+  setStance("stand", true);
   characterRoot.visible = true;
   br.atkAt = -99;
   br.vy = 0;
@@ -3028,7 +3326,7 @@ function brEnterWarmup() {
   fireFX.clear();
   pickups.clear();
   brHud.hideResult();
-  brHud.setMapOpen(false);
+  setMapOpen(false);
   brWarmSpawn();
   brResetPlayer(_spawn.x, groundHeight(_spawn.x, _spawn.z) + FEET_OFFSET + 0.02, _spawn.z, false);
   rickshaw?.reset();
@@ -3074,8 +3372,8 @@ function brStartMatch(seed, ids, t) {
   aimYaw = Math.atan2(br.route.dx, br.route.dz);
   aimPitch = -0.35;
   if (br.inMatch) {
-    brHud.setMapOpen(true);
-    gameHud.showBanner({ title: "DROP ZONE", sub: "Pick your spot", text: "SPACE jumps. Land, loot, and stay inside the blue zone.", color: "#4da3ff", duration: 5 });
+    setMapOpen(true);
+    gameHud.showBanner({ title: "DROP ZONE", sub: "Pick your spot", text: `${IS_TOUCH ? "JUMP" : "SPACE"} jumps. Land, loot, and stay inside the blue zone.`, color: "#4da3ff", duration: 5 });
     sfx.levelStart();
   } else {
     gameHud.showBanner({ title: "MATCH IN PROGRESS", sub: "You're spectating until the next one", color: "#4da3ff", duration: 4 });
@@ -3085,22 +3383,22 @@ function brStartMatch(seed, ids, t) {
 function brSpawnLoot(seed) {
   const spots = [];
   for (const h of houses.houses) {
-    for (const [lx, lz] of HOUSE_LOOT_SPOTS) {
-      houses._toWorld(h, lx, lz, _lootSpot);
-      spots.push({ x: _lootSpot.x, z: _lootSpot.z });
+    for (const s of HOUSE_LOOT_SPOTS) {
+      houses.lootSpot(h, s, _lootSpot);
+      spots.push({ x: _lootSpot.x, y: _lootSpot.y, z: _lootSpot.z });
     }
   }
   lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
-    pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`);
+    pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`, it.y ?? null);
   });
 }
 
 /** A pickup every player sees, and that disappears for everyone when taken. */
-function brSpawnShared(k, x, z, data) {
+function brSpawnShared(k, x, z, data, y = groundHeight(x, z)) {
   const id = `${net.id}.${br.dropSeq++}`;
-  pickups.spawn(k, x, z, data, Infinity, id);
+  pickups.spawn(k, x, z, data, Infinity, id, y);
   net.send({
-    t: "drop", k, x: +x.toFixed(2), z: +z.toFixed(2), i: id,
+    t: "drop", k, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), i: id,
     a: data && data.ammo !== undefined ? [data.ammo, data.reserve === Infinity ? null : data.reserve] : undefined,
     c: data?.count,
   });
@@ -3119,7 +3417,8 @@ function brDropLoot() {
   if (items.length) items.push(["ammo", null]);
   items.forEach(([k, data], i) => {
     const a = (i / items.length) * Math.PI * 2;
-    brSpawnShared(k, p.x + Math.cos(a) * 1.5, p.z + Math.sin(a) * 1.5, data);
+    const x = p.x + Math.cos(a) * 1.5, z = p.z + Math.sin(a) * 1.5;
+    brSpawnShared(k, x, z, data, floorY(x, z, p.y - FEET_OFFSET));
   });
   inventory.reset(true);
   onWeaponChanged(false);
@@ -3137,7 +3436,7 @@ function brJump() {
   moveVelocity.set(br.route.dx * PLANE.speed * 0.3, 0, br.route.dz * PLANE.speed * 0.3);
   bodyYaw = aimYaw;
   characterRoot.visible = true;
-  brHud.setMapOpen(false);
+  setMapOpen(false);
   sfx.throwWhoosh();
 }
 
@@ -3179,6 +3478,7 @@ function brUpdateFlight(delta) {
     if (keys.backward) iz -= 1;
     if (keys.right)    ix += 1;
     if (keys.left)     ix -= 1;
+    if (touch) { ix += touch.moveX; iz += touch.moveY; }
   }
   let fwd, side, down, rate, fallRate;
   if (br.flight === PHASE_FALL) {
@@ -3264,7 +3564,7 @@ function brOnLocalDeath() {
   if (br.state === "match" && br.inMatch) {
     br.placement = br.alive.size;
     brDropLoot();
-    if (document.pointerLockElement) document.exitPointerLock();
+    releaseLock();
   } else {
     br.respawnTimer = BR_WARMUP_RESPAWN; // warm-up: straight back in
   }
@@ -3390,6 +3690,11 @@ function brNetTick(delta) {
 
 function brHint() {
   if (br.state !== "match" || !br.inMatch) return "";
+  if (IS_TOUCH) {
+    if (br.flight === PHASE_PLANE) return br.t < PLANE.jumpDelay ? "GET READY…" : "<kbd>JUMP</kbd> LEAVE THE PLANE";
+    if (br.flight === PHASE_FALL) return br.fallTime > FREEFALL.manualAfter ? "<kbd>CHUTE</kbd> OPEN PARACHUTE · PUSH UP TO DIVE" : "PUSH THE JOYSTICK UP TO DIVE";
+    if (br.flight === PHASE_CHUTE) return "JOYSTICK: STEER";
+  }
   if (br.flight === PHASE_PLANE) return br.t < PLANE.jumpDelay ? "GET READY…" : "<kbd>SPACE</kbd> JUMP · <kbd>M</kbd> MAP";
   if (br.flight === PHASE_FALL) return br.fallTime > FREEFALL.manualAfter ? "<kbd>SPACE</kbd> OPEN PARACHUTE · <kbd>W</kbd> DIVE" : "<kbd>W</kbd> DIVE";
   if (br.flight === PHASE_CHUTE) return "<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> STEER";
@@ -3399,7 +3704,7 @@ function brHint() {
 
 const _mapNext = { x: 0, z: 0, r: 0 };
 const _mapPlane = { x: 0, z: 0, dx: 0, dz: 0 };
-const _mapState = { zone: null, next: null, route: null, plane: null, me: { x: 0, z: 0, yaw: 0 }, obstacles: mapObstacles };
+const _mapState = { zone: null, next: null, route: null, plane: null };
 
 function brUpdateHud(delta) {
   brHud.update(delta);
@@ -3410,9 +3715,9 @@ function brUpdateHud(delta) {
     const players = remotePlayers.count + 1;
     let status = "", kind = "", alive = null;
     if (br.state === "warm") {
-      status = `${players}/${BR_MAX_PLAYERS} players · ${net.isHost ? "press ENTER to start" : "waiting for the host"}`;
+      status = `${players}/${BR_MAX_PLAYERS} players · ${net.isHost ? (IS_TOUCH ? "tap START MATCH" : "press ENTER to start") : "waiting for the host"}`;
     } else if (br.state === "count") {
-      status = `Match starts in ${Math.ceil(br.countdown)}${net.isHost ? " · ENTER: start now" : ""}`;
+      status = `Match starts in ${Math.ceil(br.countdown)}${net.isHost ? (IS_TOUCH ? " · START MATCH: go now" : " · ENTER: start now") : ""}`;
       kind = "warn";
     } else if (br.state === "match") {
       alive = br.alive.size;
@@ -3430,7 +3735,7 @@ function brUpdateHud(delta) {
     brHud.setSpectating(watched ? watched.name : null, watched?.color);
   }
 
-  if (!brHud.mapOpen) return;
+  if (!worldMap.open) return;
   const inMatch = br.state === "match";
   _mapState.zone = inMatch ? br.zone : null;
   if (inMatch) {
@@ -3445,10 +3750,6 @@ function brUpdateHud(delta) {
     _mapPlane.dx = br.route.dx; _mapPlane.dz = br.route.dz;
   }
   _mapState.plane = planeUp ? _mapPlane : null;
-  _mapState.me.x = focusPos.x;
-  _mapState.me.z = focusPos.z;
-  _mapState.me.yaw = watched ? watched.aimYaw : aimYaw;
-  brHud.drawMap(performance.now(), _mapState);
 }
 
 net.on("br", msg => {
@@ -3506,7 +3807,7 @@ const lobby = new Lobby({
 const qualityEl = document.getElementById("lobby-quality");
 if (qualityEl) {
   qualityEl.value = QUALITY_SETTING;
-  qualityEl.options[0].textContent = `Auto (${QUALITY_PRESETS[QUALITY_NAME].label} on this PC)`;
+  qualityEl.options[0].textContent = `Auto (${QUALITY_PRESETS[QUALITY_NAME].label} on this ${IS_TOUCH ? "device" : "PC"})`;
   qualityEl.addEventListener("change", () => {
     saveQuality(qualityEl.value);
     location.reload();
@@ -3531,10 +3832,12 @@ const clock = new THREE.Clock();
 function animate() {
   if (!_animRunning) return;
   requestAnimationFrame(animate);
+  const frameStart = performance.now();
   const rawDelta = clock.getDelta();
   const frameMs = rawDelta * 1000;
   const delta = Math.min(rawDelta, 0.05);
 
+  updateTouch();
   if (drive.on) {
     updateDriving(delta);
   } else if (brFlying()) {
@@ -3600,14 +3903,16 @@ function animate() {
   updateCombatHUD(delta);
 
   minimap.update(performance.now(), focusPos.x, focusPos.z, watched ? watched.aimYaw : aimYaw);
+  updatePins(performance.now());
   if (isBR()) brUpdateHud(delta);
 
   updateMood(delta);
   updateRickshawFx();
   updateSunShadow();
   if (QUALITY.shadowEvery > 1 && ++shadowFrame % QUALITY.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
+  const logicMs = performance.now() - frameStart;
   renderFrame();
-  updateDynamicResolution(frameMs);
+  updateDynamicResolution(frameMs, logicMs);
 }
 
 window.addEventListener("resize", () => {
@@ -3636,7 +3941,12 @@ THREE.DefaultLoadingManager.onProgress = (_url, loaded, total) => {
  */
 async function warmUpGpu() {
   const hidden = [];
-  scene.traverse(o => { if (!o.visible) { hidden.push(o); o.visible = true; } });
+  scene.traverse(o => {
+    if (!o.visible) { hidden.push(o); o.visible = true; }
+    // Loaded models too: a transparent double-sided material is otherwise drawn
+    // twice (back faces, then front), re-resolving its shader both times
+    for (const m of o.material ? [].concat(o.material) : []) if (m.transparent && m.side === THREE.DoubleSide) m.forceSinglePass = true;
+  });
   fireFX.setWarmup(true);
   const compile = async () => {
     if (renderer.compileAsync) await renderer.compileAsync(scene, camera);
@@ -3728,7 +4038,9 @@ async function boot() {
       if (zombieManager.chasingCount === 0) sfx.spotted();
     };
     // Monsters walk around buildings, use doorways, and can't get through closed doors
-    zombieManager.navigate = (zx, zz, tx, tz, out, big) => houses.navigate(zx, zz, tx, tz, out, big);
+    zombieManager.navigate = (zx, zz, tx, tz, out, big, zy, ty) => houses.navigate(zx, zz, tx, tz, out, big, zy, ty);
+    // House floors and stairs are walkable surfaces too (monsters follow you upstairs)
+    zombieManager.surfaceAt = (x, z, y, ground) => houses.surfaceAt(x, z, y, ground);
     zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z);
     zombieManager.onDoorBang = (x, z) => {
       sfx.doorBang(Math.hypot(x - characterBody.position.x, z - characterBody.position.z));
@@ -3748,7 +4060,7 @@ async function boot() {
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, inventory, pickups, get rickshaw() { return rickshaw; }, toggleRickshaw, refuelRickshaw, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, get kills() { return killsThisLife; } }; // TEMP-DBG
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, get rickshaw() { return rickshaw; }, toggleRickshaw, refuelRickshaw, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, get kills() { return killsThisLife; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     lobby.show();

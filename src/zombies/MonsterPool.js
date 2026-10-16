@@ -498,6 +498,8 @@ export class MonsterPools {
     this.orient(m);
     m.body.wakeUp();
     m.root.visible = true;
+    m.root.matrixWorldAutoUpdate = true;
+    m.marker.matrixWorldAutoUpdate = true;
     m.root.rotation.set(0, THREE.MathUtils.degToRad(m.rotY), 0);
     m.root.position.set(x, g + m.flyY, z);
   }
@@ -518,5 +520,9 @@ export class MonsterPools {
     m.root.position.set(0, POOL_HIDE_Y, 0);
     m.root.rotation.set(0, 0, 0);
     m.marker.visible = false;
+    // Parked: skip its (bone-heavy) subtree in the scene's matrix update
+    m.root.updateMatrixWorld(true);
+    m.root.matrixWorldAutoUpdate = false;
+    m.marker.matrixWorldAutoUpdate = false;
   }
 }

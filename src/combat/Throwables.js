@@ -4,12 +4,13 @@ import * as CANNON from "cannon-es";
 import { cloneItem } from "../items/ItemModels.js";
 import { GROUP_WORLD, GROUP_ZOMBIE, GROUP_PROJECTILE, GROUP_NONE } from "../physicsGroups.js";
 import { GRENADE, MOLOTOV } from "./weapons.js";
+import { QUALITY } from "../quality.js";
 
 const POOL        = 8;
 const RADIUS      = 0.08;
 const HIDE_Y      = -500;
 const MAX_FIRES   = 5;        // molotovs + dragon fire
-const FIRE_LIGHTS = 2;        // persistent lights shared by the fires (each costs per-pixel)
+const FIRE_LIGHTS = QUALITY.fireLights; // persistent lights shared by the fires (each costs per-pixel)
 const ARC_POINTS  = 64;
 const ARC_STEP    = 1 / 30;
 const ITEM_SCALE  = 1.6;      // thrown items are a bit oversized so they read in flight
@@ -106,13 +107,13 @@ export class Throwables {
 
     this.marker = new THREE.Group();
     const ringMat = new THREE.MeshBasicMaterial({
-      color: 0xffe2a0, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide, fog: false,
+      color: 0xffe2a0, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true, fog: false,
     });
     this.marker.add(new THREE.Mesh(new THREE.RingGeometry(0.22, 0.32, 24).rotateX(-Math.PI / 2), ringMat));
     this.radiusRing = new THREE.Mesh(
       new THREE.RingGeometry(0.96, 1, 48).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({
-        color: 0xff6a3a, transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide, fog: false,
+        color: 0xff6a3a, transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true, fog: false,
       }));
     this.marker.add(this.radiusRing);
     this.marker.visible = false;

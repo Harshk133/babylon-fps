@@ -155,6 +155,7 @@ export class Weather {
       transparent: true,
       depthWrite: false,
       side: THREE.DoubleSide, // the camera-facing streak can wind either way
+      forceSinglePass: true,  // ...but one pass: three draws transparent double-sided twice otherwise
     });
     this.rainMesh = new THREE.Mesh(rainGeo, this.rainMat);
     this.rainMesh.frustumCulled = false;
@@ -172,6 +173,7 @@ export class Weather {
       transparent: true,
       depthWrite: false,
       side: THREE.DoubleSide,
+      forceSinglePass: true,
     });
     this.splashMesh = new THREE.Mesh(splashGeo, this.splashMat);
     this.splashMesh.frustumCulled = false;
@@ -190,7 +192,7 @@ export class Weather {
     boltGeo.setIndex(idx);
     this.bolt = new THREE.Mesh(boltGeo, new THREE.MeshBasicMaterial({
       color: 0xe8eeff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
-      depthWrite: false, fog: false, side: THREE.DoubleSide,
+      depthWrite: false, fog: false, side: THREE.DoubleSide, forceSinglePass: true,
     }));
     this.bolt.frustumCulled = false;
     this.bolt.renderOrder = -5;

@@ -1,6 +1,8 @@
 // Name / room entry shown after loading. Three modes: solo against the horde,
 // co-op against the horde, or a battle royale (players against each other).
 
+import { IS_TOUCH } from "../input/TouchControls.js";
+
 const NAME_KEY = "babylon-fps:name";
 const ROOM_KEY = "babylon-fps:room";
 
@@ -74,7 +76,8 @@ export class Lobby {
   show() {
     this.open = true;
     this.el.classList.add("visible");
-    setTimeout(() => this.nameEl.focus(), 50);
+    // Phones would pop the keyboard up over the whole lobby
+    if (!IS_TOUCH) setTimeout(() => this.nameEl.focus(), 50);
   }
 
   hide() {

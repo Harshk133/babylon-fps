@@ -3,6 +3,7 @@ import * as CANNON from "cannon-es";
 import { Soldier } from "../player/Soldier.js";
 import { GROUP_PLAYER, GROUP_NONE } from "../physicsGroups.js";
 import { createParachute, setSkydivePose } from "../br/BrVisuals.js";
+import { STANCES, STANCE_NAMES, setCapsuleStance } from "../player/Stance.js";
 
 // Teammates in co-op: an animated Soldier per remote player, driven by the
 // state packets they send (~20 Hz) and smoothed between packets. Each one gets
@@ -104,8 +105,11 @@ export class RemotePlayers {
       tx: 0, ty: 0, tz: 0, vx: 0, vz: 0, extrap: 0,
       bodyYaw: 0, aimYaw: 0, aimPitch: 0, aim: false, fire: false, weapon: "smg",
       hp: 100, dead: false, vis: 1, kills: 0, phase: PHASE_GROUND, chute, skydive: 0,
-      tagKey: "",
-      target: { id, pos: body.position, vel: { x: 0, z: 0 }, alive: false, vis: 1, local: false, name },
+      tagKey: "", stance: "stand",
+      target: {
+        id, pos: body.position, vel: { x: 0, z: 0 }, alive: false, vis: 1, local: false, name,
+        aimOff: STANCES.stand.aimOff, eyeOff: STANCES.stand.eyeOff,
+      },
     };
     body.playerTarget = p.target;
     this.players.set(id, p);
@@ -115,6 +119,7 @@ export class RemotePlayers {
       if (!this.players.has(id)) return;
       root.add(soldier.root);
       soldier.setWeapon(p.weapon);
+      soldier.stance = p.stance;
       if (p.dead) soldier.die();
       p.soldier = soldier;
       p.ready = true;
@@ -169,6 +174,15 @@ export class RemotePlayers {
     if (dead !== p.dead) {
       p.dead = dead;
       if (dead) p.soldier?.die(); else p.soldier?.revive();
+    }
+    // Crouched / prone: smaller capsule (harder to hit), lower aim point for the monsters
+    const stance = STANCE_NAMES[s.sn ?? 0] ?? "stand";
+    if (stance !== p.stance) {
+      p.stance = stance;
+      setCapsuleStance(p.body, stance, this.capsule.height / 2);
+      if (p.soldier) p.soldier.stance = stance;
+      p.target.aimOff = STANCES[stance].aimOff;
+      p.target.eyeOff = STANCES[stance].eyeOff;
     }
     p.phase = s.ph ?? PHASE_GROUND;
     p.driving = !!s.veh;
@@ -247,7 +261,7 @@ export class RemotePlayers {
         p.soldier.update(delta, {
           localForward: p.vx * sy + p.vz * cy,
           localRight: -p.vx * cy + p.vz * sy,
-          aiming: !p.dead && (p.aim || p.fire),
+          aiming: !p.dead && (p.aim || p.fire || p.stance === "prone"),
           firing: p.fire,
           aimYawOffset: angleDiff(p.aimYaw, yaw),
           aimPitch: p.aimPitch,

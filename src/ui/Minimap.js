@@ -23,6 +23,7 @@ export class Minimap {
    *   pickups()   → [{ x, z, def:{category} }]
    *   fires()     → [{ active, x, z, time }]
    *   obstacles() → [{ type:"box", x, z, w, d, rot } | { type:"circle", x, z, r }]
+   *   pins()      → [{ x, z, color }]   map pins (kept on the rim when out of range)
    */
   constructor(root, sources) {
     this.sources = sources;
@@ -259,6 +260,26 @@ export class Minimap {
       ctx.stroke();
       ctx.fill();
       ctx.restore();
+    }
+
+    // ── Pins: a drop on the map, or on the rim pointing the way
+    for (const p of this.sources.pins?.() ?? []) {
+      const dx = p.x - px, dz = p.z - pz;
+      let qx = mx(p.x, p.z), qy = my(p.x, p.z);
+      if (dx * dx + dz * dz > (MAP_RANGE * 0.92) ** 2) {
+        const a = Math.atan2(qy - c, qx - c);
+        qx = c + Math.cos(a) * (R - 9); qy = c + Math.sin(a) * (R - 9);
+      }
+      ctx.fillStyle = p.color;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(qx, qy + 6);
+      ctx.lineTo(qx - 4.5, qy - 1);
+      ctx.arc(qx, qy - 1.5, 4.5, Math.PI, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
     }
 
     // ── View cone + player arrow

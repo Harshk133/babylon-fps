@@ -1,0 +1,10 @@
+{
+  "appId": "com.harshkale.babylonfps",
+  "appName": "Babylon FPS",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#050303"
+  },
+  "backgroundColor": "#050303"
+}

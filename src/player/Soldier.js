@@ -23,6 +23,17 @@ const RUN_CLIP_SPEED = 5.0;   // ground speed (m/s) the run clips were authored 
 const BLEND_RATE     = 10;
 const AIM_PITCH_MIN  = -0.7;
 const AIM_PITCH_MAX  = 0.8;
+// Stances (see Stance.js): crouch bends the knees and drops the hips; prone
+// tips the whole model onto its belly, props the chest up on the elbows and
+// swings the arms back up so the gun still points where you aim.
+const STANCE_RATE  = 9;
+const CROUCH_DROP  = 0.42;    // hips lowered this much (m) so bent legs keep the feet on the ground
+const CROUCH_LEAN  = 0.25;    // chest leans forward (rad)
+const CROUCH_THIGH = -1.05;   // thighs swing forward
+const CROUCH_SHIN  = 1.75;    // shins swing back
+const PRONE_LEAN   = 1.2;     // chest stays this far from upright (≈ 20° above the ground)
+const PRONE_LIFT   = 0.13;    // belly off the ground
+const PRONE_BACK   = 0.9;     // the hips sit over the player's position, head forward
 
 const _q0 = new THREE.Quaternion();
 const _q1 = new THREE.Quaternion();
@@ -31,6 +42,7 @@ const _qId = new THREE.Quaternion();
 const _qStep = new THREE.Quaternion();
 const _qYaw = new THREE.Quaternion();
 const _qPitch = new THREE.Quaternion();
+const _qLean = new THREE.Quaternion();
 const _axisX = new THREE.Vector3(1, 0, 0);
 const _axisY = new THREE.Vector3(0, 1, 0);
 const _v0 = new THREE.Vector3();
@@ -72,6 +84,9 @@ export class Soldier {
     this.shootWeight = 0;
     this.dead = false;
     this.seated = false;         // driving: thighs forward, shins down
+    this.stance = "stand";       // "stand" | "crouch" | "prone"
+    this.crouchW = 0;            // blended 0..1 toward the stance
+    this.proneW = 0;
 
     this._chestRef = new THREE.Quaternion(); // chest orientation (root-local) when aiming dead ahead
     this._spineDelta = new THREE.Quaternion();
@@ -95,11 +110,15 @@ export class Soldier {
     this.model = model;
     this.root.add(model);
 
-    this.abdomen = model.getObjectByName("Abdomen");
-    this.chest   = model.getObjectByName("Chest");
-    this.hand    = model.getObjectByName("WristR");
-    this.palm    = model.getObjectByName("Middle1R");
-    this.legs = ["UpperLeg.L", "UpperLeg.R", "LowerLeg.L", "LowerLeg.R"].map(n => model.getObjectByName(n));
+    // GLTFLoader strips the dots from node names ("UpperLeg.L" → "UpperLegL")
+    const bone = n => model.getObjectByName(n) ?? model.getObjectByName(n.replace(/\./g, ""));
+    this.abdomen = bone("Abdomen");
+    this.chest   = bone("Chest");
+    this.neck    = bone("Neck");
+    this.hand    = bone("WristR");
+    this.palm    = bone("Middle1R");
+    this.legs = ["UpperLeg.L", "UpperLeg.R", "LowerLeg.L", "LowerLeg.R"].map(bone);
+    this.arms = ["UpperArm.L", "UpperArm.R"].map(bone);
 
     const upperBones = new Set();
     this.abdomen.traverse(o => upperBones.add(o.name));
@@ -239,6 +258,15 @@ export class Soldier {
   update(delta, s) {
     if (!this.mixer) return;
 
+    // Stance: blend toward it and pose the whole model (before the bones are posed)
+    const ks = 1 - Math.exp(-STANCE_RATE * delta);
+    this.crouchW += ((this.stance === "crouch" ? 1 : 0) - this.crouchW) * ks;
+    this.proneW += ((this.stance === "prone" ? 1 : 0) - this.proneW) * ks;
+    if (this.crouchW < 0.001) this.crouchW = 0;
+    if (this.proneW < 0.001) this.proneW = 0;
+    this.model.rotation.x = this.proneW * Math.PI / 2;
+    this.model.position.set(0, this.proneW * PRONE_LIFT - this.crouchW * CROUCH_DROP, -this.proneW * PRONE_BACK);
+
     if (this.dead) {
       for (const key of LOCO) {
         this.lower[key].setEffectiveWeight(0);
@@ -256,7 +284,8 @@ export class Soldier {
       idle: 0,
       fwd: 0, back: 0, left: 0, right: 0,
     };
-    const move = THREE.MathUtils.clamp(speed / 1.5, 0, 1);
+    // Prone keeps the legs straight (idle) and slides along: a crawl, not a run
+    const move = THREE.MathUtils.clamp(speed / 1.5, 0, 1) * (1 - this.proneW);
     if (speed > 0.05) {
       const f = s.localForward / speed, r = s.localRight / speed;
       t.fwd   = (f > 0 ? f * f : 0) * move;
@@ -285,23 +314,42 @@ export class Soldier {
     this._applyWeights();
     this.mixer.update(delta);
 
-    if (!s.noSpine) this._applySpineAim(s.aimYawOffset, s.aimPitch);
-    if (this.seated && !this.dead) this._applySeat();
+    const lean = this.proneW * PRONE_LEAN + this.crouchW * CROUCH_LEAN;
+    if (!s.noSpine) this._applySpineAim(s.aimYawOffset, s.aimPitch, lean);
+    // The chest leans forward: swing the arms (and the head) back up by as much
+    if (lean > 0.01 && this.aimWeight > 0.01) this._raiseArms(lean * this.aimWeight);
+    if (this.crouchW > 0.01 && !this.seated) this._bendLegs(CROUCH_THIGH * this.crouchW, CROUCH_SHIN * this.crouchW);
+    if (this.seated && !this.dead) this._bendLegs(-1.45, 1.5);
   }
 
-  // Sitting: swing both thighs forward about the body's side axis, then the shins back down
-  _applySeat() {
+  /** Swing both thighs about the body's side axis, then the shins (driving seat, crouch). */
+  _bendLegs(thigh, shin) {
     const [ul, ur, ll, lr] = this.legs;
     if (!ul || !ll) return;
-    this.root.updateMatrixWorld(true);
-    this.root.getWorldQuaternion(_q2);
-    _v0.copy(_axisX).applyQuaternion(_q2);
-    _qStep.setFromAxisAngle(_v0, -1.45);
+    this._sideAxis(_v0);
+    _qStep.setFromAxisAngle(_v0, thigh);
     rotateBoneInWorld(ul, _qStep);
     rotateBoneInWorld(ur, _qStep);
-    _qStep.setFromAxisAngle(_v0, 1.5);
+    _qStep.setFromAxisAngle(_v0, shin);
     rotateBoneInWorld(ll, _qStep);
     rotateBoneInWorld(lr, _qStep);
+  }
+
+  _raiseArms(angle) {
+    this._sideAxis(_v0);
+    _qStep.setFromAxisAngle(_v0, -angle);
+    for (const arm of this.arms) if (arm) rotateBoneInWorld(arm, _qStep);
+    if (this.neck) {
+      _qStep.setFromAxisAngle(_v0, -angle * 0.8);
+      rotateBoneInWorld(this.neck, _qStep);
+    }
+  }
+
+  /** The character's right-hand side axis in world space. */
+  _sideAxis(out) {
+    this.root.updateMatrixWorld(true);
+    this.root.getWorldQuaternion(_q2);
+    return out.copy(_axisX).applyQuaternion(_q2);
   }
 
   _applyWeights() {
@@ -316,16 +364,17 @@ export class Soldier {
 
   // Twist abdomen + chest so the raised gun points along the camera's aim,
   // regardless of how the legs/hips are oriented by the run clips.
-  _applySpineAim(yawOffset, pitch) {
+  _applySpineAim(yawOffset, pitch, lean = 0) {
     if (this.aimWeight < 0.01) return;
     this.root.updateMatrixWorld(true);
 
     const p = THREE.MathUtils.clamp(pitch, AIM_PITCH_MIN, AIM_PITCH_MAX);
     _qYaw.setFromAxisAngle(_axisY, yawOffset);
     _qPitch.setFromAxisAngle(_axisX, -p);
+    _qLean.setFromAxisAngle(_axisX, lean);
     this.root.getWorldQuaternion(_q2);
-    // desired chest world = rootWorld * yaw * pitch * chestRef
-    _q2.multiply(_qYaw).multiply(_qPitch).multiply(this._chestRef);
+    // desired chest world = rootWorld * yaw * pitch * lean * chestRef
+    _q2.multiply(_qYaw).multiply(_qPitch).multiply(_qLean).multiply(this._chestRef);
 
     this.chest.getWorldQuaternion(_q0);
     this._spineDelta.copy(_q2).multiply(_q0.invert());
