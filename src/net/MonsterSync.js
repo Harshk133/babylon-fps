@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { groundHeight } from "../world/Terrain.js";
 import { MONSTER_TYPES, WEAPON_MODELS } from "../zombies/MonsterTypes.js";
 import { GROUP_NONE, GROUP_ZOMBIE } from "../physicsGroups.js";
 
@@ -54,7 +55,7 @@ export class MonsterSync {
         m.weaponId ? WEAPON_LIST.indexOf(m.weaponId) : -1,
         Math.round(b.x * 100),
         Math.round(b.z * 100),
-        Math.round(m.root.position.y * 100),
+        Math.round((m.root.position.y - groundHeight(m.root.position.x, m.root.position.z)) * 100), // height above the ground
         Math.round(m.rotY) % 360,
         ANIM_INDEX[m.currentAnim] ?? 0,
         Math.round(rate * 100),
@@ -143,13 +144,14 @@ export class MonsterSync {
       b.z += (m.tz - b.z) * k;
       // Flyers (and leaping hounds) carry their height in the snapshot's root y
       m.flyY += (Math.max(0, m.ty) - m.flyY) * k;
-      b.y = m.visualOffY + m.flyY;
+      const g = groundHeight(b.x, b.z);
+      b.y = g + m.visualOffY + m.flyY;
       m.body.aabbNeedsUpdate = true;
       let dr = (m.trot - m.rotY) % 360;
       if (dr > 180) dr -= 360; else if (dr < -180) dr += 360;
       m.rotY += dr * k;
       mgr.pool.orient(m);
-      m.root.position.set(b.x, m.ty < 0 ? m.ty : m.flyY, b.z);
+      m.root.position.set(b.x, g + (m.ty < 0 ? m.ty : m.flyY), b.z);
       m.root.rotation.y = THREE.MathUtils.degToRad(m.rotY);
       // Models without a death clip keel over (the host does the same)
       if (m.dying && !m.kind.deathClips.length) {
@@ -171,7 +173,7 @@ export class MonsterSync {
       }
       m.marker.visible = m.showMarker && m.distXZ < 55;
       if (m.marker.visible) {
-        m.marker.position.set(b.x, m.flyY + m.height + 0.45, b.z);
+        m.marker.position.set(b.x, m.root.position.y + m.height + 0.45, b.z);
         const s = 0.6 * Math.max(1, m.distXZ / 18);
         m.marker.scale.set(s, s, s);
       }

@@ -171,6 +171,8 @@ export class RemotePlayers {
       if (dead) p.soldier?.die(); else p.soldier?.revive();
     }
     p.phase = s.ph ?? PHASE_GROUND;
+    p.driving = !!s.veh;
+    if (p.soldier) p.soldier.seated = p.driving;
     // Dead players and players still in the plane can't be hit
     p.body.collisionFilterGroup = dead || p.phase === PHASE_PLANE ? GROUP_NONE : GROUP_PLAYER;
     p.target.alive = !dead && p.hasState && p.phase !== PHASE_PLANE;

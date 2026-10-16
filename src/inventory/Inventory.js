@@ -1,6 +1,6 @@
 import {
   WEAPONS, WEAPON_ORDER, STARTING_WEAPONS, STARTING_WEAPON,
-  THROWABLES, THROWABLE_ORDER, MEDKIT,
+  THROWABLES, THROWABLE_ORDER, MEDKIT, FUEL_CAN,
 } from "../combat/weapons.js";
 
 /**
@@ -21,6 +21,7 @@ export class Inventory {
     if (!empty) for (const id of STARTING_WEAPONS) this._give(id, WEAPONS[id].magSize, WEAPONS[id].startReserve);
     for (const k of THROWABLE_ORDER) this.throwables[k] = empty ? 0 : THROWABLES[k].start;
     this.medkits = empty ? 0 : MEDKIT.start;
+    this.fuelCans = 0;
     this.current = empty ? null : STARTING_WEAPON;
     this.selectedThrowable = THROWABLE_ORDER[0];
     this.version = (this.version ?? 0) + 1;
@@ -170,6 +171,22 @@ export class Inventory {
     this.throwables[kind]--;
     this._touch();
     return kind;
+  }
+
+  // ── Petrol cans ─────────────────────────────────────────────────────────────
+
+  addFuelCan() {
+    if (this.fuelCans >= FUEL_CAN.max) return null;
+    this.fuelCans++;
+    this._touch();
+    return { msg: `+1 ${FUEL_CAN.name}` };
+  }
+
+  takeFuelCan() {
+    if (this.fuelCans <= 0) return false;
+    this.fuelCans--;
+    this._touch();
+    return true;
   }
 
   // ── Medkits ─────────────────────────────────────────────────────────────────

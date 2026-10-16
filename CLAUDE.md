@@ -87,13 +87,29 @@ See `DEPLOY.md`. The game goes on Vercel (`vercel.json`) and the relay on Render
 
 Four named `CANNON.Material` instances: `ground`, `character`, `static`, `monster`. Contact materials between them are registered at startup in `main.js`. All static world objects (houses, trees) use mass-0 bodies with the `static` material. Player uses a capsule compound body (two spheres + cylinder). Zombies also use capsule bodies but with zero friction on ground contact so steering remains direct.
 
-### Ground
+### Ground & landscape (`src/world/Terrain.js`, `Backdrop.js`, `Grass.js`, `Rocks.js`)
 
-Infinite tiled ground rendered as a chunked grid (`GROUND_CHUNK_SIZE = 48`). The chunk grid updates every frame based on player position; a single flat `CANNON.Plane` covers all physics. Grass texture is shared across all chunk meshes via a single `THREE.MeshStandardMaterial`.
+- **Terrain**: one seeded heightmap (`TERRAIN_STEP` 2.5 m over ±`TERRAIN_HALF` 330 m) of rolling hills, flattened (`pads`) under houses, props, spawn and the rickshaw's parking spot, rising into steep ridges past `EDGE_START`. `PLAY_RADIUS` (316 m) is a hard edge (`keepInBounds()`). Built in `loadWorld()` after the houses are placed, since it flattens itself under them. It feeds three things: cannon `Heightfield` tiles (`TILE_CELLS` cells each, so long rays stay cheap; they collide only with the player and projectiles), one render mesh (vertex-tinted by slope and height, shares `planeMaterial`), and a half-float texture (R = height, G = grass density) for GPU effects via `TERRAIN_GLSL` / `terrainUniforms`.
+- **`groundHeight(x, z)`** is the CPU lookup everything uses instead of y = 0: monsters (`_pinToGround`, spawns, `MonsterSync`, which sends height *above* the ground), pickups, fires and scorch marks, trees, debris, spawns and BR landing. Never assume flat ground.
+- **Backdrop**: the distant mountain ring and the sky dome live in their own scene, drawn first with a far camera; then the depth is cleared and the game scene is drawn with its 220 m far plane (`renderFrame()`, `renderer.autoClear = false`). The mountains are lit by uniforms copied from the day/night lights and hazed into the fog colour.
+- **Grass**: instanced tufts wrapped around the camera entirely on the GPU (like the rain), placed with the height texture, thinned by the density channel (none in houses or under props), swaying with `weather.wind`.
+- **Rocks**: instanced lumpy stones. Boulders (`BOULDER_COUNT`) have sphere colliders and `mapObstacles` entries and must stay identical on every quality preset; pebbles are decoration and scale with quality.
+
+### Auto-rickshaw (`src/vehicles/Rickshaw.js`)
+
+- Arcade driving (bicycle-model steering, no wheel physics). It follows the terrain by sampling `groundHeight` under its three wheels, and `solidAt()` in `main.js` stops it against `mapObstacles` (houses, trees, boulders, map edge). A kinematic box in `GROUP_VEHICLE` shoves players and monsters; bullets, the camera and loot checks ignore it (it's open-sided, so the driver can be shot).
+- **V** gets in/out (`toggleRickshaw`), W/S throttle/brake-reverse, A/D steer, Space handbrake. While driving, the player body is pinned to the seat (`rickshawAfterStep`), `collisionResponse` is off, weapons are disabled, `Soldier.seated` bends the legs, and the camera blends to the `drive` rig and swings in behind when the mouse is idle. Driving into monsters (or players, in the BR) damages them (`rickshawRunOver`).
+- **Petrol**: driving burns fuel (`RICKSHAW.burn`, `idleBurn`); an empty tank won't move. Petrol cans (`fuel` pickup, `inventory.fuelCans`, max 2) add `RICKSHAW.canFuel` with **T** next to it or while driving.
+- **Headlight**: a SpotLight + emissive lamp and tail lights, on at night while someone drives. Always in the scene (intensity 0 when off) so it never recompiles shaders.
+- **Sync**: the driver adds `veh: [x, z, yaw, speed, fuel]` to `st`; others `setRemote` and smooth. `vfuel` shares refuels; `world` carries the parked pose for late joiners. If two players get in at once the lower id keeps it. The BR resets it every round.
+
+### Graphics quality (`src/quality.js`)
+
+`QUALITY` is chosen once at startup: the lobby's Graphics picker (saved in localStorage; changing it reloads) or "auto", which detects the device (`navigator.deviceMemory`, cores, GPU name; software or 4 GB / 4-core machines get Low). Presets set antialiasing, pixel-ratio range for dynamic resolution, shadows (off / every other frame / every frame), grass, pebble, rain and mist counts, terrain render density, mountain detail and texture anisotropy. Only visual things may differ between presets: anything with a collider must be identical, or battle royale loot (placed by `isOpenGround`) would differ between players.
 
 ### World assets
 
-`loadWorld()` in `main.js` loads GLB/WRL models and registers them in `editableModels` via `createEditableModel()`. Each editable model gets a lil-gui folder for live position/rotation/scale tuning. The "Log Coordinates to Console" button prints JSON of all positions so they can be hardcoded.
+`loadWorld()` in `main.js` loads GLB/WRL models and registers them in `editableModels` via `createEditableModel()` (the autorickshaw GLB is the drivable vehicle instead). Each editable model gets a lil-gui folder for live position/rotation/scale tuning. The "Log Coordinates to Console" button prints JSON of all positions so they can be hardcoded.
 
 Scatter positions use a seeded LCG RNG (`makeLCG(0xdeadbeef)`) so the world layout is deterministic across reloads.
 
@@ -150,7 +166,9 @@ A rotating radar on a 2D canvas, top right. It draws zombies (pulsing when chasi
 - **AI distance tiers**: run full AI logic only for zombies within ~15 m; reduce update frequency at 15–40 m; skip or sleep at 80 m+.
 - **HUD DOM** — only update when the displayed value actually changes.
 - Shared geometry and materials across zombie instances; shared chunk geometry across ground tiles.
-- Shadow map is 1024×1024; shadow frustum tracks the player rather than being world-wide.
+- Shadow map is 1024×1024; shadow frustum tracks the player (or whoever you spectate, `focusPos`) rather than being world-wide.
+- Respect `QUALITY` (src/quality.js) for anything visual and costly; keep collider-bearing content identical across presets.
+- Anything placed on the ground uses `groundHeight(x, z)`; GPU effects sample the terrain texture with `TERRAIN_GLSL`.
 
 ## Asset paths
 

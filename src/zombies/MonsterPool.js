@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { groundHeight } from "../world/Terrain.js";
 import * as CANNON from "cannon-es";
 import { MD2Loader } from "three/addons/loaders/MD2Loader.js";
 import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
@@ -492,12 +493,13 @@ export class MonsterPools {
     this._resetAnimations(m);
     m.body.velocity.set(0, 0, 0);
     m.body.angularVelocity.set(0, 0, 0);
-    m.body.position.set(x, m.visualOffY + m.flyY, z);
+    const g = groundHeight(x, z);
+    m.body.position.set(x, g + m.visualOffY + m.flyY, z);
     this.orient(m);
     m.body.wakeUp();
     m.root.visible = true;
     m.root.rotation.set(0, THREE.MathUtils.degToRad(m.rotY), 0);
-    m.root.position.set(x, m.flyY, z);
+    m.root.position.set(x, g + m.flyY, z);
   }
 
   _deactivate(m) {

@@ -14,6 +14,7 @@ export const PLANE = {
   halfLength: 270,     // route runs from −halfLength to +halfLength along its line
   maxOffset: 70,       // how far the route may pass from the centre of the map
   jumpDelay: 1.5,      // seconds before the door opens
+  ejectRadius: 200,    // past the centre, everyone still aboard is pushed out here (well inside the first zone)
 };
 export const FREEFALL = {
   fall: 20, dive: 34,           // m/s down: normal / holding W
@@ -47,10 +48,10 @@ export const PVP_HEAD_Y = 1.45;
 /** Ground loot scattered over the map: kind → count. */
 export const BR_FIELD_LOOT = {
   pistol: 8, smg: 8, shotgun: 7, rifle: 7, sniper: 3,
-  ammo: 26, grenade: 12, molotov: 10, medkit: 16,
+  ammo: 26, grenade: 12, molotov: 10, medkit: 16, fuel: 8,
 };
 /** What a house spot can roll (weighted by repeats). */
-export const BR_HOUSE_LOOT = ["ammo", "ammo", "medkit", "medkit", "grenade", "molotov", "smg", "shotgun", "rifle", "pistol", "sniper"];
+export const BR_HOUSE_LOOT = ["ammo", "ammo", "medkit", "medkit", "grenade", "molotov", "smg", "shotgun", "rifle", "pistol", "sniper", "fuel"];
 export const BR_LOOT_RADIUS = 200;
 /** Spare rounds that come with a gun found on the ground. */
 export const BR_GUN_RESERVE = { pistol: 24, smg: 64, shotgun: 10, rifle: 45, sniper: 6 };

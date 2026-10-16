@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { terrainUniforms, TERRAIN_GLSL } from "./Terrain.js";
 
 // Mood: low ground mist that drifts around the player, and burning wrecks
 // that pour smoke into the sky. Like FireFX, every particle's motion comes
@@ -39,6 +40,7 @@ function makePuff(seed) {
 }
 
 const MIST_VERT = /* glsl */ `
+  ${TERRAIN_GLSL}
   attribute vec4 aRand;    // x, z (0..1), size, phase
   uniform float uTime;
   uniform vec3 uCam;
@@ -50,7 +52,7 @@ const MIST_VERT = /* glsl */ `
     wp -= ${MIST_BOX.toFixed(1)} * floor((wp - uCam.xz) / ${MIST_BOX.toFixed(1)} + 0.5);
     float w = 7.0 + aRand.z * 9.0;
     float h = w * 0.38;
-    vec3 base = vec3(wp.x, -0.4 + sin(uTime * 0.2 + aRand.w * 6.28) * 0.15, wp.y);
+    vec3 base = vec3(wp.x, terrainH(wp) - 0.4 + sin(uTime * 0.2 + aRand.w * 6.28) * 0.15, wp.y);
     // Billboard around the vertical axis so banks stay on the ground
     vec3 toCam = cameraPosition - base;
     vec3 side = normalize(vec3(toCam.z, 0.0, -toCam.x));
@@ -136,7 +138,8 @@ const FLAME_FRAG = /* glsl */ `
 const PLUME_VERT_FOG = "#include <fog_pars_vertex>\n" + PLUME_VERT;
 
 export class Atmosphere {
-  constructor(scene) {
+  /** mist: how many mist banks (quality setting). */
+  constructor(scene, mist = MIST_COUNT) {
     this.scene = scene;
     this.time = { value: 0 };
     const puff = makePuff(7);
@@ -147,12 +150,13 @@ export class Atmosphere {
     mistGeo.index = plane.index;
     mistGeo.setAttribute("position", plane.getAttribute("position"));
     mistGeo.setAttribute("uv", plane.getAttribute("uv"));
-    const r = new Float32Array(MIST_COUNT * 4);
+    const r = new Float32Array(mist * 4);
     for (let i = 0; i < r.length; i++) r[i] = Math.random();
     mistGeo.setAttribute("aRand", new THREE.InstancedBufferAttribute(r, 4));
-    mistGeo.instanceCount = MIST_COUNT;
+    mistGeo.instanceCount = mist;
     this.mistMat = new THREE.ShaderMaterial({
       uniforms: {
+        ...terrainUniforms,
         uTime: this.time,
         uCam: { value: new THREE.Vector3() },
         uDrift: { value: new THREE.Vector2(0.35, 0.12) },

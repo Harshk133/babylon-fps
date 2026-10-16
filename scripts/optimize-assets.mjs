@@ -21,7 +21,7 @@ import sharp from "sharp";
 const MODELS = [
   { src: "public/trees/old_tree_with_vine_3d_model_free.glb", ratio: 0.04, error: 0.03, tex: 1024, prune: true },
   { src: "public/trees/dreftwood tree.glb",                   ratio: 0.06, error: 0.03, tex: 1024, prune: true },
-  { src: "public/models/autorickshaw_3d_model_free.glb",      ratio: 0.1,  error: 0.01, tex: 1024 },
+  { src: "public/models/autorickshaw_3d_model_free.glb",      ratio: 0.02, error: 0.02, tex: 1024, prune: true }, // dense AI-made triangle soup: ~20k triangles is plenty for a vehicle
   { src: "public/models/rusty_roof_wooden_house_1_3d_model_free.glb", ratio: 0.5, error: 0.004, tex: 1024 },
   { src: "public/models/dragon_gold.glb",                     ratio: 0.5,  error: 0.004, tex: 1024 },
   // Hellhound: already low-poly; just WebP + quantize + meshopt

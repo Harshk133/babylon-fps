@@ -152,6 +152,18 @@ const BUILDERS = {
     return g;
   },
 
+  // Jerrycan: red body, three-bar handle, angled spout
+  fuel: () => {
+    const g = new THREE.Group();
+    box(g, 0.26, 0.32, 0.12,   MAT.red,     0, 0, 0);
+    box(g, 0.262, 0.02, 0.122, MAT.metal,   0, 0.09, 0);
+    box(g, 0.262, 0.02, 0.122, MAT.metal,   0, -0.09, 0);
+    for (const x of [-0.08, 0, 0.08]) box(g, 0.02, 0.06, 0.02, MAT.metal, x, 0.19, 0);
+    box(g, 0.2, 0.02, 0.03,    MAT.metal,   0, 0.22, 0);
+    part(g, cylGeo(0.022, 0.03, 0.09, false), MAT.polymer, 0.1, 0.2, 0, -0.6);
+    return g;
+  },
+
   medkit: () => {
     const g = new THREE.Group();
     box(g, 0.28, 0.18, 0.1,   MAT.white, 0, 0, 0);

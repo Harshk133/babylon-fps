@@ -141,6 +141,18 @@
     <!-- Inventory screen (Tab) -->
     <div id="inventory"></div>
 
+    <!-- Auto-rickshaw gauge (while driving) -->
+    <div id="vehicle-hud">
+      <div class="veh-title">AUTO-RICKSHAW</div>
+      <div class="veh-speed"><span id="veh-speed">0</span><small>km/h</small></div>
+      <div class="veh-fuel">
+        <span class="veh-fuel-label">PETROL</span>
+        <div class="veh-fuel-track"><div id="veh-fuel-fill"></div></div>
+        <span id="veh-fuel-val">0%</span>
+      </div>
+      <div class="veh-keys"><kbd>W</kbd><kbd>S</kbd> drive <kbd>A</kbd><kbd>D</kbd> steer <kbd>Space</kbd> brake <kbd>T</kbd> petrol <kbd>V</kbd> out</div>
+    </div>
+
     <!-- Squad (co-op teammates) -->
     <div id="squad"></div>
 
@@ -151,6 +163,14 @@
         <p class="lobby-sub">Choose your fight</p>
         <label class="lobby-field"><span>Your name</span><input id="lobby-name" maxlength="16" placeholder="Survivor" autocomplete="off" spellcheck="false"></label>
         <label class="lobby-field"><span>Room code</span><input id="lobby-room" maxlength="24" placeholder="horde" autocomplete="off" spellcheck="false"></label>
+        <label class="lobby-field"><span>Graphics</span>
+          <select id="lobby-quality">
+            <option value="auto">Auto</option>
+            <option value="low">Low: old PCs, 4 GB RAM, integrated graphics</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+        </label>
         <div class="lobby-modes">
           <button id="lobby-solo" class="lobby-mode">
             <span class="mode-name">Solo</span>
@@ -189,6 +209,8 @@
         <div><kbd>H</kbd><span>Use medkit</span></div>
         <div><kbd>O</kbd>/<kbd>C</kbd><span>Open / close door</span></div>
         <div><kbd>L</kbd><span>Light switch</span></div>
+        <div><kbd>V</kbd><span>Drive / leave the auto-rickshaw</span></div>
+        <div><kbd>T</kbd><span>Fill the rickshaw with a petrol can</span></div>
         <div><kbd>F</kbd><span>Flashlight</span></div>
         <div><kbd>Tab</kbd><span>Inventory</span></div>
         <div><kbd>Esc</kbd><span>Pause</span></div>

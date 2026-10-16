@@ -13,6 +13,7 @@ const CAT_COLOR = {
   ammo:      "#ffe066",
   throwable: "#ff5a3a",
   medkit:    "#4dff88",
+  fuel:      "#37e0c8",
 };
 
 export class Minimap {

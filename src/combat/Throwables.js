@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { groundHeight } from "../world/Terrain.js";
 import * as CANNON from "cannon-es";
 import { cloneItem } from "../items/ItemModels.js";
 import { GROUP_WORLD, GROUP_ZOMBIE, GROUP_PROJECTILE, GROUP_NONE } from "../physicsGroups.js";
@@ -177,7 +178,8 @@ export class Throwables {
     f.born = performance.now();
     f.owner = owner;
     f.hostile = hostile;
-    f.scorch.position.set(x, 0.02, z);
+    const g = groundHeight(x, z);
+    f.scorch.position.set(x, g + 0.06, z);
     f.scorch.material.opacity = 0.4;
     this.fireFX.ground(x, z, MOLOTOV.radius, MOLOTOV.duration);
 
@@ -189,7 +191,7 @@ export class Throwables {
       oldest.light = null;
     }
     f.light = light;
-    light.position.set(x, 1.2, z);
+    light.position.set(x, g + 1.2, z);
 
     if (hostile) return;
     this.sfx.glassBreak();
@@ -222,13 +224,13 @@ export class Throwables {
         // Burning rag trail
         _v.set(0, 0.18 * ITEM_SCALE, 0).applyQuaternion(p.holder.quaternion).add(p.holder.position);
         this.effects.flame(_v.x, _v.y, _v.z, (Math.random() - 0.5) * 0.4, 0.6, (Math.random() - 0.5) * 0.4, 0.25);
-        if (p.shatter || p.age > MOLOTOV.maxFlight || b.position.y < -1) {
+        if (p.shatter || p.age > MOLOTOV.maxFlight || b.position.y < groundHeight(b.position.x, b.position.z) - 1) {
           const x = b.position.x, z = b.position.z, hit = p.hitZombie, owner = p.owner;
           this._deactivate(p);
           this._ignite(x, z, hit, owner);
         }
       } else if (p.age >= GRENADE.fuse) {
-        _v.set(b.position.x, Math.max(0.1, b.position.y), b.position.z);
+        _v.set(b.position.x, Math.max(groundHeight(b.position.x, b.position.z) + 0.1, b.position.y), b.position.z);
         const owner = p.owner;
         this._deactivate(p);
         this.effects.explosion(_v);

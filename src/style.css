@@ -2007,6 +2007,12 @@ body.mode-br #boss-bar { display: none !important; }
 }
 
 #br-spec.on { display: flex; }
+#br-spec { white-space: nowrap; }
+@media (max-width: 760px) {
+  #br-spec { gap: 8px; font-size: 16px; }
+  .br-spec-name { font-size: 20px; }
+  .br-spec-keys { display: none; }
+}
 .br-spec-label { color: var(--bone-dim); }
 .br-spec-name { font-size: 26px; font-weight: 600; }
 .br-spec-keys { font-size: 15px; color: var(--bone-dim); }
@@ -2101,3 +2107,52 @@ body.mode-br #boss-bar { display: none !important; }
   width: min(440px, calc(100vw - 52px), calc(100vh - 90px));
   height: min(440px, calc(100vw - 52px), calc(100vh - 90px));
 }
+
+/* ── Graphics quality picker (lobby) ──────────────────────────────────────── */
+.lobby-field select {
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  outline: none;
+}
+.lobby-field select:focus { border-color: #e2a42b; }
+.lobby-field option { color: #111; }
+
+/* ── Auto-rickshaw gauge ──────────────────────────────────────────────────── */
+#vehicle-hud {
+  position: fixed;
+  left: 18px;
+  bottom: 140px;
+  z-index: 110;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 210px;
+  padding: 8px 12px 9px;
+  font-family: var(--font-hud);
+  color: #fff;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-left: 3px solid #37e0c8;
+  border-radius: 4px;
+  pointer-events: none;
+  user-select: none;
+}
+#vehicle-hud.visible { display: flex; }
+.veh-title { font-size: 15px; letter-spacing: 0.25em; color: var(--bone-dim); }
+.veh-speed { font-size: 40px; line-height: 0.9; font-weight: 600; }
+.veh-speed small { margin-left: 6px; font-size: 16px; color: var(--bone-dim); }
+.veh-fuel { display: flex; align-items: center; gap: 8px; font-size: 16px; letter-spacing: 0.12em; }
+.veh-fuel-track { flex: 1; height: 8px; background: rgba(255, 255, 255, 0.12); border-radius: 2px; }
+#veh-fuel-fill { height: 100%; background: #37e0c8; border-radius: 2px; transform-origin: left; }
+#vehicle-hud.low #veh-fuel-fill { background: #ff4b3a; }
+#vehicle-hud.low #veh-fuel-val { color: #ff6a5a; animation: pulse 1s ease-in-out infinite; }
+.veh-keys { font-family: "Segoe UI", system-ui, sans-serif; font-size: 11px; color: var(--bone-dim); }
+.veh-keys kbd { font-size: 10px; }
+
+.feed-fuel { border-right-color: #37e0c8; }

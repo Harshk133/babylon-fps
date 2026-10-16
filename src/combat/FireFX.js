@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { groundHeight } from "../world/Terrain.js";
 
 // GPU fire + smoke in the style of three.js' webgpu_particles example, written
 // for WebGLRenderer. Every particle's life (rise, drift, spin, grow, colour,
@@ -362,7 +363,7 @@ export class FireFX {
   ground(x, z, radius, duration) {
     const e = this._acquire("ground");
     e.time = duration;
-    e.setCenter(x, 0.02, z);
+    e.setCenter(x, groundHeight(x, z) + 0.02, z);
     e.setShape(radius * 0.92, this.pools.ground[0].preset.height);
     e.setStrength(0);
     e.fadeIn = 0;

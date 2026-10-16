@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { PICKUP_KINDS } from "../combat/weapons.js";
+import { groundHeight } from "../world/Terrain.js";
 import { cloneItem, getItemTemplate } from "../items/ItemModels.js";
 
 const HIDE_Y          = -500;
@@ -15,6 +16,7 @@ const CATEGORY_COLOR = {
   ammo:      0xffe066,
   throwable: 0xff5a3a,
   medkit:    0x4dff88,
+  fuel:      0x37e0c8,
 };
 
 function makeBeamTexture() {
@@ -120,7 +122,7 @@ export class Pickups {
     entry.id = id;
     if (id !== null) this.byId.set(id, entry);
     entry.phase = Math.random() * Math.PI * 2;
-    entry.root.position.set(x, 0, z);
+    entry.root.position.set(x, groundHeight(x, z), z);
     entry.root.visible = true;
     entry.spinner.rotation.y = entry.phase;
     this.active.push(entry);

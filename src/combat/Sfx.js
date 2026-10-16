@@ -516,6 +516,76 @@ export class Sfx {
     if (q(rush) !== l.rush) { l.rush = q(rush); f.rush.gain.setTargetAtTime(l.rush * 0.35, t, 0.25); }
   }
 
+  // ── Auto-rickshaw: a putt-putt two-stroke ───────────────────────────────────
+
+  _startEngine() {
+    const ctx = this.ctx;
+    const e = this.engine = { last: { vol: -1, rpm: -1 } };
+    // A square wave pulsed by a slower square = the uneven two-stroke beat
+    e.osc = ctx.createOscillator();
+    e.osc.type = "sawtooth";
+    e.osc.frequency.value = 42;
+    e.pulse = ctx.createOscillator();
+    e.pulse.type = "square";
+    e.pulse.frequency.value = 21;
+    const pulseGain = ctx.createGain();
+    pulseGain.gain.value = 0.45;
+    const amp = ctx.createGain();
+    amp.gain.value = 0.55;
+    e.pulse.connect(pulseGain).connect(amp.gain);
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 520;
+    e.lp = lp;
+    e.gain = ctx.createGain();
+    e.gain.gain.value = 0;
+    e.osc.connect(amp).connect(lp).connect(e.gain).connect(this.master);
+    // Exhaust rasp
+    const rasp = this._loopNoise(2.1);
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 260;
+    bp.Q.value = 1.2;
+    const raspGain = ctx.createGain();
+    raspGain.gain.value = 0.35;
+    rasp.connect(bp).connect(raspGain).connect(amp);
+    e.osc.start();
+    e.pulse.start();
+    rasp.start();
+  }
+
+  /** vol: 0 off … 1 close by; rpm: 0 idle … 1 flat out. Cheap to call every frame. */
+  setRickshaw(vol, rpm) {
+    if (!this.ctx) return;
+    if (!this.engine) {
+      if (vol <= 0) return;
+      this._startEngine();
+    }
+    const e = this.engine, l = e.last, t = this.ctx.currentTime;
+    const q = v => Math.round(v * 40) / 40;
+    if (q(vol) !== l.vol) { l.vol = q(vol); e.gain.gain.setTargetAtTime(l.vol * 0.22, t, 0.15); }
+    if (q(rpm) !== l.rpm) {
+      l.rpm = q(rpm);
+      e.osc.frequency.setTargetAtTime(38 + l.rpm * 70, t, 0.12);
+      e.pulse.frequency.setTargetAtTime(19 + l.rpm * 35, t, 0.12);
+      e.lp.frequency.setTargetAtTime(450 + l.rpm * 900, t, 0.12);
+    }
+  }
+
+  /** Glugging petrol into the tank. */
+  refuel() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    for (let i = 0; i < 5; i++) this._noise(t + i * 0.13, 0.12, "bandpass", 700 - i * 60, 300, 0.35);
+  }
+
+  /** The engine coughing on an empty tank. */
+  sputter() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    for (let i = 0; i < 3; i++) this._noise(t + i * 0.16, 0.08, "lowpass", 600, 120, 0.4);
+  }
+
   /** The canopy snapping open. */
   chuteOpen() {
     if (!this.ctx) return;

@@ -68,6 +68,9 @@ export const THROWABLE_ORDER = ["grenade", "molotov"];
 
 export const MEDKIT = { name: "Medkit", max: 3, start: 0, heal: 50 };
 
+// Petrol for the auto-rickshaw: carried, poured in with T next to it (or while driving)
+export const FUEL_CAN = { name: "Petrol Can", max: 2 };
+
 // Grenade / molotov tuning
 export const GRENADE = {
   fuse: 2.2,
@@ -103,4 +106,5 @@ export const PICKUP_KINDS = {
   grenade: { category: "throwable", label: "Frag Grenade",   scale: 2.2 },
   molotov: { category: "throwable", label: "Molotov",        scale: 1.8 },
   medkit:  { category: "medkit",    label: "Medkit",         scale: 1.4 },
+  fuel:    { category: "fuel",      label: "Petrol Can",     scale: 1.6 },
 };

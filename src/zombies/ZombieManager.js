@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { groundHeight } from "../world/Terrain.js";
 import * as CANNON from "cannon-es";
 import { MonsterPools } from "./MonsterPool.js";
 import { ENEMY_GUNS } from "./MonsterTypes.js";
@@ -374,7 +375,7 @@ export class ZombieManager {
         peripheral = 0.35; // something moved at the edge of vision
       }
     }
-    _eyeFrom.set(p.x, m.flyY + def.height * 0.85, p.z);
+    _eyeFrom.set(p.x, m.root.position.y + def.height * 0.85, p.z);
     _eyeTo.set(pp.x, pp.y + 0.4, pp.z);
     _eyeRes.reset();
     if (this.world.raycastClosest(_eyeFrom, _eyeTo, losOpts, _eyeRes)) return 0;
@@ -747,10 +748,10 @@ export class ZombieManager {
     const fx = Math.sin(r), fz = Math.cos(r);
     const p = m.body.position;
     const mz = m.def.muzzle;
-    if (mz) return out.set(p.x + fx * mz.z, m.flyY + mz.y, p.z + fz * mz.z); // mouth (dragon)
+    if (mz) return out.set(p.x + fx * mz.z, m.root.position.y + mz.y, p.z + fz * mz.z); // mouth (dragon)
     const s = m.height / 2.43;
     // Gun sits forward and to the monster's right, at chest height
-    return out.set(p.x + fx * 0.55 * s - fz * 0.22 * s, m.height * 0.6, p.z + fz * 0.55 * s + fx * 0.22 * s);
+    return out.set(p.x + fx * 0.55 * s - fz * 0.22 * s, m.root.position.y + m.height * 0.6, p.z + fz * 0.55 * s + fx * 0.22 * s);
   }
 
   _updateChaseRanged(m, delta) {
@@ -877,14 +878,15 @@ export class ZombieManager {
     }
     const body = m.body;
     body.velocity.set(0, 0, 0);
-    body.position.y = m.visualOffY;
+    const g = groundHeight(body.position.x, body.position.z);
+    body.position.y = g + m.visualOffY;
     let lift = 0;
     if (m.deathStyle) {
       lift = this._proceduralDeath(m, delta);
       if (m.flyY > 0) m.dieTimer = 0; // the corpse timer starts when it lands
     }
     const sink = THREE.MathUtils.clamp((m.dieTimer - CORPSE_HOLD_TIME) / CORPSE_SINK_TIME, 0, 1);
-    m.root.position.set(body.position.x, m.flyY + lift - sink * CORPSE_SINK_DEPTH * (m.height / 2.43), body.position.z);
+    m.root.position.set(body.position.x, g + m.flyY + lift - sink * CORPSE_SINK_DEPTH * (m.height / 2.43), body.position.z);
     m.root.rotation.y = THREE.MathUtils.degToRad(m.rotY);
     return m.dieTimer >= CORPSE_HOLD_TIME + CORPSE_SINK_TIME;
   }
@@ -915,14 +917,15 @@ export class ZombieManager {
     return Math.abs(Math.sin(m.root.rotation.z)) * m.capRadius * 0.45;
   }
 
-  // Monsters walk on flat ground only; pinning Y means no amount of crowd
-  // pressure can lift one onto the player or another monster. Flyers hold
-  // their altitude (flyY) the same way.
+  // Monsters walk on the terrain surface (groundHeight); pinning Y means no
+  // amount of crowd pressure can lift one onto the player or another monster.
+  // Flyers hold their altitude (flyY) above the ground the same way.
   _pinToGround(m) {
     const body = m.body;
-    body.position.y = m.visualOffY + m.flyY;
+    const g = groundHeight(body.position.x, body.position.z);
+    body.position.y = g + m.visualOffY + m.flyY;
     body.velocity.y = 0;
-    m.root.position.set(body.position.x, m.flyY, body.position.z);
+    m.root.position.set(body.position.x, g + m.flyY, body.position.z);
     m.root.rotation.y = THREE.MathUtils.degToRad(m.rotY);
     m.root.rotation.z = m.bank;
     this.pool.orient(m);
@@ -951,7 +954,7 @@ export class ZombieManager {
     if (!show) return;
     m.marker.material = this.pool.markerMats[char];
     const bob = char === "!" ? Math.sin(m.markerTimer * 18) * 0.06 : 0;
-    m.marker.position.set(m.body.position.x, m.flyY + m.height + 0.45 + bob, m.body.position.z);
+    m.marker.position.set(m.body.position.x, m.root.position.y + m.height + 0.45 + bob, m.body.position.z);
     const s = (char === "!" ? 0.7 : 0.5) * Math.max(1, m.distXZ / 18);
     m.marker.scale.set(s, s, s);
   }

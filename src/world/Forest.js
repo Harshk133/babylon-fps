@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { groundHeight } from "./Terrain.js";
 import * as CANNON from "cannon-es";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
@@ -109,7 +110,7 @@ export function plantDeadForest({
     mesh.count = list.length;
     list.forEach((p, i) => {
       const s = p.h / variant.height;
-      pos.set(p.x, 0, p.z);
+      pos.set(p.x, groundHeight(p.x, p.z) - 0.15, p.z);
       quat.setFromEuler(eul.set(p.tx, p.rot, p.tz));
       scl.set(s * (0.9 + (i % 3) * 0.08), s, s * (0.9 + ((i + 1) % 3) * 0.08));
       mesh.setMatrixAt(i, m4.compose(pos, quat, scl));
@@ -132,7 +133,7 @@ export function plantDeadForest({
     const trunkH = BASE_HEIGHT * 0.45 * s;
     const body = new CANNON.Body({ mass: 0, material });
     body.addShape(new CANNON.Cylinder(r * 0.8, r, trunkH, 8), new CANNON.Vec3(0, trunkH / 2, 0));
-    body.position.set(p.x, 0, p.z);
+    body.position.set(p.x, groundHeight(p.x, p.z) - 0.15, p.z);
     world.addBody(body);
     mapObstacles.push({ type: "circle", x: p.x, z: p.z, r: Math.max(0.6, r * 1.6) });
   }

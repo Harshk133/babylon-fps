@@ -71,6 +71,7 @@ export class Soldier {
     this.aimWeight = 0;
     this.shootWeight = 0;
     this.dead = false;
+    this.seated = false;         // driving: thighs forward, shins down
 
     this._chestRef = new THREE.Quaternion(); // chest orientation (root-local) when aiming dead ahead
     this._spineDelta = new THREE.Quaternion();
@@ -98,6 +99,7 @@ export class Soldier {
     this.chest   = model.getObjectByName("Chest");
     this.hand    = model.getObjectByName("WristR");
     this.palm    = model.getObjectByName("Middle1R");
+    this.legs = ["UpperLeg.L", "UpperLeg.R", "LowerLeg.L", "LowerLeg.R"].map(n => model.getObjectByName(n));
 
     const upperBones = new Set();
     this.abdomen.traverse(o => upperBones.add(o.name));
@@ -284,6 +286,22 @@ export class Soldier {
     this.mixer.update(delta);
 
     if (!s.noSpine) this._applySpineAim(s.aimYawOffset, s.aimPitch);
+    if (this.seated && !this.dead) this._applySeat();
+  }
+
+  // Sitting: swing both thighs forward about the body's side axis, then the shins back down
+  _applySeat() {
+    const [ul, ur, ll, lr] = this.legs;
+    if (!ul || !ll) return;
+    this.root.updateMatrixWorld(true);
+    this.root.getWorldQuaternion(_q2);
+    _v0.copy(_axisX).applyQuaternion(_q2);
+    _qStep.setFromAxisAngle(_v0, -1.45);
+    rotateBoneInWorld(ul, _qStep);
+    rotateBoneInWorld(ur, _qStep);
+    _qStep.setFromAxisAngle(_v0, 1.5);
+    rotateBoneInWorld(ll, _qStep);
+    rotateBoneInWorld(lr, _qStep);
   }
 
   _applyWeights() {

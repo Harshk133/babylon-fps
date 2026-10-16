@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { groundHeight } from "../world/Terrain.js";
 import * as CANNON from "cannon-es";
 import { GROUP_WORLD, GROUP_PLAYER } from "../physicsGroups.js";
 
@@ -250,7 +251,7 @@ export class EnemyFire {
       _from.set(_a.x, _a.y, _a.z);
       _to.set(_b.x, _b.y, _b.z);
       _res.reset();
-      if (_b.y < 0.05 || this.world.raycastClosest(_from, _to, wallOpts, _res)) {
+      if (_b.y < groundHeight(_b.x, _b.z) + 0.05 || this.world.raycastClosest(_from, _to, wallOpts, _res)) {
         if (_res.hasHit) b.pos.set(_res.hitPointWorld.x, _res.hitPointWorld.y, _res.hitPointWorld.z);
         this._endBolt(b, true);
         continue;

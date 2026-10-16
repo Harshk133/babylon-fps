@@ -1,4 +1,4 @@
-import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, MEDKIT } from "../combat/weapons.js";
+import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, MEDKIT, FUEL_CAN } from "../combat/weapons.js";
 
 const FEED_LIFE = 2600; // ms
 const fmtReserve = r => (r === Infinity ? "∞" : `${r}`);
@@ -81,6 +81,14 @@ export class InventoryUI {
     med.append(medIcon, medCount, el("kbd", "hb-kbd", "H"));
     itemsRow.append(med);
     this.medSlot = { slot: med, count: medCount, cache: {} };
+    const fuel = el("div", "hb-tslot hb-fuel");
+    const fuelIcon = el("img", "hb-ticon");
+    fuelIcon.src = this.icons.fuel;
+    fuelIcon.alt = FUEL_CAN.name;
+    const fuelCount = el("span", "hb-count", "0");
+    fuel.append(fuelIcon, fuelCount, el("kbd", "hb-kbd", "T"));
+    itemsRow.append(fuel);
+    this.fuelSlot = { slot: fuel, count: fuelCount, cache: {} };
 
     const hints = el("div", "hb-hints");
     hints.innerHTML = "<kbd>G</kbd> throw <kbd>Q</kbd> switch <kbd>Tab</kbd> inventory";
@@ -111,6 +119,8 @@ export class InventoryUI {
     }
     setText(this.medSlot.count, this.medSlot.cache, "n", `${inv.medkits}`);
     setClass(this.medSlot.slot, this.medSlot.cache, "empty", "empty", inv.medkits === 0);
+    setText(this.fuelSlot.count, this.fuelSlot.cache, "n", `${inv.fuelCans}`);
+    setClass(this.fuelSlot.slot, this.fuelSlot.cache, "empty", "empty", inv.fuelCans === 0);
 
     if (this.open) this._renderPanel();
   }
@@ -260,6 +270,14 @@ export class InventoryUI {
         </div>
       </div>`;
 
-    this.itemsEl.innerHTML = throwCards + medCard;
+    const fuelCard = `
+      <div class="inv-card item">
+        <div class="card-top"><span class="card-name">${FUEL_CAN.name}</span></div>
+        <img class="card-icon small" src="${this.icons.fuel}" alt="">
+        <div class="card-count"><b>${inv.fuelCans}</b> / ${FUEL_CAN.max}</div>
+        <p class="card-desc">Petrol for the auto-rickshaw. Press <kbd>T</kbd> next to it (or while driving) to fill up.</p>
+      </div>`;
+
+    this.itemsEl.innerHTML = throwCards + medCard + fuelCard;
   }
 }

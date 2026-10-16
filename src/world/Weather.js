@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { terrainUniforms, TERRAIN_GLSL } from "./Terrain.js";
 
 // Rain, splashes and storms. All drops live on the GPU: each is a streak
 // whose fall, wrap-around-the-camera and wind slant come from one time
@@ -68,6 +69,7 @@ const RAIN_FRAG = /* glsl */ `
 `;
 
 const SPLASH_VERT = /* glsl */ `
+  ${TERRAIN_GLSL}
   attribute vec4 aRand;
   uniform float uTime, uIntensity;
   uniform vec3 uCam;
@@ -83,7 +85,7 @@ const SPLASH_VERT = /* glsl */ `
     vec2 r = vec2(h(aRand.xy + cyc), h(aRand.yx * 1.7 + cyc * 1.3)) - 0.5;
     vec2 c = uCam.xz + r * ${SPLASH_BOX.toFixed(1)};
     float size = 0.05 + k * 0.32;
-    vec3 p = vec3(c.x + position.x * size, 0.03, c.y + position.y * size);
+    vec3 p = vec3(c.x + position.x * size, terrainH(c) + 0.05, c.y + position.y * size);
     gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
     vUv = uv;
     vAlpha = (1.0 - k) * (1.0 - k);
@@ -115,7 +117,8 @@ function instancedQuad(count, randFn, plane) {
 }
 
 export class Weather {
-  constructor(scene, startState = "overcast") {
+  /** drops: rain streak count (quality setting). */
+  constructor(scene, startState = "overcast", drops = DROPS) {
     this.state = startState;
     this.stateTimer = 50;
     this.rain = 0;
@@ -132,7 +135,7 @@ export class Weather {
 
     // Streaks: unit quad x ∈ [-.5, .5], y ∈ [0, 1] (head → tail)
     const streak = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0);
-    const rainGeo = instancedQuad(DROPS, (a, i, f) => {
+    const rainGeo = instancedQuad(drops, (a, i, f) => {
       a[i] = Math.random(); a[i + 1] = Math.random(); a[i + 2] = Math.random(); a[i + 3] = f;
     }, streak);
     this.common = {
@@ -163,7 +166,7 @@ export class Weather {
       a[i] = Math.random() * 100; a[i + 1] = Math.random(); a[i + 2] = Math.random(); a[i + 3] = f;
     }, flat);
     this.splashMat = new THREE.ShaderMaterial({
-      uniforms: { ...this.common, uColor: { value: new THREE.Color(0xc8d0dc) }, uOpacity: { value: 0.35 } },
+      uniforms: { ...this.common, ...terrainUniforms, uColor: { value: new THREE.Color(0xc8d0dc) }, uOpacity: { value: 0.35 } },
       vertexShader: SPLASH_VERT,
       fragmentShader: SPLASH_FRAG,
       transparent: true,
