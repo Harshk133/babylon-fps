@@ -345,13 +345,20 @@ export class Houses {
       }
     }
 
-    // Merge everything static into one mesh per material
+    // Merge everything static into one mesh per material. The Furniture Kit's
+    // flat-coloured materials (rough, untextured, opaque) differ only in colour:
+    // that colour goes into the vertices and they all share one material, so a
+    // house is ~4 draw calls instead of ~14, and looks exactly the same.
+    this.furnitureMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
+    const flat = m => m.isMeshStandardMaterial && !m.map && !m.transparent && m.roughness === 1 && m.metalness === 0
+      && (!m.emissive || m.emissive.getHex() === 0);
     layout.updateMatrixWorld(true);
     const groups = new Map();
     layout.traverse(o => {
       if (!o.isMesh) return;
       const isGlass = /ignore/i.test(o.name) || /ignore/i.test(o.parent?.name ?? "");
-      const mat = isGlass ? this.glassMat : o.material;
+      const baked = !isGlass && flat(o.material);
+      const mat = isGlass ? this.glassMat : baked ? this.furnitureMat : o.material;
       // Plain floats first: kit pieces from different exports store vertices in
       // different (quantized) formats, which neither merge nor transform cleanly
       const g = new THREE.BufferGeometry();
@@ -364,6 +371,11 @@ export class Houses {
       }
       if (o.geometry.index) g.setIndex(Array.from(o.geometry.index.array));
       g.applyMatrix4(o.matrixWorld);
+      if (baked) {
+        const n = g.attributes.position.count, col = new Float32Array(n * 3), c = o.material.color;
+        for (let i = 0; i < n; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
+        g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+      }
       if (!g.attributes.normal) g.computeVertexNormals();
       if (!g.attributes.uv) g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
       if (!g.index) g.setIndex([...Array(g.attributes.position.count).keys()]);

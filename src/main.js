@@ -52,6 +52,7 @@ import { Pickups } from "./pickups/Pickups.js";
 import { renderItemIcon } from "./items/ItemModels.js";
 import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
 import { STANCES, setCapsuleStance } from "./player/Stance.js";
+import { PerfOverlay, PERF_ENABLED, BENCH_ENABLED } from "./debug/PerfOverlay.js";
 import { GROUP_WORLD, GROUP_PLAYER, GROUP_ZOMBIE } from "./physicsGroups.js";
 
 // ─── Game mode ────────────────────────────────────────────────────────────────
@@ -474,7 +475,8 @@ function updateDynamicResolution(frameMs, logicMs) {
   perf.logic += (Math.min(logicMs, 100) - perf.logic) * 0.05;
   const cpuBound = perf.logic > perf.avg * 0.6;
   // Frame budget: 60 FPS, or 30 when a phone is capped there (a capped frame isn't a slow one)
-  const budget = touch?.settings.fps === "30" ? 1000 / 30 : 1000 / 60;
+  const budget = 1000 / frameCap();
+  updateAutoFps(frameMs);
   if (perf.avg > budget * 1.2 && !cpuBound) { perf.slow += frameMs; perf.fast = 0; }
   else if (perf.avg < budget * 0.84) { perf.fast += frameMs; perf.slow = 0; }
   else { perf.slow = 0; perf.fast = 0; }
@@ -805,7 +807,7 @@ const input = { fire: false, aim: false, firePressed: false };
 let touchPlaying = false;
 // mapHoldsPlay: the big map has freed the mouse on desktop, but the game is still on
 let mapHoldsPlay = false;
-const isLocked = () => touchPlaying || mapHoldsPlay || document.pointerLockElement === canvas;
+const isLocked = () => touchPlaying || mapHoldsPlay || bench.on || document.pointerLockElement === canvas;
 
 const SLOT_KEYS = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4, Digit5: 5 };
 
@@ -901,7 +903,7 @@ function onLockChange() {
   hud.paused = !isLocked();
   // The first level starts when you first click into the game
   // (co-op clients follow the host's levels instead)
-  if (isLocked() && director && director.state === "idle" && !net.isClient && !isBR()) director.start(1);
+  if (isLocked() && director && director.state === "idle" && !net.isClient && !isBR() && !bench.on) director.start(1);
 }
 document.addEventListener("pointerlockchange", onLockChange);
 document.addEventListener("mousemove", e => {
@@ -2430,17 +2432,22 @@ async function loadWorld() {
 
   // Fetch and parse everything at once instead of one model after another
   // (the dragon and the hellhound are monsters now: MonsterPool loads them)
-  const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf] = await Promise.all([
+  const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf, treeALod, treeBLod] = await Promise.all([
     settle(loadGLB("/models/autorickshaw_3d_model_free.glb")),
     settle(vrmlLoader.loadAsync("/models/house.wrl")),
     // ?v=: bump when the kit changes (/models is cached for a day, a stale kit would miss pieces)
     gltfLoader.loadAsync("/models/house/house-kit.glb?v=2"),
     loadGLB("/trees/old_tree_with_vine_3d_model_free.glb"),
     loadGLB("/trees/dreftwood tree.glb"),
+    // Far-away versions (~20% of the triangles), made by `npm run optimize-assets`
+    settle(gltfLoader.loadAsync("/trees/old_tree_with_vine_3d_model_free.lod1.glb")),
+    settle(gltfLoader.loadAsync("/trees/dreftwood tree.lod1.glb")),
   ]);
   // Every tree clone shares these: one mesh per material instead of dozens of parts
   mergeStaticMeshes(treeAGltf.scene);
   mergeStaticMeshes(treeBGltf.scene);
+  const lodA = treeLodTemplate(treeALod, treeAGltf.scene);
+  const lodB = treeLodTemplate(treeBLod, treeBGltf.scene);
 
 
   if (wrlScene) {
@@ -2558,7 +2565,7 @@ async function loadWorld() {
     const scale = rngRange(rng, treeAScaleMin, treeAScaleMax);
     const rotY  = rng() * Math.PI * 2;
     const snapY = treeASnapAtOne * scale + groundHeight(x, z) - 0.2;
-    const clone = treeATemplate.clone(true);
+    const clone = treeWithLod(treeATemplate, lodA);
     clone.position.set(x, snapY, z);
     clone.rotation.y = rotY;
     clone.scale.setScalar(scale);
@@ -2571,7 +2578,7 @@ async function loadWorld() {
     const scale = rngRange(rng, treeBScaleMin, treeBScaleMax);
     const rotY  = rng() * Math.PI * 2;
     const snapY = treeBSnapAtOne * scale + groundHeight(x, z) - 0.2;
-    const clone = treeBTemplate.clone(true);
+    const clone = treeWithLod(treeBTemplate, lodB);
     clone.position.set(x, snapY, z);
     clone.rotation.y = rotY;
     clone.scale.setScalar(scale);
@@ -2621,6 +2628,37 @@ async function loadWorld() {
 }
 
 const DEBRIS_SPOTS = [[26, 12], [-31, 9], [9, -47], [-5, 39], [48, 30]];
+
+// ─── Tree LOD ─────────────────────────────────────────────────────────────────
+// The two tree models are ~85k and ~65k triangles: most of the frame's
+// triangles, twice over with shadows. Past TREE_LOD_DIST a scattered tree
+// switches to its *.lod1.glb (~20% of the triangles, same UVs) drawn with the
+// full tree's material, so it costs no extra texture memory.
+// ?lod=0 keeps full detail everywhere (A/B comparisons)
+const TREE_LOD_DIST = new URLSearchParams(location.search).get("lod") === "0" ? Infinity : 45;
+
+/** The LOD model merged and wearing the full tree's material, or null (missing file: full detail everywhere). */
+function treeLodTemplate(gltf, full) {
+  if (!gltf) return null;
+  mergeStaticMeshes(gltf.scene);
+  let material = null;
+  full.traverse(o => { if (!material && o.isMesh) material = o.material; });
+  gltf.scene.traverse(o => {
+    if (!o.isMesh) return;
+    o.material = material;
+    o.castShadow = true;
+    o.receiveShadow = true;
+  });
+  return gltf.scene;
+}
+
+function treeWithLod(template, lodTemplate) {
+  if (!lodTemplate) return template.clone(true);
+  const lod = new THREE.LOD();
+  lod.addLevel(template.clone(true), 0);
+  lod.addLevel(lodTemplate.clone(true), TREE_LOD_DIST);
+  return lod;
+}
 
 /** Patchy grass density: thick in places, thin in others. */
 function fbmGrass(x, z) {
@@ -3843,6 +3881,11 @@ const qualityEl = document.getElementById("lobby-quality");
 if (qualityEl) {
   qualityEl.value = QUALITY_SETTING;
   qualityEl.options[0].textContent = `Auto (${QUALITY_PRESETS[QUALITY_NAME].label} on this ${IS_TOUCH ? "device" : "PC"})`;
+  if (IS_TOUCH) {
+    qualityEl.options[1].textContent = "Battery saver: older phones, cooler, longer battery";
+    qualityEl.options[2].textContent = "Balanced (recommended)";
+    qualityEl.options[3].textContent = "High: flagship phones";
+  }
   qualityEl.addEventListener("change", () => {
     saveQuality(qualityEl.value);
     location.reload();
@@ -3864,6 +3907,75 @@ function renderFrame() {
 let _animRunning = false;
 let prevFeetY = 0;
 let lastFrameAt = 0;
+
+// ─── Phone frame cap ──────────────────────────────────────────────────────────
+// "auto" aims for 60. If a phone can't hold it even at its lowest render
+// scale, it settles on a steady 30 (an even 33 ms beats a frame rate that
+// jumps between 35 and 60), and every so often tries 60 again, waiting longer
+// after each failed try so it doesn't flip-flop.
+const autoFps = { cap: 60, slowFor: 0, probeAt: 0, probing: false, wait: 30 };
+
+/** Frames per second the game is held to (desktop: 0 = no cap). */
+function frameCap() {
+  if (!touch) return 60;
+  const s = touch.settings.fps;
+  return s === "30" ? 30 : s === "60" ? 60 : autoFps.cap;
+}
+
+function updateAutoFps(frameMs) {
+  if (!touch || touch.settings.fps !== "auto" || !isLocked()) return;
+  const now = performance.now() / 1000;
+  if (autoFps.cap === 60) {
+    // Slow (under ~42 FPS) with the resolution already as low as it goes
+    const stuck = perf.avg > 24 && perf.ratio <= MIN_PIXEL_RATIO + 0.01;
+    autoFps.slowFor = stuck ? autoFps.slowFor + frameMs / 1000 : 0;
+    if (autoFps.slowFor > (autoFps.probing ? 4 : 6)) {
+      autoFps.cap = 30;
+      autoFps.slowFor = 0;
+      if (autoFps.probing) autoFps.wait = Math.min(240, autoFps.wait * 2); // a failed try: wait longer
+      autoFps.probing = false;
+      autoFps.probeAt = now + autoFps.wait;
+    } else if (autoFps.probing && now > autoFps.probeAt + 8) {
+      autoFps.probing = false;   // held 60 through the try: stay
+      autoFps.wait = 30;
+    }
+  } else if (now > autoFps.probeAt) {
+    autoFps.cap = 60;
+    autoFps.probing = true;
+    autoFps.probeAt = now;
+    perf.avg = 16.7;             // judge the try on fresh frames
+  }
+}
+
+// ─── App lifecycle ────────────────────────────────────────────────────────────
+// Backgrounded (Android app or browser tab): pause and silence everything;
+// coming back shows the pause screen and a tap resumes. requestAnimationFrame
+// already stops while hidden, and the frame delta is clamped on return.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    if (isLocked() && !bench.on) releaseLock();
+    sfx.ctx?.suspend?.();
+  } else if (sfx.ctx?.state === "suspended" && !hud.paused) {
+    sfx.ctx.resume();
+  }
+});
+
+// WebGL context lost (Android can drop it under memory pressure): say so and
+// reload cleanly when it comes back, instead of a frozen black screen.
+canvas.addEventListener("webglcontextlost", e => {
+  e.preventDefault();
+  _animRunning = false;
+  const note = document.createElement("div");
+  note.id = "context-lost";
+  note.textContent = "Graphics were reset by the device. Reloading…";
+  Object.assign(note.style, {
+    position: "fixed", inset: 0, zIndex: 6000, display: "flex", alignItems: "center", justifyContent: "center",
+    background: "#050303", color: "#e8dccb", font: "600 20px 'Segoe UI', sans-serif",
+  });
+  document.body.append(note);
+  setTimeout(() => location.reload(), 2500);
+});
+canvas.addEventListener("webglcontextrestored", () => location.reload());
 const clock = new THREE.Clock();
 
 function animate() {
@@ -3873,10 +3985,12 @@ function animate() {
   if (touch) {
     // Phones: at most 60 (or 30) frames a second. A 90/120 Hz screen would
     // otherwise get twice the work, heat the phone and throttle it.
-    const minGap = touch.settings.fps === "30" ? 1000 / 30 - 2 : 1000 / 60 - 2;
+    const minGap = 1000 / frameCap() - 2;
     if (frameStart - lastFrameAt < minGap) return;
     lastFrameAt = frameStart;
   }
+  perfOverlay?.beginFrame(frameStart);
+  if (bench.on) benchStep(frameStart);
   const rawDelta = clock.getDelta();
   const frameMs = rawDelta * 1000;
   const delta = Math.min(rawDelta, 0.05);
@@ -3957,8 +4071,105 @@ function animate() {
   updateSunShadow();
   if (QUALITY.shadowEvery > 1 && ++shadowFrame % QUALITY.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
   const logicMs = performance.now() - frameStart;
+  perfOverlay?.markRender(performance.now());
   renderFrame();
   updateDynamicResolution(frameMs, logicMs);
+  if (perfOverlay) perfOverlay.endFrame(performance.now(), perfCounts());
+}
+
+// ─── Performance overlay + benchmark (?perf=1 / ?bench=1) ─────────────────────
+const perfOverlay = PERF_ENABLED ? new PerfOverlay(renderer) : null;
+const _perfCounts = {};
+function perfCounts() {
+  const c = _perfCounts;
+  const active = zombieManager?.active ?? [];
+  let animated = 0;
+  for (const m of active) if (!m.dying && m.distXZ < 80) animated++;
+  c.monsters = active.length;
+  c.monstersAnimated = animated;
+  c.enemyBolts = enemyFire.bolts.reduce((n, b) => n + (b.active ? 1 : 0), 0);
+  c.fires = throwables.fires.reduce((n, f) => n + (f.active ? 1 : 0), 0);
+  c.pickups = pickups.active.length;
+  c.bodies = world.bodies.length;
+  c.quality = `${QUALITY_NAME} @ ${perf.ratio.toFixed(2)}× pixels`;
+  c.fpsCap = touch ? `${touch.settings.fps} → ${frameCap()}` : "none";
+  return c;
+}
+
+/**
+ * Scripted benchmark, the same on every device: noon, no levels, the player
+ * can't die. 3 s warm-up, 10 s of looking around, 20 s of combat with 20
+ * monsters chasing and the gun firing in bursts. Results go to the overlay,
+ * the console ("BENCH_RESULT {…}") and window.__benchResult.
+ */
+const bench = { on: false, t0: 0, phase: "", spawned: false, results: {} };
+const BENCH_WARMUP = 3000, BENCH_EXPLORE = 10000, BENCH_COMBAT = 20000;
+
+function startBenchmark() {
+  bench.on = true;
+  bench.t0 = performance.now();
+  lobby.hide();
+  startScreenEl?.classList.remove("visible");
+  hud.paused = false;
+  env.hour = 12;
+  env.paused = true;
+  for (const m of [...zombieManager.active]) zombieManager.pool.release(m);
+  characterBody.position.set(0, groundHeight(0, 0) + FEET_OFFSET + 0.05, 0);
+  characterBody.velocity.set(0, 0, 0);
+  aimYaw = 0;
+  aimPitch = -0.08;
+}
+
+function benchStep(now) {
+  const t = now - bench.t0;
+  playerHealth = MAX_HEALTH;
+  inventory.weapons[inventory.current] && (inventory.weapons[inventory.current].ammo = 30);
+  if (t < BENCH_WARMUP) { bench.phase = "warm-up"; aimYaw += 0.01; return; }
+  if (bench.phase === "warm-up") { bench.phase = "explore"; perfOverlay.reset(); }
+  if (t < BENCH_WARMUP + BENCH_EXPLORE) {
+    aimYaw += 0.012;                       // a slow look around
+    perfOverlay.extra.bench = "explore";
+    return;
+  }
+  if (bench.phase === "explore") {
+    bench.results.explore = perfOverlay.report().data;
+    perfOverlay.reset();
+    bench.phase = "combat";
+    // 20 monsters in a ring, all hunting the player
+    const types = ["walker", "runner", "walker", "listener"];
+    for (let i = 0; i < 20; i++) {
+      const a = (i / 20) * Math.PI * 2, r = 16 + (i % 4) * 5;
+      const m = zombieManager.spawn(types[i % types.length], Math.sin(a) * r, Math.cos(a) * r);
+      if (!m) continue;
+      m.target = localTarget;
+      m.state = "chase";
+      m.hasLOS = true;
+    }
+  }
+  if (t < BENCH_WARMUP + BENCH_EXPLORE + BENCH_COMBAT) {
+    aimYaw += 0.008;
+    // Bursts: 0.6 s on, 0.4 s off
+    input.fire = (t % 1000) < 600;
+    perfOverlay.extra.bench = "combat";
+    return;
+  }
+  input.fire = false;
+  bench.results.combat = perfOverlay.report().data;
+  bench.on = false;
+  env.paused = false;
+  const summary = {
+    userAgent: navigator.userAgent, quality: QUALITY_NAME, pixelRatio: +perf.ratio.toFixed(2),
+    screen: `${innerWidth}×${innerHeight} @ dpr ${devicePixelRatio}`,
+    ...Object.fromEntries(Object.entries(bench.results).map(([k, d]) => [k, {
+      fps: +d.fps.toFixed(1), frameAvg: +d.frame.avg.toFixed(2), p50: +d.frame.p50.toFixed(2), p95: +d.frame.p95.toFixed(2),
+      p99: +d.frame.p99.toFixed(2), worst: +d.frame.max.toFixed(1), spikesOver50ms: d.spikesOver50ms,
+      logicAvg: +d.logic.avg.toFixed(2), logicP95: +d.logic.p95.toFixed(2), submitAvg: +d.submit.avg.toFixed(2),
+      gpuAvg: d.gpu ? +d.gpu.avg.toFixed(2) : null, calls: d.calls, triangles: d.triangles, heapMB: d.heapMB && +d.heapMB.toFixed(1),
+    }])),
+  };
+  window.__benchResult = summary;
+  console.log("BENCH_RESULT " + JSON.stringify(summary));
+  perfOverlay.extra.bench = "DONE (window.__benchResult)";
 }
 
 window.addEventListener("resize", () => {
@@ -4021,7 +4232,21 @@ async function warmUpGpu() {
     m.root.position.set(characterBody.position.x + staged.length * 2 - 8, 0, characterBody.position.z + 6);
     m.root.updateMatrixWorld(true);
   }
+  // The shadow camera normally covers 25 m round the player, so trees and
+  // both levels of every LOD would compile their shadow-depth programs the
+  // first time they come near (a visible hitch). For this one render it
+  // covers the whole map and every LOD level is shown.
+  const sc = sun.shadow.camera;
+  const box = [sc.left, sc.right, sc.top, sc.bottom, sc.far];
+  sc.left = sc.bottom = -400; sc.right = sc.top = 400; sc.far = 800;
+  sc.updateProjectionMatrix();
+  const lods = [];
+  scene.traverse(o => { if (o.isLOD) { lods.push(o); o.autoUpdate = false; for (const l of o.levels) l.object.visible = true; } });
+  renderer.shadowMap.needsUpdate = true;
   renderFrame(); // uploads textures + buffers, compiles shadow programs
+  [sc.left, sc.right, sc.top, sc.bottom, sc.far] = box;
+  sc.updateProjectionMatrix();
+  for (const o of lods) o.autoUpdate = true;
   for (const [m, p] of staged) {
     m.root.position.copy(p);
     m.root.updateMatrixWorld(true);
@@ -4109,7 +4334,8 @@ async function boot() {
     window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, get rickshaw() { return rickshaw; }, toggleRickshaw, refuelRickshaw, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, get kills() { return killsThisLife; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
-    lobby.show();
+    if (BENCH_ENABLED) startBenchmark();
+    else lobby.show();
     loadingScreen.classList.add("hidden");
     loadingScreen.addEventListener("transitionend", () => loadingScreen.remove(), { once: true });
   } catch (err) {

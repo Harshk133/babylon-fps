@@ -7,14 +7,19 @@
 //
 // Per model: drop unused UV sets / tangents, weld + simplify (meshoptimizer),
 // resize textures to WebP, quantize and meshopt-compress the geometry.
+//
+// Distance LODs ("*.lod1.glb"): a much lighter copy of the trees for far away,
+// simplified from the .opt.glb (the originals aren't in the repo). Same UVs,
+// normals and material slot; the textures are left out because the game draws
+// the LOD with the full model's material.
 import { existsSync, statSync } from "node:fs";
 import { NodeIO, TextureInfo } from "@gltf-transform/core";
 import { ALL_EXTENSIONS } from "@gltf-transform/extensions";
 import {
   dedup, prune, weld, simplify, textureCompress, reorder, quantize, meshopt, resample, unpartition,
-  compactPrimitive,
+  compactPrimitive, dequantize,
 } from "@gltf-transform/functions";
-import { MeshoptSimplifier, MeshoptEncoder } from "meshoptimizer";
+import { MeshoptSimplifier, MeshoptEncoder, MeshoptDecoder } from "meshoptimizer";
 import sharp from "sharp";
 
 // ratio: target fraction of indices kept; error: max deviation relative to mesh size
@@ -31,6 +36,11 @@ const MODELS = [
     src: "public/models/soldier/soldier.glb", ratio: 1, error: 0, tex: 1024,
     keepAnimations: ["Idle_Gun", "Run", "Run_Back", "Run_Left", "Run_Right", "Idle_Gun_Pointing", "Idle_Gun_Shoot", "Death"],
   },
+];
+// ratio / error as above, applied to the .opt.glb
+const LODS = [
+  { src: "public/trees/old_tree_with_vine_3d_model_free.opt.glb", ratio: 0.2, error: 0.08 },
+  { src: "public/trees/dreftwood tree.opt.glb",                   ratio: 0.2, error: 0.08 },
 ];
 const TEXTURES = [
   { src: "public/texture/grass2.jpg", size: 1024, quality: 82 },
@@ -96,9 +106,15 @@ function countVerts(doc) {
 
 await MeshoptSimplifier.ready;
 await MeshoptEncoder.ready;
+await MeshoptDecoder.ready;
 const io = new NodeIO()
   .registerExtensions(ALL_EXTENSIONS)
-  .registerDependencies({ "meshopt.encoder": MeshoptEncoder });
+  .registerDependencies({ "meshopt.encoder": MeshoptEncoder, "meshopt.decoder": MeshoptDecoder });
+
+/** Drops every texture (the game reuses the full model's material on the LOD). */
+function stripTextures() {
+  return doc => { for (const t of doc.getRoot().listTextures()) t.dispose(); };
+}
 
 for (const m of MODELS) {
   const out = optPath(m.src, "glb");
@@ -132,6 +148,20 @@ for (const m of MODELS) {
   const after = countVerts(doc);
   await io.write(out, doc);
   console.log(`${m.src}\n  ${mb(m.src)} → ${mb(out)}   indices ${before.toLocaleString()} → ${after.toLocaleString()}   (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
+}
+
+for (const l of LODS) {
+  const out = l.src.replace(/\.opt\.glb$/, ".lod1.glb");
+  if (!existsSync(l.src)) { console.log(`skip (missing) ${l.src}`); continue; }
+  if (existsSync(out) && !force) { console.log(`skip (exists)  ${out}`); continue; }
+  const doc = await io.read(l.src);
+  const before = countVerts(doc);
+  await doc.transform(
+    dequantize(), stripTextures(), weld(), simplifyPrune(l.ratio, l.error), prune(),
+    unpartition(), reorder({ encoder: MeshoptEncoder }), quantize(), meshopt({ encoder: MeshoptEncoder, level: "medium" }),
+  );
+  await io.write(out, doc);
+  console.log(`${l.src} (LOD)\n  → ${mb(out)}   indices ${before.toLocaleString()} → ${countVerts(doc).toLocaleString()}`);
 }
 
 for (const t of TEXTURES) {

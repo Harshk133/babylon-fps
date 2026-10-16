@@ -1,16 +1,16 @@
 import * as THREE from "three";
 import { PICKUP_KINDS } from "../combat/weapons.js";
 import { groundHeight } from "../world/Terrain.js";
-import { cloneItem, getItemTemplate } from "../items/ItemModels.js";
+import { getItemTemplate } from "../items/ItemModels.js";
 
-const HIDE_Y          = -500;
 const HOVER_HEIGHT    = 0.6;
 const MAX_ACTIVE      = 240;  // battle royale scatters a lot of loot
 const INTERACT_RADIUS = 2.2;   // weapons: shows the [E] prompt
 const AUTO_RADIUS     = 1.4;   // ammo / throwables / medkits: walk over to collect
 const BLINK_TIME      = 5;     // timed drops blink for their last few seconds
 const FAR_SKIP        = 90;    // don't animate (or draw) pickups this far away
-const MODEL_RANGE     = 40;    // past this only the light beam is drawn (1 draw call instead of ~6)
+const MODEL_RANGE     = 40;    // past this only the light beam is drawn
+const MODELS_PER_KIND = 96;    // instances per item kind within MODEL_RANGE
 
 const CATEGORY_COLOR = {
   weapon:    0xffa630,
@@ -19,6 +19,13 @@ const CATEGORY_COLOR = {
   medkit:    0x4dff88,
   fuel:      0x37e0c8,
 };
+
+const _m = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _p = new THREE.Vector3();
+const _s = new THREE.Vector3(1, 1, 1);
+const _yAxis = new THREE.Vector3(0, 1, 0);
+const _c = new THREE.Color();
 
 function makeBeamTexture() {
   const c = document.createElement("canvas");
@@ -35,10 +42,32 @@ function makeBeamTexture() {
   return tex;
 }
 
+/** A plain Float32 copy of a part with its material colour baked into the vertices. */
+function bakedPart(mesh, matrix) {
+  const src = mesh.geometry;
+  const g = new THREE.BufferGeometry();
+  for (const name of ["position", "normal"]) {
+    const a = src.attributes[name];
+    const arr = new Float32Array(a.count * 3);
+    for (let i = 0; i < a.count; i++) for (let k = 0; k < 3; k++) arr[i * 3 + k] = a.getComponent(i, k);
+    g.setAttribute(name, new THREE.BufferAttribute(arr, 3));
+  }
+  const n = src.attributes.position.count, col = new Float32Array(n * 3), mc = mesh.material.color;
+  for (let i = 0; i < n; i++) { col[i * 3] = mc.r; col[i * 3 + 1] = mc.g; col[i * 3 + 2] = mc.b; }
+  g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  const count = src.index ? src.index.count : n;
+  const idx = new Uint32Array(count);
+  for (let i = 0; i < count; i++) idx[i] = src.index ? src.index.getX(i) : i;
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  return g.applyMatrix4(matrix);
+}
+
 /**
- * Pooled world pickups. Entries are created per kind on first need and then
- * reused forever: release only hides them, so nothing is added to or removed
- * from the scene in steady state.
+ * World pickups. Entries are plain records (pooled per kind); everything is
+ * drawn through instanced meshes: one for every light beam, one for every
+ * ring, and per item kind one each for its metal, matte and glass parts, with
+ * the part colours baked into vertex colours. A field of loot costs a dozen
+ * draw calls instead of six per item.
  */
 export class Pickups {
   constructor(scene) {
@@ -50,64 +79,67 @@ export class Pickups {
     this.byId = new Map();    // network id → entry (battle royale loot shared by every player)
     this._time = 0;
 
-    this._ringGeo = new THREE.RingGeometry(0.38, 0.58, 32).rotateX(-Math.PI / 2);
-    this._beamGeo = new THREE.CylinderGeometry(0.05, 0.05, 2.6, 8, 1, true).translate(0, 1.3, 0);
-    const beamTex = makeBeamTexture();
-    this._ringMats = {};
-    this._beamMats = {};
-    for (const [cat, color] of Object.entries(CATEGORY_COLOR)) {
-      this._ringMats[cat] = new THREE.MeshBasicMaterial({
-        color, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, depthWrite: false,
-        side: THREE.DoubleSide, forceSinglePass: true, // additive: no back-then-front pass needed
-      });
-      this._beamMats[cat] = new THREE.MeshBasicMaterial({
-        color, map: beamTex, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending,
-        depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true, fog: false,
-      });
-    }
+    const additive = { transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true };
+    this.beams = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.05, 0.05, 2.6, 8, 1, true).translate(0, 1.3, 0),
+      new THREE.MeshBasicMaterial({ ...additive, map: makeBeamTexture(), opacity: 0.55, fog: false }),
+      MAX_ACTIVE);
+    this.rings = new THREE.InstancedMesh(
+      new THREE.RingGeometry(0.38, 0.58, 32).rotateX(-Math.PI / 2).translate(0, 0.03, 0),
+      new THREE.MeshBasicMaterial({ ...additive, opacity: 0.7 }),
+      MAX_ACTIVE);
+    for (const im of [this.beams, this.rings]) this._prepare(im, 1, true);
 
-    // Model offsets so each item spins around its own centre
-    this._centers = {};
+    // Item meshes, per kind: all built now so the loading screen compiles their shaders
+    this.matteMat = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.05, roughness: 0.72 });
+    this.metalMat = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.7, roughness: 0.4 });
+    this.kindMeshes = {};     // kind → [InstancedMesh]
     for (const kind of Object.keys(PICKUP_KINDS)) {
-      const box = new THREE.Box3().setFromObject(getItemTemplate(kind));
-      this._centers[kind] = box.getCenter(new THREE.Vector3());
       this.pools[kind] = [];
+      this._kindMeshes(kind);
     }
   }
 
-  _create(kind) {
+  _prepare(im, renderOrder, colored) {
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    if (colored) im.setColorAt(0, _c.set(0xffffff));
+    im.count = 0;
+    im.frustumCulled = false;   // instances spread far apart; the bounds would be the template's
+    im.castShadow = false;      // floating loot doesn't need a shadow pass
+    im.renderOrder = renderOrder;
+    this.scene.add(im);
+  }
+
+  /** Bakes a kind's model (scale, centring, gun tilt) into instanced meshes, one per material class. */
+  _kindMeshes(kind) {
     const def = PICKUP_KINDS[kind];
-    const root = new THREE.Group();
-    const spinner = new THREE.Group();
-    const model = cloneItem(kind);
-    model.scale.setScalar(def.scale);
-    // Floating loot doesn't need to cost a shadow-pass draw per part
-    model.traverse(o => { o.castShadow = false; });
-    model.position.copy(this._centers[kind]).multiplyScalar(-def.scale);
-    spinner.add(model);
-    // Guns lie at a slight tilt so they read well from the third-person camera
-    if (def.category === "weapon") spinner.rotation.z = 0.15;
-    root.add(spinner);
-
-    const ring = new THREE.Mesh(this._ringGeo, this._ringMats[def.category]);
-    ring.position.y = 0.03;
-    ring.renderOrder = 1;
-    root.add(ring);
-    const beam = new THREE.Mesh(this._beamGeo, this._beamMats[def.category]);
-    beam.renderOrder = 1;
-    root.add(beam);
-
-    // Only the spinner animates: freeze every other local matrix (the root's is
-    // rebuilt on spawn)
-    root.traverse(o => { if (o !== spinner) { o.updateMatrix(); o.matrixAutoUpdate = false; } });
-    root.position.y = HIDE_Y;
-    root.visible = false;
-    root.matrixWorldAutoUpdate = false;
-    this.scene.add(root);
-
-    const entry = { kind, def, root, spinner, ring, active: false, x: 0, y: 0, z: 0, life: Infinity, data: null, phase: 0, id: null };
-    this.pools[kind].push(entry);
-    return entry;
+    const template = getItemTemplate(kind);
+    template.updateMatrixWorld(true);
+    const center = new THREE.Box3().setFromObject(template).getCenter(new THREE.Vector3());
+    // spinner space: tilt (guns) · scale · −centre
+    const base = new THREE.Matrix4()
+      .makeRotationZ(def.category === "weapon" ? 0.15 : 0)   // guns lie tilted so they read from the camera
+      .multiply(new THREE.Matrix4().makeScale(def.scale, def.scale, def.scale))
+      .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
+    const groups = { metal: [], matte: [], glass: [] };
+    let glassMat = null;
+    template.traverse(o => {
+      if (!o.isMesh) return;
+      const part = bakedPart(o, _m.multiplyMatrices(base, o.matrixWorld));
+      if (o.material.transparent) { groups.glass.push(part); glassMat = o.material; }
+      else if (o.material.metalness >= 0.5) groups.metal.push(part);
+      else groups.matte.push(part);
+    });
+    const meshes = [];
+    for (const [cls, parts] of Object.entries(groups)) {
+      if (!parts.length) continue;
+      const geo = parts.length === 1 ? parts[0] : mergeParts(parts);
+      const mat = cls === "glass" ? glassMat : cls === "metal" ? this.metalMat : this.matteMat;
+      const im = new THREE.InstancedMesh(geo, mat, MODELS_PER_KIND);
+      this._prepare(im, cls === "glass" ? 2 : 0, false);
+      meshes.push(im);
+    }
+    return (this.kindMeshes[kind] = meshes);
   }
 
   /**
@@ -119,21 +151,21 @@ export class Pickups {
   spawn(kind, x, z, data = null, life = Infinity, id = null, y = null) {
     if (this.active.length >= MAX_ACTIVE || !this.pools[kind]) return null;
     if (id !== null && this.byId.has(id)) return null;
-    let entry = this.pools[kind].find(e => !e.active) ?? this._create(kind);
+    let entry = this.pools[kind].find(e => !e.active);
+    if (!entry) {
+      entry = { kind, def: PICKUP_KINDS[kind], active: false, x: 0, y: 0, z: 0, life: Infinity, data: null, phase: 0, spin: 0, id: null };
+      this.pools[kind].push(entry);
+    }
     entry.active = true;
     entry.x = x;
     entry.z = z;
+    entry.y = y ?? groundHeight(x, z);
     entry.life = life;
     entry.data = data;
     entry.id = id;
     if (id !== null) this.byId.set(id, entry);
     entry.phase = Math.random() * Math.PI * 2;
-    entry.y = y ?? groundHeight(x, z);
-    entry.root.position.set(x, entry.y, z);
-    entry.root.updateMatrix();
-    entry.root.visible = true;
-    entry.root.matrixWorldAutoUpdate = true;
-    entry.spinner.rotation.y = entry.phase;
+    entry.spin = entry.phase;
     this.active.push(entry);
     return entry;
   }
@@ -141,9 +173,6 @@ export class Pickups {
   release(entry) {
     if (!entry.active) return;
     entry.active = false;
-    entry.root.visible = false;
-    entry.root.position.y = HIDE_Y;
-    entry.root.matrixWorldAutoUpdate = false;
     if (entry.id !== null) { this.byId.delete(entry.id); entry.id = null; }
     const i = this.active.indexOf(entry);
     if (i >= 0) this.active.splice(i, 1);
@@ -162,37 +191,45 @@ export class Pickups {
   /** py: the player's feet height (only loot on the same floor can be picked up). */
   update(delta, px, pz, py = null) {
     this._time += delta;
-    const pulse = 0.55 + Math.sin(this._time * 4) * 0.2;
-    for (const cat in this._ringMats) this._ringMats[cat].opacity = pulse;
+    this.rings.material.opacity = 0.55 + Math.sin(this._time * 4) * 0.2;
 
     this.nearestWeapon = null;
     this.touching.length = 0;
     let best = INTERACT_RADIUS * INTERACT_RADIUS;
+    let nBeam = 0, nRing = 0;
+    for (const kind in this.kindMeshes) for (const im of this.kindMeshes[kind]) im.count = 0;
 
     for (let i = this.active.length - 1; i >= 0; i--) {
       const e = this.active[i];
       const dx = e.x - px, dz = e.z - pz;
       const d2 = dx * dx + dz * dz;
-      const near = d2 <= FAR_SKIP * FAR_SKIP;
       if (e.life !== Infinity) {
         e.life -= delta;
         if (e.life <= 0) { this.release(e); continue; }
-        e.root.visible = near && (e.life > BLINK_TIME || Math.sin(e.life * 18) > -0.3);
-      } else {
-        e.root.visible = near;
       }
-      e.root.matrixWorldAutoUpdate = e.root.visible;
-      if (!near) continue;
-      // Far loot: just the beam, so a field of it doesn't cost hundreds of draw calls
-      const close = d2 <= MODEL_RANGE * MODEL_RANGE;
-      e.spinner.visible = close;
-      e.spinner.matrixWorldAutoUpdate = close; // far: skip the model's matrices too
-      e.ring.visible = close;
-      if (!close) continue;
+      if (d2 > FAR_SKIP * FAR_SKIP) continue;
+      // Timed drops blink for their last seconds
+      const shown = e.life > BLINK_TIME || Math.sin(e.life * 18) > -0.3;
+      const color = CATEGORY_COLOR[e.def.category];
+      if (shown) {
+        _p.set(e.x, e.y, e.z);
+        this.beams.setMatrixAt(nBeam, _m.makeTranslation(_p.x, _p.y, _p.z));
+        this.beams.setColorAt(nBeam++, _c.set(color));
+      }
+      // Far loot: just the beam
+      if (d2 > MODEL_RANGE * MODEL_RANGE) continue;
 
       e.phase += delta;
-      e.spinner.rotation.y += delta * 1.3;
-      e.spinner.position.y = HOVER_HEIGHT + Math.sin(e.phase * 2.2) * 0.08;
+      e.spin += delta * 1.3;
+      if (shown) {
+        this.rings.setMatrixAt(nRing, _m.makeTranslation(e.x, e.y, e.z));
+        this.rings.setColorAt(nRing++, _c.set(color));
+        _p.set(e.x, e.y + HOVER_HEIGHT + Math.sin(e.phase * 2.2) * 0.08, e.z);
+        _m.compose(_p, _q.setFromAxisAngle(_yAxis, e.spin), _s);
+        for (const im of this.kindMeshes[e.kind]) {
+          if (im.count < MODELS_PER_KIND) im.setMatrixAt(im.count++, _m);
+        }
+      }
       if (py !== null && Math.abs(e.y - py) > 1.4) continue; // the other floor of a house
 
       if (e.def.category === "weapon") {
@@ -201,5 +238,36 @@ export class Pickups {
         this.touching.push(e);
       }
     }
+
+    this.beams.count = nBeam;
+    this.rings.count = nRing;
+    for (const im of [this.beams, this.rings]) {
+      im.instanceMatrix.needsUpdate = true;
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    }
+    for (const kind in this.kindMeshes) for (const im of this.kindMeshes[kind]) if (im.count) im.instanceMatrix.needsUpdate = true;
   }
+}
+
+/** Merges baked parts (same attributes: position, normal, color; indexed). */
+function mergeParts(parts) {
+  let verts = 0, idx = 0;
+  for (const p of parts) { verts += p.attributes.position.count; idx += p.index.count; }
+  const pos = new Float32Array(verts * 3), nor = new Float32Array(verts * 3), col = new Float32Array(verts * 3), ind = new Uint32Array(idx);
+  let vo = 0, io = 0;
+  for (const p of parts) {
+    pos.set(p.attributes.position.array, vo * 3);
+    nor.set(p.attributes.normal.array, vo * 3);
+    col.set(p.attributes.color.array, vo * 3);
+    const ia = p.index.array;
+    for (let k = 0; k < ia.length; k++) ind[io + k] = ia[k] + vo;
+    vo += p.attributes.position.count;
+    io += ia.length;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
+  g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  g.setIndex(new THREE.BufferAttribute(ind, 1));
+  return g;
 }

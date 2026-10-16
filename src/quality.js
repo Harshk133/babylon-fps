@@ -111,6 +111,12 @@ const TOUCH_TUNING = {
   },
 };
 if (IS_TOUCH) for (const [name, tuning] of Object.entries(TOUCH_TUNING)) Object.assign(QUALITY_PRESETS[name], tuning);
+// On phones the three presets are the Battery saver / Balanced / High profiles
+if (IS_TOUCH) {
+  QUALITY_PRESETS.low.label = "Battery saver";
+  QUALITY_PRESETS.medium.label = "Balanced";
+  QUALITY_PRESETS.high.label = "High";
+}
 
 function gpuName() {
   try {

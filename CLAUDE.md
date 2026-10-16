@@ -176,6 +176,12 @@ A rotating radar on a 2D canvas, top right. It draws zombies (pulsing when chasi
 
 ## Performance Rules
 
+- **Measure first:** `?perf=1` shows the profiler overlay, `?bench=1` runs the scripted benchmark (`src/debug/PerfOverlay.js`, `startBenchmark` in `main.js`). See PERFORMANCE.md for the phone procedure and the last measurements.
+- **Trees use LOD:** `npm run optimize-assets` also writes `public/trees/*.lod1.glb` (~20% of the triangles, no textures); scattered trees are a `THREE.LOD` switching at `TREE_LOD_DIST`, drawn with the full model's material. `?lod=0` disables it for A/B.
+- **Pickups are instanced:** one InstancedMesh for all beams, one for all rings, and per item kind one per material class (metal / matte with baked vertex colours / glass). House furniture shares one vertex-coloured material.
+- `warmUpGpu()` widens the shadow camera to the whole map and shows every LOD level for its render, so no shadow-depth program compiles mid-game.
+- Phones: frame cap `frameCap()` (touch setting Auto / 60 / 30; Auto settles on 30 when 60 can't be held at the lowest render scale), pause + audio suspend on `visibilitychange`, reload on WebGL context loss.
+
 - **Assets:** run `npm run optimize-assets` after adding or replacing a heavy model. `loadGLB()` loads `<name>.opt.glb` (meshopt-compressed, simplified, WebP textures) and falls back to the original. The script's `prune: true` mode uses meshoptimizer's Prune flag with a sloppy fallback for foliage triangle soups (the trees went from 6.3M to about 250k indices).
 - **Loading:** the soldier, zombies and world download in parallel. `warmUpGpu()` compiles every program while the loading screen is up, so nothing compiles mid-fight. That includes the zombie hit and burn materials, the fire shaders, and each monster type's shadow-depth program (one of each stands near the player for the warmup render). Lights that toggle (flashlight, firelights) stay in the scene at intensity 0 for the same reason.
 - **Rendering:** no `logarithmicDepthBuffer` (it kills early-Z). Dynamic resolution (`updateDynamicResolution`) scales the pixel ratio between about 0.65 and min(dpr, 1.5) based on frame time. Static props and ground chunks call `freezeStatic()` (`matrixAutoUpdate = false`). Pickups don't cast shadows. At most 2 fire point lights, shared across molotov fires.

@@ -31,7 +31,7 @@ const DEFAULTS = {
   invertY: false,
   size: 1,          // button scale
   opacity: 0.8,
-  fps: "60",        // frame cap: "60", or "30" to save battery and heat
+  fps: "auto",      // frame cap: "auto" (60, or a steady 30 when 60 can't be held), "60", "30"
 };
 
 function loadSettings() {
@@ -188,6 +188,7 @@ export class TouchControls {
         <label><span>Button opacity <b data-out="opacity"></b></span><input type="range" data-k="opacity" min="0.3" max="1" step="0.05"></label>
         <label><span>Frame rate</span>
           <select data-k="fps">
+            <option value="auto">Auto (60, steady 30 if the phone can't keep up)</option>
             <option value="60">60 FPS (smooth)</option>
             <option value="30">30 FPS (battery saver, cooler phone)</option>
           </select>
