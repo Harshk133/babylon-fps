@@ -3,7 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#050303" />
+    <!-- "Add to Home Screen" on phones opens it fullscreen like an app -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     <title>Survive the Horde</title>
     <!-- HUD type: Teko (numbers, labels), Creepster (titles), Special Elite (flavour text).
          Offline / LAN play falls back to the system fonts. -->
@@ -225,6 +232,9 @@
       <p class="death-score"><span id="death-kills">0</span> zombies put down</p>
       <p class="death-cta">Click to rise again</p>
     </div>
+
+    <!-- Phones: the game is played sideways -->
+    <div id="rotate-hint"><div class="rotate-phone"></div><p>Turn your phone sideways</p></div>
 
     <div id="app">
       <canvas id="webgl"></canvas>

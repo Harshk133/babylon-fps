@@ -1,0 +1,73 @@
+# Builds the Android app (APK) on GitHub's servers, so you don't need Android
+# Studio. Run it from the Actions tab ("Run workflow"), or push a tag like
+# v1.0.1 to also publish the APK on a GitHub Release page you can share.
+#
+# Repository settings → Secrets and variables → Actions:
+#   Variable RELAY_URL = wss://<your-relay>.onrender.com/ws   (co-op + battle royale)
+#   Optional secrets for a signed release APK (installs over older versions):
+#   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - run: npm ci
+
+      - name: Build the game and copy it into the Android project
+        env:
+          RELAY_URL: ${{ vars.RELAY_URL || secrets.RELAY_URL }}
+        run: npm run mobile:build
+
+      - name: Build the APK (signed release if a key is set up, debug otherwise)
+        working-directory: android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          VERSION="-PversionCode=${{ github.run_number }} -PversionName=1.${{ github.run_number }}"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export ANDROID_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
+            ./gradlew assembleRelease $VERSION --no-daemon
+            cp app/build/outputs/apk/release/app-release.apk ../SurviveTheHorde.apk
+          else
+            ./gradlew assembleDebug $VERSION --no-daemon
+            cp app/build/outputs/apk/debug/app-debug.apk ../SurviveTheHorde.apk
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SurviveTheHorde-apk
+          path: SurviveTheHorde.apk
+
+      - name: Publish on a GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SurviveTheHorde.apk

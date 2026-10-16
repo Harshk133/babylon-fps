@@ -18,6 +18,9 @@ npm run build-house-kit            # Pack public/models/house/source/** into hou
 npm run coop                       # Dev server on the LAN (vite --host); co-op relay at /ws
 npm run coop:preview               # Same, but a production build
 npm run relay                      # Standalone relay (PORT, default 8787) for hosting elsewhere
+npm run mobile:build               # Android app: vite build → prune-dist (drop uncommitted assets) → cap sync android
+npm run mobile:open                # Open the Android project in Android Studio
+node scripts/make-icons.mjs        # Regenerate app/web icons (then: npx @capacitor/assets generate --android)
 ```
 
 No test runner is configured.
@@ -78,6 +81,14 @@ The lobby offers three modes: Solo, Co-op vs Zombies, and Battle Royale. `gameMo
 - **Shared loot**: pickups take an optional network id; `take { i }` removes one for everyone, `drop` carries `i`, `a` ([ammo, reserve]) and `c` (throwable count).
 - **Spectating**: eliminated players follow living ones (`updateSpectatorCamera`, A/D or click to switch). `focusPos` (you, or whoever you watch) drives the minimap, shadows, ground chunks and pickup culling.
 - Day/night and weather keep running; co-op and battle royale clients follow the host's clock and weather (`applyWorldClock`, `weather.locked`).
+
+### Mobile (`src/mobile/`, `android/`, see `MOBILE.md`)
+
+- **Touch** (`TouchControls.js`): on touch devices (`isTouchDevice()`, or `?touch` in the URL) `body.touch` is set and an overlay replaces mouse + keyboard: a floating joystick (sprint at the top edge), a right-side look pad, and buttons that call `setKey()` with the same key codes as the keyboard, so game logic isn't duplicated. There's no pointer lock on phones: `touchPlay.on` stands in for it (`isLocked()`, `requestLock()`, `releaseLock()`, `setTouchPlaying()`). Prompt rows (`InventoryUI.onPromptKey`) and hotbar slots are tappable. `updateTouchUi()` shows only the buttons that make sense (no fire while driving, START for the BR host).
+- **Gyroscope** (`Gyro.js`): `devicemotion` rotation rate projected onto the gravity "up" axis (yaw) and the screen's horizontal axis (pitch, depends on landscape orientation); `applyGyro()` adds it to the aim each frame. iOS needs `DeviceMotionEvent.requestPermission()` from a tap and reports gravity with the opposite sign.
+- **Android app**: Capacitor 7 (`capacitor.config.json`, appId `com.harshk.survivethehorde`, webDir `dist`). `MainActivity` is immersive fullscreen, keeps the screen on; the manifest locks `sensorLandscape` and sets `largeHeap`. `scripts/prune-dist.mjs` removes every public file git doesn't track from `dist/` before packaging (~14 MB instead of ~330 MB). Inside the app there's no dev-server relay, so `RELAY_URL` must be set at build time; the relay's `ALLOWED_ORIGINS` must include `https://localhost`.
+- **Cloud build**: `.github/workflows/android-apk.yml` builds the APK on GitHub Actions (manual run or `v*` tag → Release). Signed release if the `ANDROID_KEYSTORE_*` secrets exist, debug otherwise.
+- **Web**: `public/manifest.webmanifest` + Apple meta tags make "Add to Home Screen" fullscreen landscape (the iPhone route).
 
 ### Deployment
 
@@ -169,6 +180,7 @@ A rotating radar on a 2D canvas, top right. It draws zombies (pulsing when chasi
 - Shadow map is 1024×1024; shadow frustum tracks the player (or whoever you spectate, `focusPos`) rather than being world-wide.
 - Respect `QUALITY` (src/quality.js) for anything visual and costly; keep collider-bearing content identical across presets.
 - Anything placed on the ground uses `groundHeight(x, z)`; GPU effects sample the terrain texture with `TERRAIN_GLSL`.
+- **Draw calls** are the usual bottleneck on old integrated GPUs. Merge static multi-part props per material (`mergeStaticMeshes()`; the VRML house went from ~216 draws to ~21), and pickups share one merged model per kind (`Pickups._mergedModel`). Pickups further than 90 m aren't drawn.
 
 ## Asset paths
 

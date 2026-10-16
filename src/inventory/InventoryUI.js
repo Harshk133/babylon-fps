@@ -36,6 +36,15 @@ export class InventoryUI {
     this.open = false;
 
     this.promptEl = document.getElementById("pickup-prompt");
+    // Touch: tapping a prompt row presses its key ("E", "V", "T", "O", …)
+    this.onPromptKey = null;
+    this.promptEl.addEventListener("pointerdown", e => {
+      const row = e.target.closest(".prompt-row");
+      if (!row || !this.onPromptKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.onPromptKey(row.dataset.key);
+    });
     this.feedEl = document.getElementById("pickup-feed");
     this.panelEl = document.getElementById("inventory");
     this._prompt = null;
@@ -139,6 +148,7 @@ export class InventoryUI {
     this.promptEl.replaceChildren();
     for (let i = 0; i < count; i += 2) {
       const row = el("div", "prompt-row");
+      row.dataset.key = rows[i];
       row.append(el("kbd", null, rows[i]), el("span", null, rows[i + 1]));
       this.promptEl.append(row);
     }

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { PICKUP_KINDS } from "../combat/weapons.js";
 import { groundHeight } from "../world/Terrain.js";
 import { cloneItem, getItemTemplate } from "../items/ItemModels.js";
@@ -67,6 +68,7 @@ export class Pickups {
 
     // Model offsets so each item spins around its own centre
     this._centers = {};
+    this._merged = {};        // kind → merged template (one mesh per material instead of one per part)
     for (const kind of Object.keys(PICKUP_KINDS)) {
       const box = new THREE.Box3().setFromObject(getItemTemplate(kind));
       this._centers[kind] = box.getCenter(new THREE.Vector3());
@@ -78,7 +80,7 @@ export class Pickups {
     const def = PICKUP_KINDS[kind];
     const root = new THREE.Group();
     const spinner = new THREE.Group();
-    const model = cloneItem(kind);
+    const model = this._mergedModel(kind);
     model.scale.setScalar(def.scale);
     // Floating loot doesn't need to cost a shadow-pass draw per part
     model.traverse(o => { o.castShadow = false; });
@@ -103,6 +105,35 @@ export class Pickups {
     const entry = { kind, def, root, spinner, active: false, x: 0, z: 0, life: Infinity, data: null, phase: 0, id: null };
     this.pools[kind].push(entry);
     return entry;
+  }
+
+  /**
+   * The item model with its parts merged per material, so a floating pickup
+   * costs a draw call or two instead of one per box. Built once per kind.
+   */
+  _mergedModel(kind) {
+    let tpl = this._merged[kind];
+    if (!tpl) {
+      const src = cloneItem(kind);
+      src.updateMatrixWorld(true);
+      const byMat = new Map();
+      src.traverse(o => {
+        if (!o.isMesh) return;
+        const g = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
+        for (const name of Object.keys(g.attributes)) if (name !== "position" && name !== "normal") g.deleteAttribute(name);
+        g.applyMatrix4(o.matrixWorld);
+        if (!byMat.has(o.material)) byMat.set(o.material, []);
+        byMat.get(o.material).push(g);
+      });
+      tpl = new THREE.Group();
+      for (const [mat, geos] of byMat) {
+        const merged = mergeGeometries(geos, false);
+        for (const g of geos) g.dispose();
+        if (merged) tpl.add(new THREE.Mesh(merged, mat));
+      }
+      this._merged[kind] = tpl;
+    }
+    return tpl.clone(); // shares the merged geometry and materials
   }
 
   /**

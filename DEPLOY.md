@@ -87,3 +87,9 @@ player in a room hosts the monsters.
   their own licences, usually requiring attribution. Check them before
   making the site public.
 - **Local co-op** still works without any of this: `npm run coop`.
+
+## Mobile app
+
+The Android app talks to the same relay. If you set `ALLOWED_ORIGINS` on the
+relay, add `https://localhost` (the app's origin). Building and sharing the
+app: see `MOBILE.md`.

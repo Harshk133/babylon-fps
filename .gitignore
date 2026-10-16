@@ -48,3 +48,7 @@ dist-ssr
 *.sln
 *.sw?
 
+
+# Android signing keys: never commit these
+*.jks
+*.keystore

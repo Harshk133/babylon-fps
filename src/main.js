@@ -5,6 +5,7 @@ import GUI from "lil-gui";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
 import { Soldier } from "./player/Soldier.js";
 import { Effects } from "./combat/Effects.js";
@@ -28,6 +29,8 @@ import { Grass } from "./world/Grass.js";
 import { scatterRocks } from "./world/Rocks.js";
 import { Rickshaw, RICKSHAW } from "./vehicles/Rickshaw.js";
 import { QUALITY, QUALITY_NAME, QUALITY_SETTING, QUALITY_PRESETS, saveQuality } from "./quality.js";
+import { TouchControls, isTouchDevice } from "./mobile/TouchControls.js";
+import { Gyro } from "./mobile/Gyro.js";
 import { Net } from "./net/Net.js";
 import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "./net/RemotePlayers.js";
 import { MonsterSync } from "./net/MonsterSync.js";
@@ -213,7 +216,7 @@ function onPlayerDeath() {
   if (isBR()) { brOnLocalDeath(); return; }
   if (deathKillsEl) deathKillsEl.textContent = `${killsThisLife}`;
   if (deathScreenEl) deathScreenEl.classList.add("visible");
-  if (document.pointerLockElement) document.exitPointerLock();
+  releaseLock();
 }
 
 function respawnPlayer() {
@@ -243,6 +246,8 @@ function respawnPlayer() {
 }
 
 function requestLock() {
+  // Phones have no pointer lock: "playing" is a flag, and the touch controls show
+  if (TOUCH) { setTouchPlaying(true); return; }
   // Newer browsers return a promise that rejects if the lock is refused
   const p = canvas.requestPointerLock();
   if (p && p.catch) p.catch(() => {});
@@ -688,7 +693,15 @@ function angleDiff(a, b) {
 
 // ─── Input ────────────────────────────────────────────────────────────────────
 const input = { fire: false, aim: false, firePressed: false };
-const isLocked = () => document.pointerLockElement === canvas;
+const TOUCH = isTouchDevice();
+const touchPlay = { on: false, fullscreen: false };
+const isLocked = () => document.pointerLockElement === canvas || touchPlay.on;
+
+/** Leaves "playing" (menus, death, inventory): unlocks the mouse, or hides the touch controls. */
+function releaseLock() {
+  if (TOUCH) setTouchPlaying(false);
+  else if (document.pointerLockElement) document.exitPointerLock();
+}
 
 const SLOT_KEYS = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4, Digit5: 5 };
 
@@ -773,21 +786,27 @@ window.addEventListener("mouseup", e => {
   if (e.button === 2) input.aim = false;
 });
 window.addEventListener("contextmenu", e => e.preventDefault());
-document.addEventListener("pointerlockchange", () => {
+document.addEventListener("pointerlockchange", onLockChange);
+function onLockChange() {
   if (!isLocked()) { input.fire = false; input.aim = false; }
   hud.paused = !isLocked();
   // The first level starts when you first click into the game
   // (co-op clients follow the host's levels instead)
   if (isLocked() && director && director.state === "idle" && !net.isClient && !isBR()) director.start(1);
-});
+}
 document.addEventListener("mousemove", e => {
   if (!isLocked()) return;
-  if (drive.on && (e.movementX || e.movementY)) drive.lastMouse = performance.now() / 1000;
-  const s = THREE.MathUtils.lerp(cameraRig.sensitivity, cameraRig.aimSensitivity, aimBlend);
-  aimYaw   -= e.movementX * s;
-  aimPitch -= e.movementY * s;
-  aimPitch  = THREE.MathUtils.clamp(aimPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+  lookBy(e.movementX, e.movementY, 1);
 });
+
+/** Mouse or touch look. scale: touch drags are in screen pixels, so they get a bit more. */
+function lookBy(dx, dy, scale) {
+  if (drive.on && (dx || dy)) drive.lastMouse = performance.now() / 1000;
+  const s = THREE.MathUtils.lerp(cameraRig.sensitivity, cameraRig.aimSensitivity, aimBlend) * scale;
+  aimYaw   -= dx * s;
+  aimPitch -= dy * s;
+  aimPitch  = THREE.MathUtils.clamp(aimPitch, cameraRig.pitchMin, cameraRig.pitchMax);
+}
 
 // ─── Ground Check ─────────────────────────────────────────────────────────────
 function checkGrounded() {
@@ -1678,7 +1697,7 @@ function setInventoryOpen(open) {
     input.fire = false;
     input.aim = false;
     cancelThrow();
-    if (document.pointerLockElement) document.exitPointerLock();
+    releaseLock();
   } else if (playerHealth > 0) {
     requestLock();
   }
@@ -2148,6 +2167,8 @@ async function loadWorld() {
       initialParams: { posX: -35, posY: 0, posZ: -35, rotY: 0, scale: 1.0 },
       perMeshColliders: true, // a box per wall, floor and stair so it's solid like a real building
     });
+    // ~200 little parts: merged per material (after the colliders were measured from them)
+    mergeStaticMeshes(wrlScene);
   }
 
   // Enterable houses (Kenney kits): per-wall colliders, animated doors, light switches
@@ -2313,6 +2334,40 @@ async function loadWorld() {
 }
 
 const DEBRIS_SPOTS = [[26, 12], [-31, 9], [9, -47], [-5, 39], [48, 30]];
+
+/**
+ * Merges every mesh under `root` that shares a material (and attribute layout)
+ * into one, in root's local space: one draw call per material instead of one
+ * per part. For static props only.
+ */
+function mergeStaticMeshes(root) {
+  root.updateMatrixWorld(true);
+  const toLocal = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const groups = new Map();
+  const parts = [];
+  root.traverse(o => { if (o.isMesh && !o.isSkinnedMesh && !Array.isArray(o.material)) parts.push(o); });
+  for (const o of parts) {
+    const g = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
+    g.applyMatrix4(_mergeM.multiplyMatrices(toLocal, o.matrixWorld));
+    const m = o.material;
+    // VRML gives every part its own material object: group by what it looks like
+    const key = `${m.type}|${m.color?.getHexString()}|${m.map?.uuid ?? ""}|${m.transparent}|${m.opacity}|${m.side}|${Object.keys(g.attributes).sort().join(",")}`;
+    if (!groups.has(key)) groups.set(key, { material: m, geos: [] });
+    groups.get(key).geos.push(g);
+    o.parent.remove(o);
+  }
+  for (const { material, geos } of groups.values()) {
+    const merged = mergeGeometries(geos, false);
+    for (const g of geos) g.dispose();
+    if (!merged) continue;
+    const mesh = new THREE.Mesh(merged, material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    root.add(mesh);
+  }
+  root.updateMatrixWorld(true);
+}
+const _mergeM = new THREE.Matrix4();
 
 /** Patchy grass density: thick in places, thin in others. */
 function fbmGrass(x, z) {
@@ -2707,7 +2762,8 @@ function toggleRickshaw() {
   sfx.equip();
   inventoryUI.feed(rickshaw.empty
     ? "Out of petrol: find a petrol can, then press T"
-    : "W/S drive · A/D steer · Space brake · V get out", rickshaw.empty ? "info" : "fuel", "fuel");
+    : TOUCH ? "Joystick drives · ⬆ brakes · tap Get out to leave" : "W/S drive · A/D steer · Space brake · V get out",
+    rickshaw.empty ? "info" : "fuel", "fuel");
 }
 
 function exitRickshaw() {
@@ -3264,7 +3320,7 @@ function brOnLocalDeath() {
   if (br.state === "match" && br.inMatch) {
     br.placement = br.alive.size;
     brDropLoot();
-    if (document.pointerLockElement) document.exitPointerLock();
+    releaseLock();
   } else {
     br.respawnTimer = BR_WARMUP_RESPAWN; // warm-up: straight back in
   }
@@ -3502,6 +3558,116 @@ const lobby = new Lobby({
   },
 });
 
+// ─── Touch controls & gyroscope (phones / tablets) ────────────────────────────
+const gyro = new Gyro();
+const _gyroTurn = { yaw: 0, pitch: 0 };
+const TOUCH_LOOK = 1.35;           // look sensitivity for finger drags (× mouse)
+let touch = null;
+
+function setTouchPlaying(on) {
+  if (!TOUCH || touchPlay.on === on) return;
+  touchPlay.on = on;
+  touch?.setActive(on);
+  // Turn the gyroscope back on if it was on last time (needs this tap on iPhones)
+  if (on && !gyro.enabled && gyro.available) {
+    let saved = null;
+    try { saved = localStorage.getItem("babylon-fps:gyro"); } catch { /* private mode */ }
+    if (saved === "1") gyro.enable();
+  }
+  if (on && !touchPlay.fullscreen) {
+    // Browser play: go fullscreen and hold landscape (the Android app does this natively)
+    touchPlay.fullscreen = true;
+    const el = document.documentElement;
+    const fs = el.requestFullscreen?.({ navigationUI: "hide" }) ?? el.webkitRequestFullscreen?.();
+    Promise.resolve(fs).then(() => screen.orientation?.lock?.("landscape")).catch(() => {});
+  }
+  onLockChange();
+}
+
+async function toggleGyro() {
+  if (gyro.enabled) {
+    gyro.disable();
+    inventoryUI.feed("Gyroscope aiming off", "info");
+  } else if (await gyro.enable()) {
+    inventoryUI.feed("Gyroscope aiming on: turn the phone to look around", "info");
+  } else {
+    inventoryUI.feed("This device has no gyroscope (or it wasn't allowed)", "info");
+  }
+  try { localStorage.setItem("babylon-fps:gyro", gyro.enabled ? "1" : "0"); } catch { /* private mode */ }
+}
+
+if (TOUCH) {
+  document.body.classList.add("touch");
+  touch = new TouchControls({
+    onKey: (code, down) => setKey(code, down, false),
+    onLook: (dx, dy) => { if (isLocked()) lookBy(dx, dy, TOUCH_LOOK); },
+    onFire: down => {
+      if (!isLocked()) return;
+      input.fire = down;
+      if (down) input.firePressed = true;
+    },
+    onAction: name => {
+      if (name === "aim") input.aim = !input.aim;
+      else if (name === "cycle") {
+        const prev = inventory.current;
+        inventory.cycle(1);
+        if (inventory.current !== prev) onWeaponChanged();
+      } else if (name === "gyro") toggleGyro();
+      else if (name === "pause") setTouchPlaying(false);
+    },
+    onTap: () => { if (brWatching()) brPickSpectate(1); },
+  });
+  // Context prompts ("E Pick up", "V Drive", "T Fill petrol", doors, lights) are buttons too
+  inventoryUI.onPromptKey = key => {
+    setKey(`Key${key}`, true, false);
+    setKey(`Key${key}`, false, false);
+  };
+  // Tap a hotbar slot to equip it / use it
+  for (const [id, s] of Object.entries(inventoryUI.slots)) {
+    s.slot.addEventListener("pointerdown", e => { e.stopPropagation(); if (inventory.has(id)) equipWeapon(id); });
+  }
+  for (const [kind, s] of Object.entries(inventoryUI.tslots)) {
+    s.slot.addEventListener("pointerdown", e => { e.stopPropagation(); inventory.selectThrowable(kind); sfx.click(); });
+  }
+  inventoryUI.medSlot.slot.addEventListener("pointerdown", e => { e.stopPropagation(); useMedkit(); });
+  inventoryUI.fuelSlot.slot.addEventListener("pointerdown", e => { e.stopPropagation(); refuelRickshaw(); });
+  const cta = document.querySelector("#start-screen .start-cta");
+  if (cta) cta.textContent = "Tap to play";
+  const deathCta = document.querySelector("#death-screen .death-cta");
+  if (deathCta) deathCta.textContent = "Tap to rise again";
+}
+
+/** Which touch buttons make sense right now (cheap: only touches the DOM on change). */
+function updateTouchUi() {
+  if (!touch) return;
+  const busy = drive.on || brAirborne();
+  const armed = !!currentDef() && !busy;
+  touch.show("fire", armed);
+  touch.show("fireL", armed);
+  touch.show("aim", armed);
+  touch.show("reload", armed);
+  touch.show("swapW", !busy && inventory.ownedWeapons.length > 1);
+  touch.show("throw", !busy);
+  touch.show("swapT", !busy);
+  touch.show("map", isBR());
+  touch.show("start", isBR() && net.isHost && (br.state === "warm" || br.state === "count"));
+  touch.show("gyro", gyro.available);
+  touch.lit("aim", input.aim);
+  touch.lit("gyro", gyro.enabled);
+  touch.lit("torch", torch.on);
+}
+
+/** Gyroscope turns feed the same aim as the mouse / finger. */
+function applyGyro() {
+  if (!gyro.enabled) return;
+  gyro.consume(_gyroTurn);
+  if (!isLocked() || playerHealth <= 0 || brWatching() || inventoryOpen) return;
+  const k = THREE.MathUtils.lerp(1, 0.6, aimBlend); // steadier when scoped in
+  aimYaw += _gyroTurn.yaw * k;
+  aimPitch = THREE.MathUtils.clamp(aimPitch + _gyroTurn.pitch * k, cameraRig.pitchMin, cameraRig.pitchMax);
+  if (drive.on && (_gyroTurn.yaw || _gyroTurn.pitch)) drive.lastMouse = performance.now() / 1000;
+}
+
 // Graphics quality: applied at startup, so a change reloads the page
 const qualityEl = document.getElementById("lobby-quality");
 if (qualityEl) {
@@ -3535,6 +3701,7 @@ function animate() {
   const frameMs = rawDelta * 1000;
   const delta = Math.min(rawDelta, 0.05);
 
+  applyGyro();
   if (drive.on) {
     updateDriving(delta);
   } else if (brFlying()) {
@@ -3604,6 +3771,7 @@ function animate() {
 
   updateMood(delta);
   updateRickshawFx();
+  updateTouchUi();
   updateSunShadow();
   if (QUALITY.shadowEvery > 1 && ++shadowFrame % QUALITY.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
   renderFrame();
@@ -3748,7 +3916,7 @@ async function boot() {
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, inventory, pickups, get rickshaw() { return rickshaw; }, toggleRickshaw, refuelRickshaw, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, get kills() { return killsThisLife; } }; // TEMP-DBG
+    window.weather = weather;
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     lobby.show();

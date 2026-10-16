@@ -11,9 +11,13 @@
     "build-house-kit": "node scripts/build-house-kit.mjs",
     "coop": "vite --host",
     "coop:preview": "vite build && vite preview --host",
-    "relay": "node server/relay.mjs"
+    "relay": "node server/relay.mjs",
+    "mobile:build": "vite build && node scripts/prune-dist.mjs && cap sync android",
+    "mobile:open": "cap open android",
+    "mobile:apk": "npm run mobile:build && cd android && gradlew assembleDebug"
   },
   "devDependencies": {
+    "@capacitor/cli": "^7.6.9",
     "@gltf-transform/core": "^4.5.1",
     "@gltf-transform/extensions": "^4.5.1",
     "@gltf-transform/functions": "^4.5.1",
@@ -22,6 +26,8 @@
     "vite": "^8.3.0"
   },
   "dependencies": {
+    "@capacitor/android": "^7.6.9",
+    "@capacitor/core": "^7.6.9",
     "cannon-es": "^0.20.0",
     "lil-gui": "^0.21.0",
     "three": "^0.186.0",

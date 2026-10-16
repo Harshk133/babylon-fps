@@ -27,6 +27,10 @@ export class Net {
     const fromLink = new URLSearchParams(location.search).get("relay");
     const configured = (fromLink || import.meta.env.RELAY_URL || import.meta.env.VITE_RELAY_URL || "").trim();
     if (configured) return Net.normalizeUrl(configured);
+    // The Android app has no server of its own: the relay address must be built in
+    if (window.Capacitor?.isNativePlatform?.()) {
+      throw new Error("This app was built without a co-op server address. Rebuild it with RELAY_URL = wss://<your-relay>.onrender.com/ws (see MOBILE.md).");
+    }
     // Static hosts can't run the relay, so falling back to this site's own /ws can't work there
     if (/\.(vercel\.app|netlify\.app|github\.io|pages\.dev)$/.test(location.hostname)) {
       throw new Error("Co-op server address isn't set in this build. Add RELAY_URL = wss://<your-relay>.onrender.com/ws in Vercel and redeploy.");

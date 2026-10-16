@@ -1,0 +1,14 @@
+{
+  "appId": "com.harshk.survivethehorde",
+  "appName": "Survive the Horde",
+  "webDir": "dist",
+  "android": {
+    "backgroundColor": "#050303",
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}
