@@ -53,7 +53,7 @@ const smooth = (a, b, x) => {
 };
 
 /** Natural height before flattening: soft hills, small bumps, border ridges. */
-function rawHeight(x, z) {
+export function rawHeight(x, z) {
   const hills = (fbm(x / 95, z / 95, 4, 11) - 0.5) * 10;
   const bumps = (vnoise(x / 8, z / 8, 23) - 0.5) * 0.6;
   const r = Math.hypot(x, z);
@@ -98,9 +98,10 @@ export const TERRAIN_GLSL = /* glsl */ `
  *   pads: [{ x, z, r, fade }] flat (y = 0) discs under houses, props and spawn
  *   grassMask(x, z): 0..1 grass density (0 inside houses, on props)
  *   renderStep: 1 = every height sample in the mesh, 2 = every other one
+ *   modify(x, z, h): optional final say on each height (the caves sink the ground under them)
  * Returns { mesh, bodies }.
  */
-export function buildTerrain({ scene, world, material, physicsMaterial, pads, grassMask, renderStep = 1 }) {
+export function buildTerrain({ scene, world, material, physicsMaterial, pads, grassMask, renderStep = 1, modify = null }) {
   const N = TERRAIN_N, H = TERRAIN_HALF, S = TERRAIN_STEP;
   heights = new Float32Array(N * N);
   for (let iz = 0; iz < N; iz++) {
@@ -112,7 +113,8 @@ export function buildTerrain({ scene, world, material, physicsMaterial, pads, gr
         const d = Math.hypot(x - p.x, z - p.z);
         if (d < p.r + p.fade) flat = Math.min(flat, smooth(p.r, p.r + p.fade, d));
       }
-      heights[iz * N + ix] = rawHeight(x, z) * flat;
+      const h = rawHeight(x, z) * flat;
+      heights[iz * N + ix] = modify ? modify(x, z, h) : h;
     }
   }
 

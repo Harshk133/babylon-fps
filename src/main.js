@@ -27,6 +27,7 @@ import { plantDeadForest } from "./world/Forest.js";
 import { buildTerrain, groundHeight, PLAY_RADIUS } from "./world/Terrain.js";
 import { Backdrop } from "./world/Backdrop.js";
 import { Grass, GRASS_FLATTENERS } from "./world/Grass.js";
+import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves } from "./world/Caves.js";
 import { scatterRocks } from "./world/Rocks.js";
 import { mergeStaticMeshes } from "./world/MergeStatic.js";
 import { Rickshaw, RICKSHAW } from "./vehicles/Rickshaw.js";
@@ -612,6 +613,12 @@ function freezeStatic(root) {
 // Footprints of world objects for the minimap, and solid rects zombies path around
 const mapObstacles = [];
 const navObstacles = [];
+let caves = null;          // world/Caves.js, built in loadWorld()
+let caveMapShapes = [];
+/** What you'd stand on from above: the ground, or the top of a cave hill. */
+function surfaceHeight(x, z) {
+  return caves?.topAt(x, z) ?? groundHeight(x, z);
+}
 
 // ─── Collider Helpers ─────────────────────────────────────────────────────────
 function addTreeCollider(x, y, z, rotY, scale, trunkR, trunkH, crownR, crownY) {
@@ -1139,6 +1146,7 @@ function updateCharacterMovement(delta) {
   if (jumpQueued && alive && stance !== "stand") setStance(stance === "prone" ? "crouch" : "stand");
   else if (jumpQueued && onGround && alive) {
     characterBody.velocity.y = JUMP_VELOCITY;
+    jumpGrace = 0.8;
     onGround = false;
   }
   jumpQueued = false;
@@ -1189,6 +1197,48 @@ let stingerTimer = 25;
 let heartTimer = 0;
 let wetness = 0;
 let indoor = false;
+let caveDepth = 0;        // camera underground: 0 … 1 (eased)
+let caveDripTimer = 2, caveCrackleTimer = 0.5, caveHintShown = false;
+
+/**
+ * After the day/night cycle sets the lights: no sun, sky or ambient light far
+ * underground (the rock's own shader already shuts them out; this is for the
+ * characters and props in there), and a short, dark fog.
+ */
+function dimUnderground(d) {
+  sun.intensity *= 1 - d;
+  hemiLight.intensity *= 1 - d * 0.9;
+  ambientLight.intensity *= 1 - d * 0.75;
+  scene.fog.color.lerp(_caveFog, d * 0.85);
+  scene.fog.near = THREE.MathUtils.lerp(scene.fog.near, 4, d);
+  scene.fog.far = THREE.MathUtils.lerp(scene.fog.far, 70, d);
+}
+const _caveFog = new THREE.Color(0x07060a);
+
+/** Dripping water deep in, torches crackling up close, and a hint about the flashlight. */
+function updateCaveSounds(delta) {
+  if (!caves || playerHealth <= 0) return;
+  if (caveDepth > 0.3) {
+    caveDripTimer -= delta;
+    if (caveDripTimer <= 0) {
+      caveDripTimer = 0.5 + Math.random() * 2.2;
+      sfx.drip(caveDepth * (0.4 + Math.random() * 0.6));
+    }
+    if (!caveHintShown && caveDepth > 0.6) {
+      caveHintShown = true;
+      if (!torch.on) inventoryUI.feed("It's dark down here: F for your flashlight", "info");
+    }
+  }
+  const p = characterBody.position;
+  const d = caves.nearestTorch(p.x, p.y, p.z);
+  if (d < 7) {
+    caveCrackleTimer -= delta;
+    if (caveCrackleTimer <= 0) {
+      caveCrackleTimer = 0.08 + Math.random() * 0.35;
+      sfx.crackle((1 - d / 7) * 0.8);
+    }
+  }
+}
 const DRY_GROUND = { roughness: 0.95, color: new THREE.Color(0xffffff) };
 const _grassLight = new THREE.Color();
 const _grassTint = new THREE.Color();
@@ -1256,8 +1306,13 @@ function updateGrassTrample() {
 }
 
 function updateMood(delta) {
-  indoor =!!houses?.houseAt(camera.position.x, camera.position.z);
+  // Underground: how far from daylight the camera is (0 outside … 1 deep in a cave), eased
+  const deep = caves ? caves.depthAt(camera.position.x, camera.position.y, camera.position.z) : 0;
+  caveDepth += (deep - caveDepth) * (1 - Math.exp(-3 * delta));
+  indoor = !!houses?.houseAt(camera.position.x, camera.position.z) || deep > 0.05;
   env.update(delta, camera, weather);
+  if (caveDepth > 0.001) dimUnderground(caveDepth);
+  caves?.update(delta, camera.position, renderer.domElement.height);
   weather.update(delta, camera.position, indoor);
   atmosphere.update(delta, camera.position, {
     mist: Math.max(env.darkness * 0.8, weather.rain * 0.6),
@@ -1282,7 +1337,8 @@ function updateMood(delta) {
   // Rain hides your scent from the hounds
   if (zombieManager) zombieManager.scentMul = 1 - weather.rain * 0.35;
 
-  sfx.setAmbience(weather.rain, Math.min(1, weather.wind / 4.5), env.darkness, indoor);
+  sfx.setAmbience(weather.rain * (1 - caveDepth * 0.7), Math.min(1, weather.wind / 4.5) * (1 - caveDepth * 0.85), env.darkness, indoor);
+  updateCaveSounds(delta);
   // Things in the dark
   stingerTimer -= delta;
   if (stingerTimer <= 0) {
@@ -1949,6 +2005,7 @@ function isOpenGround(x, z) {
 }
 
 const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun"];
+const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov"];
 
 function spawnWorldLoot() {
   const lootRng = makeLCG(0x10070bad);
@@ -1963,6 +2020,12 @@ function spawnWorldLoot() {
     }
   });
   for (const [kind, x, z] of STARTER_LOOT) pickups.spawn(kind, x, z, pickupData(kind));
+  // The caves are worth the walk: something in most chambers and junctions
+  caves?.lootSpots.forEach((sp, i) => {
+    if (lootRng() < 0.3) return;
+    const kind = CAVE_LOOT[(i + Math.floor(lootRng() * CAVE_LOOT.length)) % CAVE_LOOT.length];
+    pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
+  });
   for (const [kind, count] of Object.entries(WORLD_LOOT)) {
     for (let n = 0; n < count; n++) {
       for (let attempt = 0; attempt < 25; attempt++) {
@@ -2055,6 +2118,7 @@ function updatePostFx(realDt) {
     dead: playerHealth <= 0 && !brWatching(),
     slowmo: THREE.MathUtils.clamp((1 - timeScale) / (1 - WHEEL_SLOWMO), 0, 1),
     frenzy: killStreak.frenzy,
+    cave: caveDepth,
     // Faster as health drops
     heartbeat: low ? 0.5 + 0.5 * Math.sin(performance.now() / 1000 * (6 + 6 * (1 - playerHealth / (MAX_HEALTH * 0.4)))) : 0,
   });
@@ -2177,6 +2241,11 @@ function playerVisibility() {
   v *= STANCES[stance].vis;
   v *= 1 - env.darkness * (torch.level > 0.5 ? 0.1 : 0.5);
   v *= 1 - weather.rain * 0.25;
+  if (caveDepth > 0.05 && caves) {
+    const p = characterBody.position;
+    const lit = 1 - THREE.MathUtils.smoothstep(caves.nearestTorch(p.x, p.y, p.z), 3, 8);
+    v *= 1 - caveDepth * 0.55 * (1 - lit) * (torch.level > 0.5 ? 0.25 : 1);
+  }
   return v;
 }
 
@@ -2320,6 +2389,8 @@ const worldMap = new WorldMap({
   fires: () => atmosphere.sources,
   vehicle: () => rickshaw?.footprint ?? null,
   br: () => (isBR() ? _mapState : null),
+  height: (x, z) => (caves ? caves.mapHeight(x, z) : groundHeight(x, z)),
+  caves: () => caveMapShapes,
 }, {
   touch: IS_TOUCH,
   onPin: (x, z) => setPin("me", x, z, true),
@@ -2625,7 +2696,7 @@ async function loadWorld() {
 
   // Fetch and parse everything at once instead of one model after another
   // (the dragon and the hellhound are monsters now: MonsterPool loads them)
-  const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf, treeALod, treeBLod] = await Promise.all([
+  const downloads = Promise.all([
     settle(loadGLB("/models/autorickshaw_3d_model_free.glb")),
     settle(vrmlLoader.loadAsync("/models/house.wrl")),
     // ?v=: bump when the kit changes (/models is cached for a day, a stale kit would miss pieces)
@@ -2636,6 +2707,11 @@ async function loadWorld() {
     settle(gltfLoader.loadAsync("/trees/old_tree_with_vine_3d_model_free.lod1.glb")),
     settle(gltfLoader.loadAsync("/trees/dreftwood tree.lod1.glb")),
   ]);
+  // The caves' heavy lifting (rock field, mesh, torches, baked light) needs no
+  // terrain: do it while the models above are still downloading
+  await new Promise(r => setTimeout(r, 0));
+  precomputeCaves();
+  const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf, treeALod, treeBLod] = await downloads;
   // Every tree clone shares these: one mesh per material instead of dozens of parts
   mergeStaticMeshes(treeAGltf.scene);
   mergeStaticMeshes(treeBGltf.scene);
@@ -2716,13 +2792,14 @@ async function loadWorld() {
 
   const housePositions = scatterPositions(HOUSE_COUNT, rng, SCATTER_RADIUS_MIN + 6,  SCATTER_RADIUS_MAX, 22);
   for (const { x, z } of housePositions) {
-    houses.add(x, z, rng() * Math.PI * 2);
+    const rot = rng() * Math.PI * 2;
+    if (!caveBlocks(x, z, 14)) houses.add(x, z, rot);
   }
   // Outlying farmhouses on their own RNG, so the trees and the rest of the scatter don't move
   const farmRng = makeLCG(0xfa53a11);
   for (const { x, z } of scatterPositions(FARMHOUSE_COUNT, farmRng, 60, 165, 45)) {
     const rot = farmRng() * Math.PI * 2;
-    if (houses.blocks(x, z, 14) || nearObstacle(x, z, 12)) continue;
+    if (houses.blocks(x, z, 14) || nearObstacle(x, z, 12) || caveBlocks(x, z, 14)) continue;
     houses.add(x, z, rot);
   }
   mapObstacles.push(...houses.mapObstacles());
@@ -2741,16 +2818,22 @@ async function loadWorld() {
   buildTerrain({
     scene, world, material: planeMaterial, physicsMaterial: groundMaterial, pads,
     renderStep: QUALITY.terrainStep,
-    // No grass growing through floors, props or the parked rickshaw
+    // The ground sinks to the cave floors under the massifs
+    modify: caveTerrain,
+    // No grass growing through floors, props, the parked rickshaw or rock
     grassMask: (x, z) => {
       if (houses.blocks(x, z, 1.5) || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 2.5) return 0;
       for (const o of solidBoxes) if (Math.hypot(x - o.x, z - o.z) < Math.hypot(o.w, o.d) / 2 + 1) return 0;
-      return 0.55 + fbmGrass(x, z) * 0.45;
+      return (0.55 + fbmGrass(x, z) * 0.45) * caveGrass(x, z);
     },
   });
 
+  // Underground cave networks under rock massifs (world/Caves.js): needs the final terrain
+  caves = new Caves({ scene, world, physicsMaterial: staticMaterial, lights: QUALITY.caveLights });
+  caveMapShapes = caves.mapInfo();
+
   // Big trees stay out of houses (a scattered tree used to land on one)
-  const keepClear = (list, pad) => list.filter(({ x, z }) => !houses.blocks(x, z, pad));
+  const keepClear = (list, pad) => list.filter(({ x, z }) => !houses.blocks(x, z, pad) && !caveBlocks(x, z, pad + 4));
   const treeAPositions = keepClear(scatterPositions(TREE_A_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 8), 5);
   const treeBPositions = keepClear(scatterPositions(TREE_B_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 7), 4);
 
@@ -2798,6 +2881,7 @@ async function loadWorld() {
 
   // Stones: boulders are solid and the same everywhere; pebbles follow the quality setting
   const keepOff = (x, z, pad) => Math.hypot(x, z) < 15 || houses.blocks(x, z, pad + 2) || nearObstacle(x, z, pad)
+    || caveBlocks(x, z, pad + 2)
     || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 6 + pad
     || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2 + pad)
     || fireSpots.some(f => Math.hypot(f.x - x, f.z - z) < 4 + pad);
@@ -2813,7 +2897,7 @@ async function loadWorld() {
     scene, world, material: staticMaterial, rng: makeLCG(0x5eedf0e5),
     count: DEAD_TREE_COUNT, playerHeight: CHARACTER_HEIGHT, heightMul: DEAD_TREE_HEIGHT_MUL,
     ringMin: 14, ringMax: 175, mapObstacles,
-    blocked: (x, z) => Math.hypot(x, z) < 12 || houses.blocks(x, z, 4) || nearObstacle(x, z, 3.5)
+    blocked: (x, z) => Math.hypot(x, z) < 12 || houses.blocks(x, z, 4) || nearObstacle(x, z, 3.5) || caveBlocks(x, z, 4)
       || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 8
       || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 3)
       || fireSpots.some(s => Math.hypot(s.x - x, s.z - z) < 5),
@@ -3226,6 +3310,7 @@ const vehHud = { shown: null, speed: -1, fuel: -1 };
 /** True if a circle at (x, z) overlaps anything solid on the obstacle list (or the map edge). */
 function solidAt(x, z, r) {
   if (Math.hypot(x, z) > PLAY_RADIUS - r) return true;
+  if (caves?.solidAt(x, z, r)) return true;
   for (const o of mapObstacles) {
     if (o.vehicle) continue;
     const dx = x - o.x, dz = z - o.z;
@@ -3421,6 +3506,23 @@ net.on("vfuel", msg => { if (rickshaw) rickshaw.fuel = msg.f; });
 /** [x, z, yaw, fuel] of the parked rickshaw, for late joiners. */
 function rickshawState() {
   return rickshaw ? [+rickshaw.x.toFixed(2), +rickshaw.z.toFixed(2), +rickshaw.yaw.toFixed(3), +rickshaw.fuel.toFixed(1)] : null;
+}
+
+/**
+ * Cave tunnels curve up from the floor, and the capsule's frictionless sphere
+ * contacts would let you ride up them. Unless you jumped, nothing in a tunnel
+ * lifts you off the floor (the hill outside stays climbable).
+ */
+let jumpGrace = 0;
+function keepOnCaveFloor(delta) {
+  jumpGrace = Math.max(0, jumpGrace - delta);
+  if (!caves || drive.on || jumpGrace > 0 || brAirborne()) return;
+  const p = characterBody.position;
+  const feet = p.y - FEET_OFFSET;
+  const up = feet - groundHeight(p.x, p.z);
+  if (up < 0.1 || up > 3.5 || !caves.inside(p.x, p.z, feet)) return;
+  p.y -= Math.min(up, Math.max(0.05, up * 0.6));
+  if (characterBody.velocity.y > 0) characterBody.velocity.y = 0;
 }
 
 /** Keeps you on the map and never under the ground. */
@@ -3655,6 +3757,7 @@ function brSpawnLoot(seed) {
       spots.push({ x: _lootSpot.x, y: _lootSpot.y, z: _lootSpot.z });
     }
   }
+  for (const sp of caves?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
     pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`, it.y ?? null);
   });
@@ -3755,7 +3858,7 @@ function brUpdateFlight(delta) {
     down = iz > 0 ? FREEFALL.dive : FREEFALL.fall;
     rate = FREEFALL.steer;
     fallRate = 2.5;
-    const height = characterBody.position.y - FEET_OFFSET - groundHeight(characterBody.position.x, characterBody.position.z);
+    const height = characterBody.position.y - FEET_OFFSET - surfaceHeight(characterBody.position.x, characterBody.position.z);
     if (height < FREEFALL.chuteHeight || (jumpQueued && br.fallTime > FREEFALL.manualAfter)) brOpenChute();
   } else {
     fwd = iz * CHUTE.speed;
@@ -4217,6 +4320,7 @@ function animate() {
   if (isBR()) brAfterStep(delta);
   rickshawAfterStep();
   keepInBounds();
+  keepOnCaveFloor(delta);
 
   // The physics contact settles the body a centimetre or two up and down on
   // alternate frames: averaging two frames cancels that in the visible
@@ -4518,10 +4622,16 @@ async function boot() {
       if (zombieManager.chasingCount === 0) sfx.spotted();
     };
     // Monsters walk around buildings, use doorways, and can't get through closed doors
-    zombieManager.navigate = (zx, zz, tx, tz, out, big, zy, ty) => houses.navigate(zx, zz, tx, tz, out, big, zy, ty);
+    zombieManager.navigate = (zx, zz, tx, tz, out, big, zy, ty) => {
+      // Through the cave tunnels when the monster or its target is in one; legs in the open use the houses' pathing
+      const r = caves.navigate(zx, zz, tx, tz, out, big, zy, ty, (ax, az, bx, bz, o) => houses.navigate(ax, az, bx, bz, o, big, zy, zy));
+      return r >= 0 ? r : houses.navigate(zx, zz, tx, tz, out, big, zy, ty);
+    };
+    // Flyers keep their altitude over the cave hills, not over the cave floors under them
+    zombieManager.flyFloor = (x, z) => surfaceHeight(x, z);
     // House floors and stairs are walkable surfaces too (monsters follow you upstairs)
     zombieManager.surfaceAt = (x, z, y, ground) => houses.surfaceAt(x, z, y, ground);
-    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z);
+    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4);
     zombieManager.onDoorBang = (x, z) => {
       sfx.doorBang(Math.hypot(x - characterBody.position.x, z - characterBody.position.z));
     };

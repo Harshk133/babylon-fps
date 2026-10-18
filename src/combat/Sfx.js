@@ -409,6 +409,27 @@ export class Sfx {
     }
   }
 
+  // ── Caves ───────────────────────────────────────────────────────────────────
+
+  /** A water drop landing in a puddle somewhere in the dark: a falling "plink" and its echo. */
+  drip(vol = 0.5) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const f = 900 + Math.random() * 900;
+    this._sweep(t, f * 1.6, f, 0.09, 0.05 * vol);
+    this._sweep(t + 0.16 + Math.random() * 0.08, f * 1.5, f * 0.95, 0.12, 0.018 * vol);
+  }
+
+  /** One crack of a burning torch (call often, with small random gaps). */
+  crackle(vol = 0.5) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    this._noise(t, 0.02 + Math.random() * 0.03, "bandpass", 2200 + Math.random() * 2500, 1200, 0.05 * vol, 1.5);
+    if (Math.random() < 0.3) this._noise(t + 0.03, 0.05, "lowpass", 900, 300, 0.03 * vol);
+  }
+
   // ── Ambience: rain, wind, drone ─────────────────────────────────────────────
 
   _loopNoise(seconds) {

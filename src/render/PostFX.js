@@ -192,7 +192,7 @@ export class PostFX {
   }
 
   /**
-   * s: { darkness 0..1, bloodMoon, health 0..1, dead, slowmo 0..1, frenzy 0..1, heartbeat 0..1 }
+   * s: { darkness 0..1, bloodMoon, health 0..1, dead, slowmo 0..1, frenzy 0..1, heartbeat 0..1, cave 0..1 }
    * dt: real (unscaled) seconds.
    */
   update(dt, s) {
@@ -210,6 +210,12 @@ export class PostFX {
     sat -= s.darkness * 0.12;
     if (s.bloodMoon) _c1.lerp(_c2.setRGB(1.18, 0.82, 0.78), s.darkness * 0.8);
     else _c1.lerp(_c2.setRGB(0.9, 0.97, 1.1), s.darkness * 0.6);
+
+    // Underground: deeper edges, a touch of bleach (torchlight stays warm)
+    if (s.cave > 0) {
+      vig += 0.3 * s.cave;
+      bleach += 0.1 * s.cave;
+    }
 
     // Low health: the colour drains out, the edges throb red with the heartbeat
     const low = Math.max(0, 1 - s.health / 0.4);

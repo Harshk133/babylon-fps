@@ -63,6 +63,8 @@ const MIST_VERT = /* glsl */ `
     float d = length(toCam.xz);
     // Fade near the camera (no full-screen wash) and at the box edge
     vAlpha = smoothstep(2.5, 9.0, d) * smoothstep(${(MIST_BOX * 0.5).toFixed(1)}, ${(MIST_BOX * 0.3).toFixed(1)}, d);
+    // None where nothing grows: indoors, under props, and in the caves (the ground there is the cave floor)
+    vAlpha *= smoothstep(0.02, 0.25, terrainSample(wp).g);
   }
 `;
 

@@ -32,6 +32,7 @@ export const QUALITY_PRESETS = {
     houseLights: 1,       // point lights shared by lit houses
     wreckLight: false,    // the flickering light on the nearest burning wreck
     post: "off",          // PostFX: "off" | "grade" (one colour-grade pass) | "full" (+ bloom)
+    caveLights: 1,        // point lights that follow the cave torches nearest the camera
   },
   medium: {
     label: "Medium",
@@ -51,6 +52,7 @@ export const QUALITY_PRESETS = {
     houseLights: 2,
     wreckLight: true,
     post: "grade",
+    caveLights: 2,
   },
   high: {
     label: "High",
@@ -70,6 +72,7 @@ export const QUALITY_PRESETS = {
     houseLights: 2,
     wreckLight: true,
     post: "full",
+    caveLights: 3,
   },
 };
 
@@ -100,6 +103,7 @@ const TOUCH_TUNING = {
     houseLights: 1,
     wreckLight: false,
     post: "off",          // a full-screen pass is real fill-rate on a phone
+    caveLights: 1,
   },
   high: {
     antialias: true,
@@ -113,6 +117,7 @@ const TOUCH_TUNING = {
     fireLights: 1,
     houseLights: 1,
     post: "grade",
+    caveLights: 2,
   },
 };
 if (IS_TOUCH) for (const [name, tuning] of Object.entries(TOUCH_TUNING)) Object.assign(QUALITY_PRESETS[name], tuning);

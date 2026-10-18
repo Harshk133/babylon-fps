@@ -108,6 +108,7 @@ export class ZombieManager {
     this.surfaceAt = null;
     this._animFrame = 0;     // (x, z, feetY, terrainY) → height walked on (house floors, stairs)
     this.canSpawnAt = null;    // (x, z) → bool
+    this.flyFloor = null;      // (x, z) → height flyers keep their altitude above (default: the terrain)
 
     this._chasers = [];
     this._roleTimer = 0;
@@ -942,7 +943,7 @@ export class ZombieManager {
 
   _pinToGround(m) {
     const body = m.body;
-    const g = m.def.flying ? groundHeight(body.position.x, body.position.z)
+    const g = m.def.flying ? (this.flyFloor ? this.flyFloor(body.position.x, body.position.z) : groundHeight(body.position.x, body.position.z))
       : this._surface(body.position.x, body.position.z, m.root.position.y);
     m.surfY = g;
     body.position.y = g + m.visualOffY + m.flyY;

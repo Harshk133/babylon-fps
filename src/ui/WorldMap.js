@@ -44,6 +44,8 @@ export class WorldMap {
    *   fires()     → [{ x, z }]                       burning wrecks
    *   vehicle()   → { x, z } | null
    *   br()        → { zone, next, route, plane } | null
+   *   height(x,z) → surface height for the relief (default: groundHeight)
+   *   caves()     → [{ name, x, z, tunnels: [[ax, az, bx, bz]], mouths: [{ x, z }] }]
    * opts: { touch, onPin(x, z), onClear(), onClose() }
    */
   constructor(sources, opts = {}) {
@@ -279,7 +281,7 @@ export class WorldMap {
     for (let j = 0; j < N; j++) {
       const z = WORLD_R - (j + 0.5) * step;
       for (let i = 0; i < N; i++) {
-        const v = groundHeight(WORLD_R - (i + 0.5) * step, z);
+        const v = (this.sources.height ?? groundHeight)(WORLD_R - (i + 0.5) * step, z);
         h[j * N + i] = v;
         // Height range of the playable land only (the edge ridges would wash it out)
         if (Math.hypot(WORLD_R - (i + 0.5) * step, z) < PLAY_RADIUS) { if (v < lo) lo = v; if (v > hi) hi = v; }
@@ -382,6 +384,35 @@ export class WorldMap {
       ctx.beginPath();
       ctx.arc(X(f.x), Y(f.z), r * 1.8, 0, Math.PI * 2);
       ctx.fill();
+    }
+
+    // Cave networks: the tunnels under the hills, dashed, and their mouths
+    for (const c of this.sources.caves?.() ?? []) {
+      ctx.strokeStyle = "rgba(20, 14, 10, 0.75)";
+      ctx.lineWidth = Math.max(2, 4.5 * k);
+      ctx.lineCap = "round";
+      ctx.setLineDash([Math.max(3, 5 * k), Math.max(3, 4 * k)]);
+      ctx.beginPath();
+      for (const [ax, az, bx, bz] of c.tunnels) { ctx.moveTo(X(ax), Y(az)); ctx.lineTo(X(bx), Y(bz)); }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      for (const m of c.mouths) {
+        const mx = X(m.x), my = Y(m.z);
+        ctx.fillStyle = "#120c08";
+        ctx.strokeStyle = "#e2a42b";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(mx, my + 2, 5, Math.PI, 0);
+        ctx.lineTo(mx + 5, my + 4);
+        ctx.lineTo(mx - 5, my + 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.font = "500 13px 'Teko', 'Segoe UI', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillStyle = "rgba(255, 236, 200, 0.85)";
+      ctx.fillText(c.name.toUpperCase(), X(c.x), Y(c.z));
     }
 
     const car = this.sources.vehicle?.();
