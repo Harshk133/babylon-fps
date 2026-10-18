@@ -8,6 +8,10 @@ import { terrainUniforms, TERRAIN_GLSL } from "./Terrain.js";
 // updates a handful of uniforms per frame; the count scales with quality.
 
 const BOX = 64;          // tufts wrap within this square around the camera
+// Up to this many circles where the grass is trampled flat: every monster and
+// player near the camera. Tufts reach 1.25 m and a hellhound is about 1 m, so
+// without this a pack in dense grass (High) was simply invisible.
+export const GRASS_FLATTENERS = 16;
 
 function bladeTexture() {
   const c = document.createElement("canvas");
@@ -40,6 +44,7 @@ const VERT = /* glsl */ `
   uniform vec3 uCam;
   uniform float uTime;
   uniform float uWind;
+  uniform vec4 uFlat[${GRASS_FLATTENERS}];   // x, z, radius, 0 (radius 0 = unused)
   varying vec2 vUv;
   varying float vShade;
   void main() {
@@ -51,7 +56,13 @@ const VERT = /* glsl */ `
     float keep = step(aRand.w, ts.g);
     float s = keep * smoothstep(${(BOX * 0.5).toFixed(1)}, ${(BOX * 0.36).toFixed(1)}, dist);
     if (s <= 0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vUv = vec2(0.0); vShade = 0.0; return; }
-    float h = (0.55 + aRand.z * 0.7) * s;
+    float trample = 0.0;
+    for (int i = 0; i < ${GRASS_FLATTENERS}; i++) {
+      vec4 f = uFlat[i];
+      if (f.z <= 0.0) break;
+      trample = max(trample, smoothstep(f.z, f.z * 0.5, length(wp - f.xy)));
+    }
+    float h = (0.55 + aRand.z * 0.7) * s * (1.0 - 0.82 * trample);
     float w = (0.7 + aRand.z * 0.4) * s;
     float ang = aRand.w * 37.0;
     float ca = cos(ang), sa = sin(ang);
@@ -134,6 +145,7 @@ export class Grass {
         uCam: { value: new THREE.Vector3() },
         uTime: { value: 0 },
         uWind: { value: 1 },
+        uFlat: { value: Array.from({ length: GRASS_FLATTENERS }, () => new THREE.Vector4()) },
         uLow: { value: new THREE.Color(0x2a3318) },
         uHigh: { value: new THREE.Color(0x8a8c4a) },
         uLight: { value: new THREE.Color(1, 1, 1) },
@@ -158,5 +170,21 @@ export class Grass {
     u.uCam.value.copy(camPos);
     u.uWind.value = wind;
     u.uLight.value.copy(light).multiplyScalar(1 - wet * 0.25);
+  }
+
+  /**
+   * Trampled circles for this frame. Call beginFlat(), then flat() per body
+   * (nearest first: extras past GRASS_FLATTENERS are dropped), then endFlat().
+   */
+  beginFlat() { this._nFlat = 0; }
+
+  flat(x, z, radius) {
+    if (this._nFlat >= GRASS_FLATTENERS) return;
+    this.material.uniforms.uFlat.value[this._nFlat++].set(x, z, radius, 0);
+  }
+
+  endFlat() {
+    const arr = this.material.uniforms.uFlat.value;
+    if (this._nFlat < GRASS_FLATTENERS) arr[this._nFlat].z = 0;   // the shader stops here
   }
 }

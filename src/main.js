@@ -26,7 +26,7 @@ import { Atmosphere } from "./world/Atmosphere.js";
 import { plantDeadForest } from "./world/Forest.js";
 import { buildTerrain, groundHeight, PLAY_RADIUS } from "./world/Terrain.js";
 import { Backdrop } from "./world/Backdrop.js";
-import { Grass } from "./world/Grass.js";
+import { Grass, GRASS_FLATTENERS } from "./world/Grass.js";
 import { scatterRocks } from "./world/Rocks.js";
 import { mergeStaticMeshes } from "./world/MergeStatic.js";
 import { Rickshaw, RICKSHAW } from "./vehicles/Rickshaw.js";
@@ -50,6 +50,9 @@ import { Inventory } from "./inventory/Inventory.js";
 import { InventoryUI } from "./inventory/InventoryUI.js";
 import { Pickups } from "./pickups/Pickups.js";
 import { renderItemIcon } from "./items/ItemModels.js";
+import { WeaponWheel } from "./ui/WeaponWheel.js";
+import { KillStreak } from "./ui/KillStreak.js";
+import { PostFX } from "./render/PostFX.js";
 import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
 import { STANCES, setCapsuleStance } from "./player/Stance.js";
 import { PerfOverlay, PERF_ENABLED, BENCH_ENABLED } from "./debug/PerfOverlay.js";
@@ -199,6 +202,7 @@ function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX =
     gameHud.hitFrom(Math.atan2(right, fwd), amount / 15);
   }
   sfx.hurt();
+  postFx.hurt(Math.min(1, amount / 30));
   timeSinceHit = 0;
   damageFlash  = Math.min(1, damageFlash + Math.max(0.25, shake * 1.5));
   cameraTrauma = Math.min(1, cameraTrauma + shake);
@@ -214,6 +218,7 @@ function regenPlayerHealth(amount) {
 }
 
 function onPlayerDeath() {
+  killStreak.reset();
   setStance("stand", true);
   cameraTrauma = 1;
   soldier.die();
@@ -434,6 +439,10 @@ function updateVisibleMatrices(o, force) {
     if (o.matrixWorldAutoUpdate) {
       if (o.parent === null) o.matrixWorld.copy(o.matrix);
       else o.matrixWorld.multiplyMatrices(o.parent.matrixWorld, o.matrix);
+      // What SkinnedMesh.updateMatrixWorld adds: without it a skinned GLB
+      // (hellhound, dragon) keeps the inverse from its parking spot at
+      // y = −500 and is drawn 500 m up in the sky, health bar left behind
+      if (o.isSkinnedMesh && o.bindMode === THREE.AttachedBindMode) o.bindMatrixInverse.copy(o.matrixWorld).invert();
     }
     o.matrixWorldNeedsUpdate = false;
     force = true;
@@ -453,7 +462,8 @@ const canvas = document.getElementById("webgl");
 // No logarithmic depth: near/far of 0.5/220 doesn't need it, and log depth
 // writes gl_FragDepth, which disables early-Z for every pixel in the scene.
 // Antialiasing is the first thing old integrated GPUs can't afford, so only High has it
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: QUALITY.antialias, powerPreference: "high-performance" });
+// With post-processing on, the MSAA lives on PostFX's scene target instead
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: QUALITY.antialias && QUALITY.post === "off", powerPreference: "high-performance" });
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 // ─── Dynamic resolution ───────────────────────────────────────────────────────
@@ -489,6 +499,7 @@ function updateDynamicResolution(frameMs, logicMs) {
     perf.slow = 0;
     perf.fast = 0;
     renderer.setPixelRatio(next);
+    syncPostSize();
   }
 }
 // Low: no shadow map at all. Medium: redrawn every other frame. High: every frame.
@@ -501,6 +512,14 @@ renderer.shadowMap.autoUpdate = QUALITY.shadowEvery === 1;
 renderer.autoClear = false;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
+
+// Bloom + a colour grade that follows the game (src/render/PostFX.js)
+const postFx = new PostFX(renderer, { mode: QUALITY.post, samples: QUALITY.antialias ? 4 : 0 });
+const _postSize = new THREE.Vector2();
+function syncPostSize() {
+  renderer.getDrawingBufferSize(_postSize);
+  postFx.setSize(_postSize.x, _postSize.y);
+}
 
 const effects = new Effects(scene);
 const sfx = new Sfx();
@@ -842,6 +861,7 @@ function setKey(code, pressed, repeat) {
     }
     if (!playing) return;
     if (code in SLOT_KEYS) {
+      cancelWeaponWheel();
       const id = WEAPON_ORDER.find(w => WEAPONS[w].slot === SLOT_KEYS[code]);
       if (inventory.has(id)) equipWeapon(id);
       else inventoryUI.feed(`${WEAPONS[id].name} not found yet`, "info");
@@ -883,13 +903,20 @@ window.addEventListener("wheel", e => {
   const now = performance.now();
   if (now < wheelCooldown) return;
   wheelCooldown = now + 120;
-  const prev = inventory.current;
-  inventory.cycle(e.deltaY > 0 ? 1 : -1);
-  if (inventory.current !== prev) onWeaponChanged();
+  if (drive.on || brAirborne() || inventory.ownedWeapons.length === 0) return;
+  const dir = e.deltaY > 0 ? 1 : -1;
+  if (!weaponWheel.isOpen) openWeaponWheel(dir);
+  else if (weaponWheel.turn(dir)) sfx.click();
 }, { passive: true });
 canvas.addEventListener("mousedown", e => {
   if (!isLocked()) return;
   if (worldMap.open) return;
+  if (weaponWheel.isOpen) {
+    // Left click equips the front card, right click keeps what you hold
+    if (e.button === 0) confirmWeaponWheel();
+    if (e.button === 2) cancelWeaponWheel();
+    return;
+  }
   if (e.button === 0) { input.fire = true; input.firePressed = true; }
   if (e.button === 2) input.aim = true;
 });
@@ -1164,6 +1191,40 @@ function updateTorch(delta) {
   flashlight.target.updateMatrixWorld();
 }
 
+// Grass is flattened round every monster and player near the camera, so
+// nothing low (hellhounds especially) can hide in it on the dense presets
+const TRAMPLE_RANGE = 34;            // m from the camera (grass only grows within 32)
+const _trample = [];                 // reused { d, x, z, r } entries
+let _trampleN = 0;
+function trampleAt(x, z, r) {
+  const dx = x - camera.position.x, dz = z - camera.position.z;
+  const d = dx * dx + dz * dz;
+  if (d > TRAMPLE_RANGE * TRAMPLE_RANGE) return;
+  const e = _trample[_trampleN] ??= { d: 0, x: 0, z: 0, r: 0 };
+  e.d = d; e.x = x; e.z = z; e.r = r;
+  _trampleN++;
+}
+const _byDist = (a, b) => a.d - b.d;
+function updateGrassTrample() {
+  _trampleN = 0;
+  trampleAt(characterBody.position.x, characterBody.position.z, 1.1);
+  for (const t of remotePlayers.targets()) trampleAt(t.pos.x, t.pos.z, 1.1);
+  // pool.all covers the host's monsters and a co-op client's puppets alike
+  for (const m of zombieManager?.pool.all ?? []) {
+    if (!m.active || m.def.flying) continue;
+    trampleAt(m.root.position.x, m.root.position.z, Math.max(1.6, m.def.height * 0.75));
+  }
+  // Only the nearest fit in the shader; sort just the used part when there are more
+  // (entries past _trampleN are dropped; trampleAt() recreates them on demand)
+  if (_trampleN > GRASS_FLATTENERS) {
+    _trample.length = _trampleN;
+    _trample.sort(_byDist);
+  }
+  grass.beginFlat();
+  for (let i = 0; i < _trampleN; i++) grass.flat(_trample[i].x, _trample[i].z, _trample[i].r);
+  grass.endFlat();
+}
+
 function updateMood(delta) {
   indoor =!!houses?.houseAt(camera.position.x, camera.position.z);
   env.update(delta, camera, weather);
@@ -1182,6 +1243,7 @@ function updateMood(delta) {
   _grassTint.copy(ambientLight.color).multiplyScalar(ambientLight.intensity);
   _grassLight.add(_grassTint);
   grass.update(delta, camera.position, _grassLight, weather.wind, wetness);
+  updateGrassTrample();
 
   // Rain soaks the ground (darker, glossier); it dries slowly
   wetness += ((weather.rain > 0.15 ? 1 : 0) - wetness) * (1 - Math.exp(-(weather.rain > 0.15 ? 0.08 : 0.02) * delta));
@@ -1921,6 +1983,102 @@ const inventoryUI = new InventoryUI({
   onClose: () => setInventoryOpen(false),
 });
 
+// Mouse-wheel weapon carousel around the player. In solo it slows the world
+// down while monsters are hunting you, so there's time to pick.
+const weaponWheel = new WeaponWheel({ order: WEAPON_ORDER, icons: itemIcons, defs: WEAPONS });
+const WHEEL_IDLE_EQUIP = 1.3;    // real seconds without scrolling before the pick is equipped
+const WHEEL_SLOWMO = 0.2;        // world speed while choosing under threat
+const WHEEL_THREAT_RANGE = 40;   // m: chasing / alerted monsters this close trigger it
+let timeScale = 1;
+const _wheelScreen = new THREE.Vector3();
+// Short bullet-time moments (level cleared, headshot kills), solo only
+const bulletTime = { t: 0, scale: 1 };
+function slowFor(seconds, scale) {
+  if (gameMode !== "solo" || net.connected || bench.on) return;
+  // Overlapping moments keep the slower of the two
+  bulletTime.scale = bulletTime.t > 0 ? Math.min(bulletTime.scale, scale) : scale;
+  bulletTime.t = Math.max(bulletTime.t, seconds);
+}
+
+const killStreak = new KillStreak();
+/** Every kill credited to this player (solo, co-op, battle royale). */
+function onLocalKill(headshot) {
+  const r = killStreak.kill(headshot);
+  if (r.heal > 0 && !isBR() && playerHealth > 0) playerHealth = Math.min(MAX_HEALTH, playerHealth + r.heal);
+  if (r.tier) {
+    postFx.kick(r.tier.frenzy ? 0.4 : 0.22, r.tier.color);
+  } else {
+    postFx.kick(headshot ? 0.16 : 0.07, headshot ? 0xfff2d0 : 0xffffff);
+  }
+  // A headshot kill freezes the world for a heartbeat
+  if (headshot) slowFor(0.12, 0.12);
+}
+
+function updatePostFx(realDt) {
+  killStreak.update(realDt);
+  const low = playerHealth > 0 && playerHealth < MAX_HEALTH * 0.4;
+  postFx.update(realDt, {
+    darkness: env.darkness,
+    bloodMoon: env.bloodMoon,
+    health: playerHealth / MAX_HEALTH,
+    dead: playerHealth <= 0 && !brWatching(),
+    slowmo: THREE.MathUtils.clamp((1 - timeScale) / (1 - WHEEL_SLOWMO), 0, 1),
+    frenzy: killStreak.frenzy,
+    // Faster as health drops
+    heartbeat: low ? 0.5 + 0.5 * Math.sin(performance.now() / 1000 * (6 + 6 * (1 - playerHealth / (MAX_HEALTH * 0.4)))) : 0,
+  });
+}
+
+function wheelAmmo(id) {
+  const slot = inventory.weapons[id];
+  if (!slot) return "";
+  return slot.reserve === Infinity ? `${slot.ammo} / ∞` : `${slot.ammo} / ${slot.reserve}`;
+}
+
+function openWeaponWheel(dir) {
+  weaponWheel.open(inventory.ownedWeapons, inventory.current, wheelAmmo);
+  if (weaponWheel.turn(dir)) sfx.click();
+}
+
+/** Equips the front card (if it's a change) and closes the wheel. */
+function confirmWeaponWheel() {
+  if (!weaponWheel.isOpen) return;
+  weaponWheel.close();
+  equipWeapon(weaponWheel.selected);
+}
+
+function cancelWeaponWheel() {
+  if (weaponWheel.isOpen) weaponWheel.close();
+}
+
+/** Slow motion only in solo: co-op and the BR share one clock between players. */
+function wheelThreatened() {
+  if (gameMode !== "solo" || net.isClient || bench.on || !zombieManager) return false;
+  for (const m of zombieManager.active) {
+    if (!m.dying && (m.state === "chase" || m.state === "alert") && m.distXZ < WHEEL_THREAT_RANGE) return true;
+  }
+  return false;
+}
+
+function updateWeaponWheel(realDt) {
+  if (weaponWheel.isOpen && (playerHealth <= 0 || !isLocked() || drive.on || brAirborne() || inventoryOpen || worldMap.open)) {
+    cancelWeaponWheel();
+  }
+  if (weaponWheel.isOpen && weaponWheel.idle > WHEEL_IDLE_EQUIP) confirmWeaponWheel();
+  const slow = weaponWheel.isOpen && wheelThreatened();
+  if (bulletTime.t > 0) bulletTime.t -= realDt;
+  const target = Math.min(slow ? WHEEL_SLOWMO : 1, bulletTime.t > 0 ? bulletTime.scale : 1);
+  // Ease in fast, ease back out a little slower, on real time
+  timeScale += (target - timeScale) * Math.min(1, realDt * (target < timeScale ? 14 : 6));
+  if (Math.abs(1 - timeScale) < 0.005) timeScale = 1;
+  // Centre the ring on the player's chest
+  _wheelScreen.set(characterRoot.position.x, characterRoot.position.y + 1.1, characterRoot.position.z).project(camera);
+  weaponWheel.update(realDt,
+    (_wheelScreen.x * 0.5 + 0.5) * innerWidth,
+    (-_wheelScreen.y * 0.5 + 0.5) * innerHeight,
+    slow);
+}
+
 const pickups = new Pickups(scene);
 
 const fireFX = new FireFX(scene);
@@ -2009,6 +2167,9 @@ function onLevelStart(level) {
 
 function onLevelCleared(level) {
   if (net.isHost) net.send({ t: "lev", e: "clear", n: level.n });
+  // The last kill of a level plays out in slow motion, with a golden flash
+  slowFor(1.6, 0.3);
+  postFx.kick(0.45, 0xffd27a);
   gameHud.showBanner({
     title: `LEVEL ${level.n} CLEARED`,
     sub: "Supplies dropped nearby",
@@ -2887,6 +3048,7 @@ net.on("drop", msg => {
 net.on("take", msg => pickups.releaseById(msg.i));
 net.on("kill", msg => {
   killsThisLife++;
+  onLocalKill(false);
   showHitMarker(false, true);
   sfx.kill();
   const m = monsterSync?.findPuppet(msg.n);
@@ -3652,6 +3814,7 @@ function brHandleElim({ v, k, w, hs }) {
   gameHud.killFeed(kName ? `${kName} ▸ ${vName}` : vName, verb, brColor(kName ? k : v), !!hs);
   if (k === net.id && v !== net.id) {
     killsThisLife++;
+    onLocalKill(!!hs);
     showHitMarker(!!hs, true);
     sfx.kill();
   }
@@ -3898,10 +4061,12 @@ let shadowFrame = 0;
 /** Mountains + sky with a far camera, then the game scene on a fresh depth buffer. */
 function renderFrame() {
   backdrop.update(camera, { fogColor: scene.fog.color, lightDir: env.lightDir, sun, hemi: hemiLight, darkness: env.darkness });
+  postFx.begin();
   renderer.clear();
   backdrop.render(renderer);
   renderer.clearDepth();
   renderer.render(scene, camera);
+  postFx.end();
 }
 
 let _animRunning = false;
@@ -3993,7 +4158,12 @@ function animate() {
   if (bench.on) benchStep(frameStart);
   const rawDelta = clock.getDelta();
   const frameMs = rawDelta * 1000;
-  const delta = Math.min(rawDelta, 0.05);
+  const realDelta = Math.min(rawDelta, 0.05);
+  updateWeaponWheel(realDelta);
+  updatePostFx(realDelta);
+  // Everything in the world runs on scaled time (slow motion while choosing a
+  // weapon under threat); the camera and HUD stay on real time
+  const delta = realDelta * timeScale;
 
   updateTouch();
   if (drive.on) {
@@ -4041,7 +4211,7 @@ function animate() {
 
   const watched = brWatchedPlayer();
   if (watched) updateSpectatorCamera(delta, watched);
-  else updateThirdPersonCamera(delta);
+  else updateThirdPersonCamera(realDelta);
   updateFocus(watched);
   updateSoldier(delta);
   updateWeapon(delta);
@@ -4176,6 +4346,7 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  syncPostSize();
 });
 
 // ─── Boot Sequence ────────────────────────────────────────────────────────────
@@ -4206,9 +4377,13 @@ async function warmUpGpu() {
   });
   fireFX.setWarmup(true);
   const compile = async () => {
+    // Into the same target the game draws to: tone mapping and colour space
+    // are part of each program, so the screen's variants would be the wrong ones
+    postFx.begin();
     if (renderer.compileAsync) await renderer.compileAsync(scene, camera);
     else renderer.compile(scene, camera);
     renderer.compile(backdrop.scene, backdrop.camera);
+    renderer.setRenderTarget(null);
   };
   await compile();
   // Monster hit / burn materials only appear on demand: compile them on one of each type
@@ -4297,6 +4472,7 @@ async function boot() {
       // Kill credit goes to whoever landed the last hit
       if (zombie.lastHitBy === null || zombie.lastHitBy === localTarget.id) {
         killsThisLife++;
+        onLocalKill(zombie.killCause === "head");
         gameHud.killFeed(zombie.def.label, KILL_VERB[zombie.killCause] ?? "KILLED", zombie.def.color, zombie.killCause === "head");
       } else net.send({ t: "kill", to: zombie.lastHitBy, n: zombie.netId });
       zombie.killCause = null;

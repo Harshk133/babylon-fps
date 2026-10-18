@@ -31,6 +31,7 @@ export const QUALITY_PRESETS = {
     fireLights: 1,        // point lights shared by molotov fires
     houseLights: 1,       // point lights shared by lit houses
     wreckLight: false,    // the flickering light on the nearest burning wreck
+    post: "off",          // PostFX: "off" | "grade" (one colour-grade pass) | "full" (+ bloom)
   },
   medium: {
     label: "Medium",
@@ -49,6 +50,7 @@ export const QUALITY_PRESETS = {
     fireLights: 2,
     houseLights: 2,
     wreckLight: true,
+    post: "grade",
   },
   high: {
     label: "High",
@@ -67,6 +69,7 @@ export const QUALITY_PRESETS = {
     fireLights: 2,
     houseLights: 2,
     wreckLight: true,
+    post: "full",
   },
 };
 
@@ -96,6 +99,7 @@ const TOUCH_TUNING = {
     fireLights: 1,
     houseLights: 1,
     wreckLight: false,
+    post: "off",          // a full-screen pass is real fill-rate on a phone
   },
   high: {
     antialias: true,
@@ -108,6 +112,7 @@ const TOUCH_TUNING = {
     mist: 45,
     fireLights: 1,
     houseLights: 1,
+    post: "grade",
   },
 };
 if (IS_TOUCH) for (const [name, tuning] of Object.entries(TOUCH_TUNING)) Object.assign(QUALITY_PRESETS[name], tuning);
