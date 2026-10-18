@@ -53,6 +53,7 @@ import { renderItemIcon } from "./items/ItemModels.js";
 import { WeaponWheel } from "./ui/WeaponWheel.js";
 import { KillStreak } from "./ui/KillStreak.js";
 import { PostFX } from "./render/PostFX.js";
+import { Confetti } from "./ui/Confetti.js";
 import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
 import { STANCES, setCapsuleStance } from "./player/Stance.js";
 import { PerfOverlay, PERF_ENABLED, BENCH_ENABLED } from "./debug/PerfOverlay.js";
@@ -307,6 +308,22 @@ const ammoWeaponEl  = document.getElementById("ammo-weapon");
 const ammoPipsEl    = document.getElementById("ammo-pips-fill");
 const healthCardEl  = document.querySelector(".health-card");
 
+const startTitleEl = document.getElementById("start-title");
+const startVerbEl = document.getElementById("start-verb");
+const pauseNoteEl = document.getElementById("pause-note");
+let hasPlayed = false;   // clicked into the game at least once
+
+/**
+ * Solo freezes while the pause screen is up (Esc, Tab inventory, a lost
+ * pointer lock). Co-op and the battle royale share one world, so they can't.
+ */
+function canPause() {
+  return gameMode === "solo" && !net.connected && !bench.on;
+}
+function gamePaused() {
+  return hud.paused && hasPlayed && playerHealth > 0 && canPause();
+}
+
 const hud = {
   paused: true,
   gap: -1, ammo: -1, reserve: null, weapon: null, reload: -1, kills: -1, low: null,
@@ -387,6 +404,13 @@ function updateCombatHUD(delta) {
   if (showStart !== hud.shownPaused) {
     hud.shownPaused = showStart;
     startScreenEl?.classList.toggle("visible", showStart);
+    // After the first click in, it's a pause screen; say whether the world froze
+    if (showStart && hasPlayed) {
+      const frozen = canPause();
+      startTitleEl.textContent = "PAUSED";
+      startVerbEl.textContent = "resume";
+      pauseNoteEl.textContent = frozen ? "" : isBR() ? "The match goes on without you" : "The horde doesn't wait in co-op";
+    }
   }
 }
 
@@ -928,6 +952,12 @@ window.addEventListener("contextmenu", e => e.preventDefault());
 function onLockChange() {
   if (!isLocked()) { input.fire = false; input.aim = false; cancelThrow(); if (!brWatching()) setMapOpen(false); }
   hud.paused = !isLocked();
+  if (isLocked()) hasPlayed = true;
+  // Silence the frozen world (the click back in resumes the audio)
+  if (canPause() && hasPlayed && playerHealth > 0) {
+    if (hud.paused) sfx.ctx?.suspend?.();
+    else sfx.ctx?.resume?.();
+  }
   // The first level starts when you first click into the game
   // (co-op clients follow the host's levels instead)
   if (isLocked() && director && director.state === "idle" && !net.isClient && !isBR() && !bench.on) director.start(1);
@@ -2001,6 +2031,7 @@ function slowFor(seconds, scale) {
 }
 
 const killStreak = new KillStreak();
+const confetti = new Confetti();
 /** Every kill credited to this player (solo, co-op, battle royale). */
 function onLocalKill(headshot) {
   const r = killStreak.kill(headshot);
@@ -2015,7 +2046,7 @@ function onLocalKill(headshot) {
 }
 
 function updatePostFx(realDt) {
-  killStreak.update(realDt);
+  killStreak.update(gamePaused() ? 0 : realDt);
   const low = playerHealth > 0 && playerHealth < MAX_HEALTH * 0.4;
   postFx.update(realDt, {
     darkness: env.darkness,
@@ -2170,6 +2201,7 @@ function onLevelCleared(level) {
   // The last kill of a level plays out in slow motion, with a golden flash
   slowFor(1.6, 0.3);
   postFx.kick(0.45, 0xffd27a);
+  confetti.celebrate("level");
   gameHud.showBanner({
     title: `LEVEL ${level.n} CLEARED`,
     sub: "Supplies dropped nearby",
@@ -3857,6 +3889,7 @@ function brShowEnd(w) {
   if (w === net.id) {
     brHud.showResult({ title: "WINNER", sub: "Last one standing", lines: [["PLACE", "#1"], ...lines], color: "#ffd84d" });
     sfx.levelCleared();
+    confetti.celebrate("victory");
   } else {
     brHud.showResult({
       title: w !== null ? "MATCH OVER" : "NO SURVIVORS",
@@ -4163,7 +4196,7 @@ function animate() {
   updatePostFx(realDelta);
   // Everything in the world runs on scaled time (slow motion while choosing a
   // weapon under threat); the camera and HUD stay on real time
-  const delta = realDelta * timeScale;
+  const delta = gamePaused() ? 0 : realDelta * timeScale;
 
   updateTouch();
   if (drive.on) {

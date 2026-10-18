@@ -2527,3 +2527,24 @@ body:not(.touch) #boss-bar { top: 168px; }
 
 body.touch #streak .streak-title { font-size: 44px; }
 body.touch #streak .streak-sub { font-size: 16px; }
+
+/* ── Celebration confetti (src/ui/Confetti.js) ───────────────────────────── */
+#confetti {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1950;  /* over the HUD, banners and the BR result screen */
+  display: none;
+}
+#confetti.on { display: block; }
+
+/* Pause note under the title when the game is frozen (or can't be, in co-op) */
+#pause-note {
+  margin-top: 6px;
+  font: 500 18px/1.2 var(--font-hud);
+  letter-spacing: 0.2em;
+  color: var(--bone-dim);
+}
+#pause-note:empty { display: none; }
