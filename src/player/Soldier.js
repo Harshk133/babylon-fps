@@ -3,6 +3,10 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { cloneItem } from "../items/ItemModels.js";
 import { WEAPON_ORDER } from "../combat/weapons.js";
 
+// Worn gear, one shade per level (Lv. 1 olive drab, Lv. 2 desert tan, Lv. 3 black)
+const GEAR_MATS = [0x5b6338, 0x9a8458, 0x2a2c2f].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.8, metalness: 0.05 }));
+const STRAP_MAT = new THREE.MeshStandardMaterial({ color: 0x1d1e1c, roughness: 0.9 });
+
 // Quaternius "Soldier" + "Submachine Gun" (both CC0, via poly.pizza)
 const SOLDIER_URL = "/models/soldier/soldier.glb";
 const WEAPON_URL  = "/models/soldier/smg.glb";
@@ -90,6 +94,8 @@ export class Soldier {
 
     this._chestRef = new THREE.Quaternion(); // chest orientation (root-local) when aiming dead ahead
     this._spineDelta = new THREE.Quaternion();
+    this.gearMeshes = { helmet: [], vest: [], backpack: [] }; // [level − 1] → mesh
+    this.gear = { helmet: 0, vest: 0, backpack: 0 };
   }
 
   async load(loader = new GLTFLoader()) {
@@ -125,6 +131,9 @@ export class Soldier {
     this._handPosed = [this.abdomen, this.chest, this.neck, ...this.arms, ...this.legs]
       .filter(Boolean).map(b => [b, b.quaternion.clone()]);
 
+    // Helmets, vests and backpacks are sized to this model while it's still in its rest pose
+    this._buildGear(bone);
+
     const upperBones = new Set();
     this.abdomen.traverse(o => upperBones.add(o.name));
 
@@ -153,6 +162,130 @@ export class Soldier {
 
     this._attachWeapon(weapon.scene, pointClip);
     this._applyWeights();
+  }
+
+  /**
+   * Builds every level of helmet, vest and backpack once, measured off the
+   * rest pose (head mesh bounds, shoulder width, chest height), and parents
+   * them to the head / chest bones with attach() so they keep that fit
+   * through every animation. setGear() only toggles visibility.
+   */
+  _buildGear(bone) {
+    const model = this.model;
+    model.updateMatrixWorld(true);
+    const wp = (b, out = new THREE.Vector3()) => b.getWorldPosition(out);
+    const head = bone("Head"), chest = this.chest, neck = this.neck, abdomen = this.abdomen;
+    const headMesh = model.getObjectByName("Soldier_Head");
+    const hb = new THREE.Box3();
+    if (headMesh) headMesh.traverse(o => { if (o.isMesh) { o.computeBoundingBox?.(); hb.union(new THREE.Box3().setFromObject(o, true)); } });
+    // Upper-arm joints (the "Shoulder" bones are collarbones beside the spine)
+    const shL = wp(bone("UpperArm.L")), shR = wp(bone("UpperArm.R"));
+    const neckP = wp(neck), abdP = wp(abdomen), chestP = wp(chest);
+    // The torso's own frame: x along the shoulders, y up, z out of the chest
+    // (the rest pose is twisted, so world axes would put the pack off-centre)
+    const up = new THREE.Vector3(0, 1, 0);
+    const across = shL.clone().sub(shR).setY(0).normalize();
+    const fwd = new THREE.Vector3().crossVectors(across, up);
+    if (fwd.z < 0) fwd.negate(); // the model faces +Z
+    const side = new THREE.Vector3().crossVectors(up, fwd); // right-handed: side × up = fwd
+    const frame = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(side, up, fwd));
+    const toFrame = frame.clone().invert();
+    // The torso's real extent in that frame: body vertices between waist and neck, arms left out
+    const half = shL.distanceTo(shR) * 0.5;
+    const tMin = new THREE.Vector3(Infinity, Infinity, Infinity), tMax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+    const v = new THREE.Vector3();
+    model.getObjectByName("Soldier_Body")?.traverse(o => {
+      if (!o.isSkinnedMesh) return;
+      for (let i = 0, n = o.geometry.attributes.position.count; i < n; i++) {
+        o.getVertexPosition(i, v);
+        v.applyMatrix4(o.matrixWorld);
+        if (v.y < abdP.y || v.y > neckP.y) continue;
+        v.sub(chestP).applyQuaternion(toFrame);
+        if (Math.abs(v.x) > half * 0.92) continue;
+        tMin.min(v); tMax.max(v);
+      }
+    });
+    const torso = Number.isFinite(tMin.x)
+      ? { cx: (tMin.x + tMax.x) / 2, cz: (tMin.z + tMax.z) / 2, w: tMax.x - tMin.x, d: tMax.z - tMin.z, back: tMin.z }
+      : { cx: 0, cz: 0, w: half * 1.6, d: half * 0.9, back: -half * 0.45 };
+    const width = torso.w;
+    const height = (neckP.y - abdP.y) * 0.95;
+    /** Puts a gear group at torso-frame (x, worldY, z), turned with the torso. */
+    const place = (g, x, y, z) => {
+      g.quaternion.copy(frame);
+      g.position.set(x, 0, z).applyQuaternion(frame).add(chestP);
+      g.position.y = y;
+    };
+
+    // Helmet: a dome over the top of the head, with a brim
+    const hc = hb.isEmpty() ? wp(head).add(new THREE.Vector3(0, 0.1, 0)) : hb.getCenter(new THREE.Vector3());
+    const hs = hb.isEmpty() ? new THREE.Vector3(0.22, 0.25, 0.24) : hb.getSize(new THREE.Vector3());
+    const r = Math.max(hs.x, hs.z) * 0.56;
+    const domeGeo = new THREE.SphereGeometry(r, 18, 10, 0, Math.PI * 2, 0, Math.PI * 0.52);
+    const brimGeo = new THREE.CylinderGeometry(r * 1.06, r * 1.1, r * 0.12, 18, 1, true);
+    // Vest: a slab just outside the torso, with pouches on the front
+    const vestGeo = new THREE.BoxGeometry(width * 1.1, height * 0.74, torso.d * 1.18);
+    const pouchGeo = new THREE.BoxGeometry(width * 0.24, height * 0.17, torso.d * 0.2);
+    // Backpack: deeper as it levels up, with a bedroll on top for Lv. 3
+    const strapGeo = new THREE.BoxGeometry(width * 1.04, height * 0.06, torso.d * 1.12);
+    const rollGeo = new THREE.CylinderGeometry(width * 0.16, width * 0.16, width * 0.95, 10).rotateZ(Math.PI / 2);
+
+    for (let lv = 1; lv <= 3; lv++) {
+      const mat = GEAR_MATS[lv - 1];
+      const helmet = new THREE.Group();
+      helmet.add(new THREE.Mesh(domeGeo, mat));
+      const brim = new THREE.Mesh(brimGeo, mat);
+      brim.position.y = r * 0.02;
+      helmet.add(brim);
+      helmet.position.set(hc.x, hc.y + hs.y * 0.12, hc.z - hs.z * 0.02);
+      this._wear(helmet, head, "helmet");
+
+      const vest = new THREE.Group();
+      vest.add(new THREE.Mesh(vestGeo, mat));
+      for (const x of [-0.3, 0, 0.3]) {
+        const pouch = new THREE.Mesh(pouchGeo, lv === 3 ? STRAP_MAT : GEAR_MATS[Math.max(0, lv - 2)]);
+        pouch.position.set(x * width, -height * 0.14, torso.d * 0.62);
+        vest.add(pouch);
+      }
+      place(vest, torso.cx, abdP.y + height * 0.5, torso.cz);
+      this._wear(vest, chest, "vest");
+
+      // Backpack: a box on the back, deeper and taller per level, held by a chest strap
+      const depth = torso.d * (0.45 + 0.15 * lv);
+      const pack = new THREE.Group();
+      const bag = new THREE.Mesh(new THREE.BoxGeometry(width * 0.85, height * (0.62 + 0.1 * lv), depth), mat);
+      bag.position.z = -depth / 2;
+      pack.add(bag);
+      const strap = new THREE.Mesh(strapGeo, STRAP_MAT);
+      strap.position.set(0, height * 0.12, torso.cz - torso.back);
+      pack.add(strap);
+      if (lv === 3) {
+        const roll = new THREE.Mesh(rollGeo, GEAR_MATS[1]);
+        roll.position.set(0, height * (0.62 + 0.3) / 2 + width * 0.12, -depth / 2);
+        pack.add(roll);
+      }
+      place(pack, torso.cx, abdP.y + height * 0.55, torso.back - torso.d * 0.02);
+      this._wear(pack, chest, "backpack");
+    }
+  }
+
+  _wear(group, bone, slot) {
+    group.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = false; } });
+    group.visible = false;
+    this.model.add(group);
+    group.updateMatrixWorld(true);
+    bone.attach(group); // keep the world fit, follow the bone from now on
+    this.gearMeshes[slot].push(group);
+  }
+
+  /** levels: { helmet, vest, backpack } (0 = none). Cheap: only visibility changes. */
+  setGear(levels) {
+    for (const slot of ["helmet", "vest", "backpack"]) {
+      const lv = levels?.[slot] ?? 0;
+      if (this.gear[slot] === lv) continue;
+      this.gear[slot] = lv;
+      this.gearMeshes[slot].forEach((m, i) => { m.visible = i === lv - 1; });
+    }
   }
 
   _makeAction(clip) {

@@ -328,6 +328,16 @@ body {
   45%      { filter: brightness(1.25); }
 }
 
+/* Inside a smoke cloud: its colour over the world, under the HUD */
+#smoke-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s linear;
+}
+
 #damage-overlay {
   z-index: 1000;
   opacity: 0;
@@ -344,6 +354,26 @@ body {
   user-select: none;
   pointer-events: none;
 }
+
+/* Worn gear under the health card (InventoryUI._updateGear) */
+#gear-hud { display: flex; gap: 6px; margin: 6px 0 0 6px; }
+#gear-hud:empty { display: none; }
+.gh-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px 4px 3px;
+  background: var(--panel);
+  border-left: 2px solid #c9c2b6;
+  transform: skewX(-6deg);
+}
+.gh-chip.lv2 { border-left-color: #4aa3ff; }
+.gh-chip.lv3 { border-left-color: #b06cff; }
+.gh-chip img { width: 22px; height: 22px; object-fit: contain; }
+.gh-chip b { font: 600 15px/1 var(--font-hud); color: var(--bone); }
+.gh-chip i { position: absolute; left: 3px; right: 3px; bottom: 1px; height: 2px; background: linear-gradient(90deg, #5fd068 var(--d), rgba(255, 255, 255, 0.12) var(--d)); }
+.gh-chip.low i { background: linear-gradient(90deg, #ff5a46 var(--d), rgba(255, 255, 255, 0.12) var(--d)); }
 
 .health-card {
   --beat: 1.2s;
@@ -1153,227 +1183,6 @@ kbd {
 #inventory.visible {
   opacity: 1;
   pointer-events: auto;
-}
-
-.inv-panel {
-  width: min(980px, 100%);
-  max-height: 100%;
-  padding: 20px 24px 24px;
-  overflow-y: auto !important;
-  background: linear-gradient(160deg, rgba(34, 22, 16, 0.96), rgba(16, 10, 8, 0.96));
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-top: 3px solid #e2a42b;
-  border-radius: 6px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
-}
-
-.inv-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.inv-head h2 {
-  font-size: 22px;
-  font-weight: 900;
-  letter-spacing: 0.25em;
-  color: #f2e6d8;
-}
-
-.inv-hint {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
-}
-
-.inv-section {
-  margin: 18px 0 8px;
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.3em;
-  color: #e2a42b;
-}
-
-.inv-weapons,
-.inv-items {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-  gap: 10px;
-}
-
-.inv-items { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
-
-.inv-card {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  padding: 10px 12px 12px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 5px;
-}
-
-.inv-card.equipped {
-  background: rgba(226, 164, 43, 0.08);
-  border-color: #e2a42b;
-}
-
-.inv-card.locked { opacity: 0.4; }
-
-.card-top {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 18px;
-}
-
-.card-key {
-  padding: 0 5px;
-  font-size: 10px;
-  font-weight: 800;
-  color: rgba(255, 220, 200, 0.8);
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  border-radius: 3px;
-}
-
-.card-name {
-  min-width: 0;
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.card-badge {
-  flex-shrink: 0;
-  margin-left: auto;
-  padding: 2px 6px;
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.12em;
-  color: #1a0f08;
-  background: #e2a42b;
-  border-radius: 3px;
-}
-
-.card-icon {
-  width: 100%;
-  height: 52px;
-  object-fit: contain;
-  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.7));
-}
-
-.card-icon.small { height: 46px; }
-
-.medkit-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 46px;
-  height: 46px;
-  margin: 0 auto;
-  font-size: 40px;
-  font-weight: 900;
-  line-height: 1;
-  color: #c4161c;
-  background: #e6e6e2;
-  border-radius: 8px;
-  filter: none;
-}
-
-.card-ammo,
-.card-count {
-  font-size: 13px;
-  color: rgba(255, 255, 255, 0.7);
-  font-variant-numeric: tabular-nums;
-}
-
-.card-ammo b,
-.card-count b {
-  font-size: 18px;
-  color: #fff;
-}
-
-.card-ammo small {
-  display: block;
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  color: rgba(255, 255, 255, 0.45);
-}
-
-.card-desc {
-  font-size: 11px;
-  line-height: 1.4;
-  color: rgba(255, 255, 255, 0.6);
-}
-
-.card-desc kbd {
-  min-width: 0;
-  padding: 0 4px;
-  font-size: 10px;
-  border-bottom-width: 2px;
-}
-
-.stats {
-  display: grid;
-  gap: 3px;
-}
-
-.stat {
-  display: grid;
-  grid-template-columns: 62px 1fr;
-  align-items: center;
-  font-size: 10px;
-  letter-spacing: 0.05em;
-  color: rgba(255, 255, 255, 0.55);
-}
-
-.stat-bar {
-  height: 4px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 2px;
-}
-
-.stat-bar i {
-  display: block;
-  height: 100%;
-  background: #e2a42b;
-  border-radius: 2px;
-}
-
-.card-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: auto;
-}
-
-.card-actions button {
-  flex: 1;
-  padding: 6px;
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: #fff;
-  background: rgba(226, 164, 43, 0.2);
-  border: 1px solid #e2a42b;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.card-actions button:hover:not(:disabled) { background: rgba(226, 164, 43, 0.38); }
-
-.card-actions button.ghost {
-  background: transparent;
-  border-color: rgba(255, 255, 255, 0.25);
-}
-
-.card-actions button.ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
-
-.card-actions button:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
 @media (max-width: 900px) {

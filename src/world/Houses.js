@@ -651,7 +651,8 @@ export class Houses {
     to.play();
     from.stop();
     h.doorAnim = dur - t + 0.05;
-    open ? this.sfx?.doorOpen() : this.sfx?.doorClose(dur - t);
+    const at = { x: h.doorWorld.x, y: (h.y0 ?? 0) + 1.2, z: h.doorWorld.z };
+    open ? this.sfx?.doorOpen(at) : this.sfx?.doorClose(dur - t, at);
     return true;
   }
 
@@ -661,7 +662,7 @@ export class Houses {
     f.lightOn = !f.lightOn;
     f.lever.rotation.x = f.lightOn ? -0.35 : 0.35;
     if (f.lampMat) f.lampMat.emissiveIntensity = f.lightOn ? 2.2 : 0;
-    this.sfx?.click();
+    this.sfx?.lightSwitch(f.switchWorld);
   }
 
   // ── Per frame ───────────────────────────────────────────────────────────────

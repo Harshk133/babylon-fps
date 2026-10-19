@@ -66,6 +66,10 @@ export class RemotePlayers {
     this.addCapsule = addCapsule;
     this.players = new Map();
     this._pvp = false;
+    /** (player, x, feetY, z, vol 0..1) → plays a footfall there (set by main.js). */
+    this.onStep = null;
+    /** (from, to) → true if a smoke cloud hides the line between them (set by main.js). */
+    this.concealed = null;
     this._targets = [];
     this._v = new THREE.Vector3();
     this._muzzle = new THREE.Vector3();
@@ -184,6 +188,8 @@ export class RemotePlayers {
       p.target.aimOff = STANCES[stance].aimOff;
       p.target.eyeOff = STANCES[stance].eyeOff;
     }
+    // g: worn gear as helmet·100 + vest·10 + backpack levels
+    p.gearCode = s.g ?? 0;
     p.phase = s.ph ?? PHASE_GROUND;
     p.driving = !!s.veh;
     if (p.soldier) p.soldier.seated = p.driving;
@@ -194,7 +200,7 @@ export class RemotePlayers {
   }
 
   /** A teammate fired: muzzle flash, tracers, gunshot. */
-  shot(id, msg, localPos) {
+  shot(id, msg) {
     const p = this.players.get(id);
     if (p?.ready) p.soldier.getMuzzleWorldPosition(this._muzzle);
     else this._muzzle.set(msg.f[0], msg.f[1], msg.f[2]);
@@ -203,8 +209,26 @@ export class RemotePlayers {
       this._hit.set(msg.h[i], msg.h[i + 1], msg.h[i + 2]);
       this.effects.tracer(this._muzzle, this._hit);
     }
-    const d = Math.hypot(this._muzzle.x - localPos.x, this._muzzle.z - localPos.z);
-    this.sfx.gunshot(msg.w, Math.max(0.1, Math.min(0.9, 0.9 / (1 + d * 0.05))));
+    // From their muzzle, so you hear which side they're shooting from
+    this.sfx.gunshot(msg.w, msg.s ? 0.32 : 0.9, this._muzzle); // s: suppressed
+  }
+
+  /**
+   * Footfalls from their speed, on the same rhythm as your own (sprint / jog /
+   * sneak), quieter crouched; prone crawling, flying and driving make none.
+   */
+  _footsteps(p, delta, feetY) {
+    const speed = Math.hypot(p.vx, p.vz);
+    if (p.dead || p.driving || p.phase !== PHASE_GROUND || p.stance === "prone" || speed < 0.8 || Math.abs(p.vy ?? 0) > 3) {
+      p.stepT = Math.min(p.stepT ?? 0, 0.1);
+      return;
+    }
+    p.stepT = (p.stepT ?? 0) - delta;
+    if (p.stepT > 0) return;
+    const sprint = speed > 5.5, jog = speed > 3.6;
+    p.stepT = sprint ? 0.28 : jog ? 0.36 : 0.5;
+    const vol = (sprint ? 1 : jog ? 0.75 : 0.4) * (p.stance === "crouch" ? 0.5 : 1);
+    this.onStep?.(p, p.root.position.x, feetY, p.root.position.z, vol);
   }
 
   /** Minimap entries { x, z, yaw, color, dead } (reused array). */
@@ -249,12 +273,18 @@ export class RemotePlayers {
       p.root.position.set(b.x, b.y - feetOffset, b.z);
       p.root.rotation.y += angleDiff(p.bodyYaw, p.root.rotation.y) * k;
       const inPlane = p.phase === PHASE_PLANE;
+      this._footsteps(p, delta, b.y - feetOffset);
       p.root.visible = !inPlane;
       p.chute.visible = p.phase === PHASE_CHUTE;
       p.skydive += ((p.phase === PHASE_FALL ? 1 : 0) - p.skydive) * (1 - Math.exp(-6 * delta));
       if (p.ready) setSkydivePose(p.soldier.root, p.skydive);
 
       if (p.ready) {
+        if (p.gearCode !== p.gearShown) {
+          p.gearShown = p.gearCode;
+          const g = p.gearCode;
+          p.soldier.setGear({ helmet: Math.floor(g / 100), vest: Math.floor(g / 10) % 10, backpack: g % 10 });
+        }
         p.root.updateMatrixWorld(true);
         const yaw = p.root.rotation.y;
         const sy = Math.sin(yaw), cy = Math.cos(yaw);
@@ -277,7 +307,8 @@ export class RemotePlayers {
       }
       p.tag.position.set(b.x, b.y - feetOffset + TAG_HEIGHT, b.z);
       const dist = camera.position.distanceTo(p.tag.position);
-      p.tag.visible = !inPlane && (!this._pvp || dist < PVP_TAG_RANGE);
+      // In PvP smoke hides enemies' names too (concealed: camera → tag passes through a cloud)
+      p.tag.visible = !inPlane && (!this._pvp || (dist < PVP_TAG_RANGE && !this.concealed?.(camera.position, p.tag.position)));
       const s = THREE.MathUtils.clamp(dist * 0.055, 0.9, 5);
       p.tag.scale.set(s * 2.5, s, 1);
     }

@@ -48,10 +48,12 @@ export const PVP_HEAD_Y = 1.45;
 /** Ground loot scattered over the map: kind → count. */
 export const BR_FIELD_LOOT = {
   pistol: 8, smg: 8, shotgun: 7, rifle: 7, sniper: 3,
-  ammo: 26, grenade: 12, molotov: 10, medkit: 16, fuel: 8,
+  ammo: 26, grenade: 12, molotov: 10, smoke: 12, medkit: 16, fuel: 8,
+  helmet1: 8, helmet2: 5, helmet3: 2, vest1: 8, vest2: 5, vest3: 2, backpack1: 8, backpack2: 5, backpack3: 2,
+  reddot: 6, scope4x: 4, compensator: 4, suppressor: 3, extmag: 5, grip: 4,
 };
 /** What a house spot can roll (weighted by repeats). */
-export const BR_HOUSE_LOOT = ["ammo", "ammo", "medkit", "medkit", "grenade", "molotov", "smg", "shotgun", "rifle", "pistol", "sniper", "fuel"];
+export const BR_HOUSE_LOOT = ["ammo", "ammo", "medkit", "medkit", "grenade", "molotov", "smoke", "helmet1", "vest1", "backpack1", "helmet2", "vest2", "reddot", "extmag", "grip", "smg", "shotgun", "rifle", "pistol", "sniper", "fuel"];
 export const BR_LOOT_RADIUS = 200;
 /** Spare rounds that come with a gun found on the ground. */
 export const BR_GUN_RESERVE = { pistol: 24, smg: 64, shotgun: 10, rifle: 45, sniper: 6 };

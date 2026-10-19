@@ -63,8 +63,9 @@ export const STARTING_WEAPON = "smg";
 export const THROWABLES = {
   grenade: { name: "Frag Grenade", short: "FRAG", max: 5, start: 2 },
   molotov: { name: "Molotov", short: "MOLOTOV", max: 5, start: 1 },
+  smoke:   { name: "Smoke Grenade", short: "SMOKE", max: 3, start: 0 },
 };
-export const THROWABLE_ORDER = ["grenade", "molotov"];
+export const THROWABLE_ORDER = ["grenade", "molotov", "smoke"];
 
 export const MEDKIT = { name: "Medkit", max: 3, start: 0, heal: 50 };
 
@@ -91,20 +92,90 @@ export const MOLOTOV = {
   playerDps: 18,
   alertRadius: 30,
 };
+/** Smoke grenade: a coloured cloud you can't see through (src/combat/SmokeFX.js). */
+export const SMOKE = {
+  fuse: 1.4,          // pops after this long, wherever it rolled to
+  radius: 6,          // m, fully grown
+  height: 4.2,        // m
+  grow: 2.5,          // s to billow out to full size
+  duration: 20,       // s the cloud lasts, fade included
+  fade: 4,            // s it thins out at the end
+  warmupKit: 2,       // given in the battle royale warm-up so you can try it
+};
+/** Each smoke grenade pops in one of these, picked when it's thrown. */
+export const SMOKE_COLORS = [0xe53935, 0xff8a1f, 0xffd23f, 0x43d36b, 0x2ec4d6, 0x3d7bff, 0x9b5cff, 0xff5cc8, 0xd8d8d8];
+
+// ── Gear: helmets, vests, backpacks ─────────────────────────────────────────
+/**
+ * reduce: share of the damage it stops (helmets: headshots in the battle
+ * royale and a little of every monster hit; vests: body hits and blasts).
+ * durability: damage it can soak before it breaks. capacity: backpack
+ * carrying capacity added (vests add a little too, like PUBG's pouches).
+ * Equipped gear weighs nothing; you can't carry a spare in the backpack.
+ */
+export const GEAR = {
+  helmet1:   { slot: "helmet",   level: 1, name: "Helmet (Lv. 1)",   reduce: 0.3,  durability: 80 },
+  helmet2:   { slot: "helmet",   level: 2, name: "Helmet (Lv. 2)",   reduce: 0.4,  durability: 150 },
+  helmet3:   { slot: "helmet",   level: 3, name: "Helmet (Lv. 3)",   reduce: 0.55, durability: 230 },
+  vest1:     { slot: "vest",     level: 1, name: "Vest (Lv. 1)",     reduce: 0.3,  durability: 200, capacity: 50 },
+  vest2:     { slot: "vest",     level: 2, name: "Vest (Lv. 2)",     reduce: 0.4,  durability: 220, capacity: 50 },
+  vest3:     { slot: "vest",     level: 3, name: "Vest (Lv. 3)",     reduce: 0.55, durability: 250, capacity: 50 },
+  backpack1: { slot: "backpack", level: 1, name: "Backpack (Lv. 1)", capacity: 100 },
+  backpack2: { slot: "backpack", level: 2, name: "Backpack (Lv. 2)", capacity: 160 },
+  backpack3: { slot: "backpack", level: 3, name: "Backpack (Lv. 3)", capacity: 220 },
+};
+export const GEAR_SLOTS = ["helmet", "vest", "backpack"];
+/** Helmets also take this share of `reduce` off monster hits (bites to the head). */
+export const HELMET_MONSTER_SHARE = 0.35;
+/** Vests stop this share of `reduce` of a grenade blast. */
+export const VEST_BLAST_SHARE = 0.6;
+
+// ── Attachments ──────────────────────────────────────────────────────────────
+/**
+ * slot: where it goes on a gun. fits: guns it mounts on. mods: multipliers
+ * (…Mul) or replacements applied to the gun's stats while attached
+ * (see weaponStats() in src/items/ItemDefs.js).
+ */
+export const ATTACHMENTS = {
+  reddot:      { slot: "optic",  name: "Red Dot Sight",  fits: ["pistol", "smg", "shotgun", "rifle"], mods: { aimFovMul: 0.86, spreadAimMul: 0.65 } },
+  scope4x:     { slot: "optic",  name: "4x ACOG Scope",  fits: ["smg", "rifle", "sniper"],            mods: { aimFov: 12, spreadAimMul: 0.5 } },
+  compensator: { slot: "muzzle", name: "Compensator",    fits: ["smg", "rifle", "sniper"],            mods: { recoilMul: 0.68 } },
+  suppressor:  { slot: "muzzle", name: "Suppressor",     fits: ["pistol", "smg", "rifle", "sniper"],  mods: { alertMul: 0.4, recoilMul: 0.9, suppressed: true } },
+  extmag:      { slot: "mag",    name: "Extended Mag",   fits: ["pistol", "smg", "rifle", "sniper"],  mods: { magMul: 1.5 } },
+  grip:        { slot: "grip",   name: "Vertical Grip",  fits: ["smg", "rifle"],                      mods: { recoilMul: 0.8, bloomMul: 0.7, spreadHipMul: 0.85 } },
+};
+export const ATTACH_SLOTS = ["optic", "muzzle", "mag", "grip"];
+export const ATTACH_SLOT_NAMES = { optic: "Optic", muzzle: "Muzzle", mag: "Magazine", grip: "Grip" };
+
+// ── Carrying ─────────────────────────────────────────────────────────────────
+/** Weight of one of each carried item. Guns, their ammo and worn gear weigh nothing. */
+export const ITEM_WEIGHT = {
+  grenade: 18, molotov: 18, smoke: 14, medkit: 20, fuel: 30,
+  reddot: 10, scope4x: 15, compensator: 10, suppressor: 12, extmag: 15, grip: 10,
+};
+/** Capacity with no backpack and no vest (backpacks / vests add GEAR[…].capacity). */
+export const BASE_CAPACITY = 100;
 
 /**
- * Pickup kinds. `category` drives the colour of the ground glow and whether
- * the item needs E (weapons) or is collected by walking over it.
+ * Pickup kinds. `category` drives the colour of the ground glow; `interact`
+ * kinds need E, the rest are collected by walking over them.
  */
 export const PICKUP_KINDS = {
-  pistol:  { category: "weapon",    label: "Pistol",         scale: 1.8 },
-  smg:     { category: "weapon",    label: "Submachine Gun", scale: 1.5 },
-  shotgun: { category: "weapon",    label: "Shotgun",        scale: 1.3 },
-  rifle:   { category: "weapon",    label: "Assault Rifle",  scale: 1.3 },
-  sniper:  { category: "weapon",    label: "Sniper Rifle",   scale: 1.2 },
+  pistol:  { category: "weapon",    label: "Pistol",         scale: 1.8, interact: true },
+  smg:     { category: "weapon",    label: "Submachine Gun", scale: 1.5, interact: true },
+  shotgun: { category: "weapon",    label: "Shotgun",        scale: 1.3, interact: true },
+  rifle:   { category: "weapon",    label: "Assault Rifle",  scale: 1.3, interact: true },
+  sniper:  { category: "weapon",    label: "Sniper Rifle",   scale: 1.2, interact: true },
   ammo:    { category: "ammo",      label: "Ammo Crate",     scale: 1.3 },
   grenade: { category: "throwable", label: "Frag Grenade",   scale: 2.2 },
   molotov: { category: "throwable", label: "Molotov",        scale: 1.8 },
+  smoke:   { category: "throwable", label: "Smoke Grenade",  scale: 2.0 },
   medkit:  { category: "medkit",    label: "Medkit",         scale: 1.4 },
   fuel:    { category: "fuel",      label: "Petrol Can",     scale: 1.6 },
 };
+for (const [id, g] of Object.entries(GEAR)) {
+  PICKUP_KINDS[id] = { category: "gear", label: g.name, scale: g.slot === "helmet" ? 2.2 : 1.5, interact: true };
+}
+for (const [id, a] of Object.entries(ATTACHMENTS)) {
+  PICKUP_KINDS[id] = { category: "attachment", label: a.name, scale: a.slot === "optic" ? 2.2 : 2.6, interact: true };
+}

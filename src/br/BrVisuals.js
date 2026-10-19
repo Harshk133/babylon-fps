@@ -27,7 +27,9 @@ export class ZoneWall {
         uniform float uOpacity;
         varying vec2 vUv;
         void main() {
-          float h = vUv.y;
+          // Clamped: interpolation can put the top rim a hair above 1, and pow() of a
+          // negative is NaN on real GPUs; the bloom then smears it over the whole screen (black)
+          float h = clamp(vUv.y, 0.0, 1.0);
           float fade = pow(1.0 - h, 1.7);
           float base = pow(1.0 - h, 40.0);
           // Slanted bands crawling up the wall

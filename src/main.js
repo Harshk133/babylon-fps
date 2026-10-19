@@ -11,6 +11,7 @@ import { Effects } from "./combat/Effects.js";
 import { Sfx } from "./combat/Sfx.js";
 import { Throwables } from "./combat/Throwables.js";
 import { FireFX } from "./combat/FireFX.js";
+import { SmokeFX } from "./combat/SmokeFX.js";
 import { Minimap } from "./ui/Minimap.js";
 import { WorldMap } from "./ui/WorldMap.js";
 import { Waypoints } from "./ui/Waypoints.js";
@@ -35,6 +36,7 @@ import { QUALITY, QUALITY_NAME, QUALITY_SETTING, QUALITY_PRESETS, saveQuality } 
 import { Net } from "./net/Net.js";
 import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "./net/RemotePlayers.js";
 import { MonsterSync } from "./net/MonsterSync.js";
+import { MonsterAudio } from "./audio/MonsterAudio.js";
 import { Lobby } from "./net/Lobby.js";
 import { BrHud } from "./br/BrHud.js";
 import { ZoneWall, createPlane, updatePlane, createParachute, setSkydivePose } from "./br/BrVisuals.js";
@@ -46,7 +48,11 @@ import {
 import { ENEMY_GUNS, getLevel } from "./zombies/MonsterTypes.js";
 import {
   WEAPONS, WEAPON_ORDER, HEAD_HEIGHT, GRENADE, MOLOTOV, MEDKIT, THROWABLES, THROWABLE_ORDER,
+  SMOKE, SMOKE_COLORS, GEAR, ATTACHMENTS, HELMET_MONSTER_SHARE, VEST_BLAST_SHARE,
 } from "./combat/weapons.js";
+import { weaponStats } from "./items/ItemDefs.js";
+import { LootActions } from "./inventory/LootActions.js";
+import { LootScreen } from "./ui/LootScreen.js";
 import { Inventory } from "./inventory/Inventory.js";
 import { InventoryUI } from "./inventory/InventoryUI.js";
 import { Pickups } from "./pickups/Pickups.js";
@@ -118,7 +124,8 @@ const THROW_COOLDOWN = 0.6;
 const DROP_LIFETIME  = 45;    // zombie loot despawns after this many seconds
 
 const inventory = new Inventory();
-const currentDef = () => WEAPONS[inventory.current]; // undefined when empty-handed (battle royale drop)
+// The held gun's stats with its attachments (cached per combination); undefined when empty-handed
+const currentDef = () => (inventory.current ? weaponStats(inventory.current, inventory.weapons[inventory.current].att) : undefined);
 
 // ─── Player Health System ─────────────────────────────────────────────────────
 let playerHealth     = 100;
@@ -195,9 +202,14 @@ function updateThreatUI() {
   if (threatEl) threatEl.classList.toggle("active", n > 0);
 }
 
-/** srcX / srcZ: where the hit came from (shows the red direction arc). */
-function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX = null, srcZ = null) {
+/**
+ * srcX / srcZ: where the hit came from (shows the red direction arc).
+ * kind: what armor applies: "head" (helmet), "body" (vest), "blast" (vest,
+ * partly), "monster" (vest + a little helmet), "raw" (none: fire, zone, falls).
+ */
+function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX = null, srcZ = null, kind = "raw") {
   if (playerHealth <= 0 || (isBR() && (br.ghost || br.flight === PHASE_PLANE))) return;
+  amount = armorAbsorb(amount, kind);
   playerHealth = Math.max(0, playerHealth - amount);
   if (srcX !== null) {
     const dx = srcX - characterBody.position.x, dz = srcZ - characterBody.position.z;
@@ -214,6 +226,27 @@ function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX =
   knockbackVel.x += knockX;
   knockbackVel.z += knockZ;
   if (playerHealth <= 0) onPlayerDeath();
+}
+
+/** Helmet / vest take their share of a hit and lose that much durability; broken pieces are gone. */
+function armorAbsorb(amount, kind) {
+  if (kind === "raw" || amount <= 0) return amount;
+  let stopped = 0;
+  const soak = (slot, share) => {
+    const piece = inventory.gear[slot];
+    if (!piece || share <= 0) return;
+    const s = amount * GEAR[piece.id].reduce * share;
+    stopped += s;
+    if (inventory.wearGear(slot, s * 1.6)) {
+      inventoryUI.feed(`${GEAR[piece.id].name} destroyed`, "info", piece.id);
+      sfx.thud(null, false);
+    }
+  };
+  if (kind === "head") soak("helmet", 1);
+  else if (kind === "body") soak("vest", 1);
+  else if (kind === "blast") soak("vest", VEST_BLAST_SHARE);
+  else if (kind === "monster") { soak("vest", 1); soak("helmet", HELMET_MONSTER_SHARE); }
+  return Math.max(0, amount - Math.min(stopped, amount * 0.75));
 }
 
 function regenPlayerHealth(amount) {
@@ -552,7 +585,10 @@ function syncPostSize() {
 }
 
 const effects = new Effects(scene);
-const sfx = new Sfx();
+// HRTF 3D audio on desktop (headphones hear left / right / behind); phones pan cheaper.
+// The samples start downloading now, alongside the models.
+const sfx = new Sfx({ hrtf: !IS_TOUCH });
+sfx.preload();
 
 // ─── Physics World ────────────────────────────────────────────────────────────
 const world = new CANNON.World();
@@ -884,7 +920,7 @@ function setKey(code, pressed, repeat) {
   const playing = isLocked() && playerHealth > 0;
   if (pressed) {
     if (code === "Tab" || code === "KeyI") { setInventoryOpen(!inventoryOpen); return; }
-    if (code === "Escape" && inventoryOpen) { setInventoryOpen(false); return; }
+    if (code === "Escape" && inventoryOpen) { if (!lootScreen.escape()) setInventoryOpen(false); return; }
     if (code === "KeyM" && !lobby.open && (isLocked() || brWatching() || worldMap.open)) { setMapOpen(!worldMap.open); return; }
     if (code === "Escape" && worldMap.open) { setMapOpen(false); return; }
     if (isBR() && !lobby.open) {
@@ -1015,7 +1051,7 @@ const touch = IS_TOUCH ? new TouchControls({
       if (inventory.has(id)) equipWeapon(id);
       else inventoryUI.feed(`${WEAPONS[id].name} not found yet`, "info");
     } else if (hb === "throwable") {
-      if (inventory.selectedThrowable !== id) cycleThrowable();
+      if (inventory.selectedThrowable !== id) selectThrowable(id);
     } else if (hb === "medkit") useMedkit();
     else if (hb === "fuel") refuelRickshaw();
   },
@@ -1473,7 +1509,7 @@ function startReload() {
   const def = currentDef();
   weapon.reloading = true;
   weapon.reloadTimer = def.reloadTime;
-  sfx.reload(def.reloadTime);
+  sfx.reload(def.reloadTime, def.sound);
 }
 
 function equipWeapon(id) {
@@ -1534,7 +1570,7 @@ function updateWeapon(delta) {
   const slot = inventory.currentSlot;
   if (slot.ammo <= 0) {
     if (pressed) {
-      sfx.click();
+      sfx.dryFire();
       if (slot.reserve <= 0 && clock.elapsedTime > dryFireNotice) {
         dryFireNotice = clock.elapsedTime + 2;
         inventoryUI.feed(`${def.short} out of ammo — switch weapons`, "info");
@@ -1572,7 +1608,7 @@ function fireShot(def) {
     (camPivot.z - camera.position.z) * _aimDir.z);
   soldier.getMuzzleWorldPosition(_muzzle);
   effects.muzzleFlash(_muzzle);
-  sfx.gunshot(def.sound);
+  sfx.gunshot(def.sound, def.suppressed ? 0.35 : 1);
 
   let anyHit = false, anyHead = false, anyKill = false;
   shotPoints.length = 0;
@@ -1660,7 +1696,7 @@ function fireShot(def) {
 
   makeNoise(characterBody.position.x, characterBody.position.z, def.alertRadius, "shot");
   if (net.connected) {
-    net.send({ t: "shot", w: def.sound, f: [+_muzzle.x.toFixed(2), +_muzzle.y.toFixed(2), +_muzzle.z.toFixed(2)], h: shotPoints });
+    net.send({ t: "shot", w: def.sound, s: def.suppressed ? 1 : undefined, f: [+_muzzle.x.toFixed(2), +_muzzle.y.toFixed(2), +_muzzle.z.toFixed(2)], h: shotPoints });
   }
 }
 
@@ -1700,10 +1736,13 @@ function releaseThrow() {
   const kind = inventory.takeThrowable();
   if (!kind) return;
   computeThrow();
-  throwables.throw(kind, _throwFrom, _throwVel, localTarget.id);
+  // Smoke comes in a random colour; c tells everyone else which
+  const color = kind === "smoke" ? Math.floor(Math.random() * SMOKE_COLORS.length) : 0;
+  if (kind !== "molotov") sfx.pin();
+  throwables.throw(kind, _throwFrom, _throwVel, localTarget.id, color);
   if (net.connected) {
     net.send({
-      t: "throw", k: kind,
+      t: "throw", k: kind, c: color,
       o: [_throwFrom.x, _throwFrom.y, _throwFrom.z].map(v => +v.toFixed(3)),
       v: [_throwVel.x, _throwVel.y, _throwVel.z].map(v => +v.toFixed(3)),
     });
@@ -1717,7 +1756,11 @@ function cancelThrow() {
 }
 
 function cycleThrowable() {
-  const kind = inventory.cycleThrowable();
+  selectThrowable(inventory.cycleThrowable());
+}
+
+function selectThrowable(kind) {
+  inventory.selectThrowable(kind);
   sfx.click();
   inventoryUI.feed(`${THROWABLES[kind].name} ready (${inventory.throwables[kind]})`, "throwable", kind);
 }
@@ -1772,10 +1815,10 @@ function onGrenadeExplode(pos, owner = null) {
     const shield = blastShielded(pos, characterBody.position.x, characterBody.position.y + 0.4, characterBody.position.z) ? 0.15 : 1;
     const f = (1 - pd / GRENADE.playerRadius) * shield;
     const k = pd > 1e-3 ? 8 * f / pd : 0;
-    dealDamageToPlayer(GRENADE.playerMaxDamage * f, px * k, pz * k, 0.6);
+    dealDamageToPlayer(GRENADE.playerMaxDamage * f, px * k, pz * k, 0.6, null, null, "blast");
   }
   cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - pd / 35, 0, 1) * 0.8);
-  sfx.explosion(pd);
+  sfx.explosion(pos);
   if (!net.isClient) zombieManager?.noise(pos.x, pos.z, GRENADE.alertRadius, "explosion");
 }
 
@@ -1819,39 +1862,25 @@ function useMedkit() {
 function pickupData(kind) {
   const def = WEAPONS[kind];
   if (def) return { ammo: def.magSize, reserve: isBR() ? BR_GUN_RESERVE[kind] : def.pickupReserve };
+  if (GEAR[kind]?.durability) return { dur: GEAR[kind].durability };
   return null;
 }
 
 /** Tries to move a world pickup into the inventory. Returns true if it was taken. */
-function collectPickup(entry) {
-  const { kind, def, id } = entry;
-  let res = null;
-  switch (def.category) {
-    case "weapon": {
-      res = inventory.addWeapon(kind, entry.data.ammo, entry.data.reserve);
-      if (!res) { inventoryUI.feed(`${def.label}: ammo full`, "info", kind); return false; }
-      if (res.isNew) {
-        equipWeapon(kind);
-        res.msg = `Picked up ${def.label}`;
-      }
-      break;
-    }
-    case "ammo":      res = inventory.addAmmoCrate(); break;
-    case "throwable": res = inventory.addThrowable(kind, entry.data?.count ?? 1); break;
-    case "medkit":    res = inventory.addMedkit(); break;
-    case "fuel":      res = inventory.addFuelCan(); break;
-  }
-  if (!res) return false;
-  pickups.release(entry);
-  // Shared battle royale loot: it's gone for everyone
-  if (id !== null) net.send({ t: "take", i: id });
-  sfx.pickup(def.category === "weapon");
-  inventoryUI.feed(res.msg, def.category, kind);
-  return true;
+/**
+ * Takes a world pickup through LootActions (the same rules as the inventory
+ * screen). manual: pressed E, so say why when it can't be taken; walking
+ * over loot stays quiet.
+ */
+function collectPickup(entry, manual = false) {
+  const res = lootActions.pickup(entry, { equip: true, auto: !manual });
+  if (res.ok && res.msg) inventoryUI.feed(res.msg, entry.def.category, entry.kind);
+  else if (!res.ok && manual && res.msg) inventoryUI.feed(res.msg, "info", entry.kind);
+  return res.ok;
 }
 
 function interact() {
-  if (pickups.nearestWeapon && !brAirborne() && !drive.on) collectPickup(pickups.nearestWeapon);
+  if (pickups.nearestWeapon && !brAirborne() && !drive.on) collectPickup(pickups.nearestWeapon, true);
 }
 
 function updatePickups(delta) {
@@ -1868,7 +1897,9 @@ function updatePickups(delta) {
     const e = drive.on ? null : pickups.nearestWeapon;
     if (e) {
       promptRows[n++] = "E";
-      promptRows[n++] = inventory.has(e.kind) ? `Take ammo · ${e.def.label}` : `Pick up ${e.def.label}`;
+      promptRows[n++] = e.def.category === "gear"
+        ? `${inventory.gear[GEAR[e.kind].slot] ? "Swap for" : "Wear"} ${e.def.label}`
+        : e.def.category === "weapon" && inventory.has(e.kind) ? `Take ammo · ${e.def.label}` : `Pick up ${e.def.label}`;
     }
     const near = houses?.interaction(characterBody.position.x, characterBody.position.z, characterBody.position.y - FEET_OFFSET);
     nearDoor = near?.door ?? null;
@@ -1920,16 +1951,8 @@ function useLightSwitch() {
 }
 
 function dropWeapon(id) {
-  const prev = inventory.current;
-  const slot = inventory.removeWeapon(id);
-  if (!slot) return;
-  const x = characterBody.position.x + Math.sin(bodyYaw) * 1.3;
-  const z = characterBody.position.z + Math.cos(bodyYaw) * 1.3;
-  const y = floorY(x, z, characterBody.position.y - FEET_OFFSET);
-  if (isBR()) brSpawnShared(id, x, z, { ammo: slot.ammo, reserve: slot.reserve }, y);
-  else pickups.spawn(id, x, z, { ammo: slot.ammo, reserve: slot.reserve }, Infinity, null, y);
-  inventoryUI.feed(`Dropped ${WEAPONS[id].name}`, "info", id);
-  if (inventory.current !== prev) onWeaponChanged();
+  const res = lootActions.move({ from: "weapon", id }, { to: "ground" });
+  if (res.msg) inventoryUI.feed(res.msg, "info", id);
 }
 
 // Zombie loot: one roll per kill
@@ -1939,7 +1962,11 @@ const DROP_TABLE = [
   ["molotov", 0.05],
   ["medkit", 0.045],
   ["gun", 0.025],
+  ["gear", 0.02],
+  ["attachment", 0.03],
 ];
+const DROP_GEAR = ["helmet1", "vest1", "backpack1", "helmet2", "vest2", "backpack2"];
+const DROP_ATTACHMENTS = Object.keys(ATTACHMENTS);
 const DROP_GUNS = ["shotgun", "rifle", "sniper", "smg"];
 
 /** Floor height for something dropped at (x, z) by someone with their feet at y. */
@@ -1953,8 +1980,8 @@ function spawnDrop(k, x, z, life, y = groundHeight(x, z)) {
   net.send({ t: "drop", k, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), l: life });
 }
 
-const BOSS_STASH   = ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov"];
-const DRAGON_STASH = ["medkit", "medkit", "ammo", "ammo", "ammo", "grenade"];
+const BOSS_STASH   = ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov", "helmet3", "scope4x"];
+const DRAGON_STASH = ["medkit", "medkit", "ammo", "ammo", "ammo", "grenade", "vest3", "backpack3"];
 
 function rollZombieDrop(zombie) {
   const p0 = zombie.body.position;
@@ -1972,7 +1999,8 @@ function rollZombieDrop(zombie) {
   let r = Math.random() / (zombie.def.bigBody ? 3 : zombie.gun ? 1.6 : 1);
   for (const [kind, chance] of DROP_TABLE) {
     if (r < chance) {
-      const k = kind === "gun" ? DROP_GUNS[(Math.random() * DROP_GUNS.length) | 0] : kind;
+      const pickFrom = { gun: DROP_GUNS, gear: DROP_GEAR, attachment: DROP_ATTACHMENTS }[kind];
+      const k = pickFrom ? pickFrom[(Math.random() * pickFrom.length) | 0] : kind;
       const p = zombie.body.position;
       spawnDrop(k, p.x, p.z, DROP_LIFETIME, floorY(p.x, p.z, zombie.root.position.y));
       return;
@@ -1985,11 +2013,14 @@ function rollZombieDrop(zombie) {
 const STARTER_LOOT = [
   ["shotgun", -2.5, 7], ["rifle", 2.5, 7],
   ["grenade", -1.5, 10], ["molotov", 1.5, 10], ["ammo", 0, 12],
+  ["helmet1", -3.5, 12], ["vest1", 3.5, 12], ["backpack1", 0, 14.5], ["reddot", -1.8, 14], ["grip", 1.8, 14],
   ["fuel", -12, -12], // next to the auto-rickshaw
 ];
 const WORLD_LOOT = {
   pistol: 1, smg: 2, shotgun: 3, rifle: 3, sniper: 3,
   ammo: 14, grenade: 10, molotov: 10, medkit: 8, fuel: 6,
+  helmet1: 4, helmet2: 2, vest1: 4, vest2: 2, backpack1: 4, backpack2: 2,
+  reddot: 3, scope4x: 2, compensator: 2, suppressor: 2, extmag: 3, grip: 2,
 };
 const _lootFrom = new CANNON.Vec3();
 const _lootTo = new CANNON.Vec3();
@@ -2009,8 +2040,8 @@ function isOpenGround(x, z) {
   return true;
 }
 
-const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun"];
-const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov"];
+const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag"];
+const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov", "helmet3", "vest3", "backpack3", "scope4x", "suppressor"];
 
 function spawnWorldLoot() {
   const lootRng = makeLCG(0x10070bad);
@@ -2052,7 +2083,7 @@ function setInventoryOpen(open) {
   if (open === inventoryOpen) return;
   if (open && playerHealth <= 0) return;
   inventoryOpen = open;
-  inventoryUI.setOpen(open);
+  lootScreen.setOpen(open);
   if (open) {
     input.fire = false;
     input.aim = false;
@@ -2068,18 +2099,16 @@ const itemIcons = {};
 for (const id of WEAPON_ORDER) itemIcons[id] = renderItemIcon(renderer, id, { width: 160, height: 56 });
 itemIcons.grenade = renderItemIcon(renderer, "grenade", { width: 64, height: 64, yaw: 0.4 });
 itemIcons.molotov = renderItemIcon(renderer, "molotov", { width: 64, height: 64, yaw: 0.4 });
+itemIcons.smoke   = renderItemIcon(renderer, "smoke",   { width: 64, height: 64, yaw: 0.4 });
 itemIcons.ammo    = renderItemIcon(renderer, "ammo",    { width: 64, height: 64, yaw: 0.6, pitch: 0.35 });
 itemIcons.fuel    = renderItemIcon(renderer, "fuel",    { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
+itemIcons.medkit  = renderItemIcon(renderer, "medkit",  { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
+for (const id of [...Object.keys(GEAR), ...Object.keys(ATTACHMENTS)]) {
+  itemIcons[id] = renderItemIcon(renderer, id, { width: 64, height: 64, yaw: 0.6, pitch: 0.25 });
+}
 
-const inventoryUI = new InventoryUI({
-  inventory,
-  icons: itemIcons,
-  onEquip: id => equipWeapon(id),
-  onDrop: id => dropWeapon(id),
-  onSelectThrowable: kind => { inventory.selectThrowable(kind); sfx.click(); },
-  onUseMedkit: () => useMedkit(),
-  onClose: () => setInventoryOpen(false),
-});
+const inventoryUI = new InventoryUI({ inventory, icons: itemIcons });
+
 
 // Mouse-wheel weapon carousel around the player. In solo it slows the world
 // down while monsters are hunting you, so there's time to pick.
@@ -2136,6 +2165,9 @@ function updatePostFx(realDt) {
     slowmo: THREE.MathUtils.clamp((1 - timeScale) / (1 - WHEEL_SLOWMO), 0, 1),
     frenzy: killStreak.frenzy,
     cave: caveDepth,
+    // Battle royale moments: outside the zone (deeper = stronger), and the skydive
+    zone: isBR() && br.outside && playerHealth > 0 ? THREE.MathUtils.clamp(0.55 + br.outsideBy / 40, 0.55, 1) : 0,
+    freefall: isBR() && br.flight === PHASE_FALL ? 1 : isBR() && br.flight === PHASE_CHUTE ? 0.25 : 0,
     // Faster as health drops
     heartbeat: low ? 0.5 + 0.5 * Math.sin(performance.now() / 1000 * (6 + 6 * (1 - playerHealth / (MAX_HEALTH * 0.4)))) : 0,
   });
@@ -2193,7 +2225,116 @@ function updateWeaponWheel(realDt) {
 
 const pickups = new Pickups(scene);
 
+// Every item transfer (walk-over, E, the inventory screen) goes through here
+const lootActions = new LootActions({
+  inventory,
+  pickups,
+  spawnLoot: (kind, data, at) => {
+    const p = characterBody.position, feet = p.y - FEET_OFFSET;
+    // Dropped things land a step in front of you, on your floor of a house
+    const x = at?.x ?? p.x + Math.sin(bodyYaw) * 1.4 + (Math.random() - 0.5) * 0.6;
+    const z = at?.z ?? p.z + Math.cos(bodyYaw) * 1.4 + (Math.random() - 0.5) * 0.6;
+    const y = at?.y ?? floorY(x, z, feet);
+    const entry = net.connected ? spawnShared(kind, x, z, data, y) : pickups.spawn(kind, x, z, data, Infinity, null, y);
+    // You're standing on it: don't walk it straight back into the backpack
+    pickups.lockAuto(entry);
+  },
+  claim: claimLoot,
+  player: () => _lootPlayer.set(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z),
+  onChange: prev => {
+    if (inventory.current !== prev) onWeaponChanged();
+    else onWeaponChanged(false); // attachments change the held gun's stats (scope zoom, magazine)
+  },
+  notify: (msg, kind, icon) => inventoryUI.feed(msg, kind, icon),
+  sfx,
+});
+const _lootPlayer = new THREE.Vector3();
+
+const lootScreen = new LootScreen({
+  root: document.getElementById("inventory"),
+  inventory,
+  actions: lootActions,
+  icons: itemIcons,
+  cb: {
+    onUse: kind => { if (kind === "medkit") useMedkit(); else if (kind === "fuel") refuelRickshaw(); },
+    onSelectThrowable: kind => { inventory.selectThrowable(kind); sfx.click(); },
+  },
+});
+// Teammates / you see the gear you wear
+let _gearVer = -1;
+function syncGearModel() {
+  if (inventory.version === _gearVer) return;
+  _gearVer = inventory.version;
+  const g = inventory.gearLevels();
+  soldier.setGear(g);
+  _gearCode = g.helmet * 100 + g.vest * 10 + g.backpack;
+}
+let _gearCode = 0;
+
 const fireFX = new FireFX(scene);
+const smokeFX = new SmokeFX(scene);
+
+// ─── Audio: listener, space, monsters, fires, landings ────────────────────────
+const monsterAudio = new MonsterAudio(sfx);
+const _earFwd = new THREE.Vector3();
+const _earUp = new THREE.Vector3();
+const _fireAt = { x: 0, y: 0, z: 0 };
+let _wasOnGround = true, _fallSpeed = 0;
+
+/** What feet hit at (x, feetY, z): house floors are wood, caves stone, the rest grass. */
+function footSurface(x, feetY, z) {
+  if (houses?.floorAt(x, feetY, z)) return "wood";
+  if (caves?.inside(x, z, feetY)) return "concrete";
+  return "grass";
+}
+
+/** A point `dist` m away in a random direction (sounds from "out there"). */
+function farPoint(dist) {
+  const a = Math.random() * Math.PI * 2;
+  return { x: camera.position.x + Math.cos(a) * dist, y: camera.position.y, z: camera.position.z + Math.sin(a) * dist };
+}
+
+function updateAudio(delta) {
+  // The listener is the camera: turning your head turns the sound field
+  camera.getWorldDirection(_earFwd);
+  _earUp.setFromMatrixColumn(camera.matrixWorld, 1);
+  sfx.setListener(camera.position, _earFwd, _earUp);
+  const p = characterBody.position;
+  sfx.setSpace(caveDepth > 0.3 ? "cave" : houses?.floorAt(p.x, p.y - FEET_OFFSET, p.z) ? "indoor" : "outdoor");
+  if (zombieManager) monsterAudio.update(zombieManager.active, delta);
+  // Burning ground crackles where it burns
+  throwables.fires.forEach((f, i) => {
+    if (!f.active && !f.sounding) return;
+    f.sounding = f.active;
+    _fireAt.x = f.x; _fireAt.y = groundHeight(f.x, f.z) + 0.5; _fireAt.z = f.z;
+    sfx.fireLoop(`fire${i}`, _fireAt, f.active ? Math.min(1, f.time) : 0);
+  });
+  // Landing from a jump or a fall: both feet at once, louder the harder
+  if (onGround && !_wasOnGround && _fallSpeed > 3 && playerHealth > 0 && !drive.on) {
+    const s = footSurface(p.x, p.y - FEET_OFFSET, p.z), v = Math.min(1.3, _fallSpeed / 7);
+    sfx.footstep(s, v);
+    sfx.footstep(s, v * 0.8, null, 0.9);
+  }
+  _fallSpeed = onGround ? 0 : Math.max(_fallSpeed, -characterBody.velocity.y);
+  _wasOnGround = onGround;
+}
+
+// Standing in smoke: the screen fills with its colour (the puffs alone leave
+// gaps where they cross the near plane). DOM only changes with the value.
+const smokeOverlayEl = document.getElementById("smoke-overlay");
+const _smokeColor = new THREE.Color();
+let _smokeShown = -1, _smokeHex = "";
+function updateSmokeOverlay(light) {
+  const d = Math.round(smokeFX.density(camera.position, _smokeColor) * 20) / 20;
+  if (d !== _smokeShown) {
+    _smokeShown = d;
+    smokeOverlayEl.style.opacity = `${d * 0.88}`;
+  }
+  if (d > 0) {
+    const hex = _smokeColor.multiplyScalar(0.55 + 0.45 * light).getHexString();
+    if (hex !== _smokeHex) { _smokeHex = hex; smokeOverlayEl.style.background = `#${hex}`; }
+  }
+}
 const gameHud = new GameHUD();
 
 // Monster gunfire (gunners, Warlord plasma, dragon fire). Walls block it; windows don't.
@@ -2215,7 +2356,7 @@ env.onNightfall = blood => {
   if (playerHealth <= 0) return;
   if (blood) gameHud.showBanner({ title: "BLOOD MOON", sub: "Night falls", text: "Something is wrong with the moon tonight.", color: "#ff3a22", duration: 4.5 });
   else gameHud.showBanner({ title: "NIGHTFALL", sub: "Stay in the light", color: "#8ea4d8", duration: 3 });
-  sfx.howl(80);
+  sfx.howl(farPoint(70));
 };
 
 // ─── Player noise & visibility (what the monsters sense) ──────────────────────
@@ -2240,6 +2381,8 @@ function updatePlayerNoise(delta) {
   stepTimer -= delta;
   if (stepTimer <= 0) {
     stepTimer = step[1];
+    const p = characterBody.position, feetY = p.y - FEET_OFFSET;
+    sfx.footstep(footSurface(p.x, feetY, p.z), (step === STEP_NOISE.sprint ? 1 : step === STEP_NOISE.jog ? 0.75 : 0.45) * Math.max(0.35, STANCES[stance].noise));
     // Rain drowns out footsteps
     makeNoise(characterBody.position.x, characterBody.position.z, step[0] * (1 - weather.rain * 0.35) * STANCES[stance].noise, "step");
   }
@@ -2311,13 +2454,15 @@ function onLevelCleared(level) {
 function onBossSpawn(boss) {
   if (net.isHost) net.send({ t: "lev", e: "boss", n: director.level.n });
   gameHud.showBanner({ title: "THE WARLORD", sub: "has entered the fight", color: boss.def.color, duration: 3.5 });
-  sfx.growl(0, true);
+  // Clients only get the type, not the monster: the roar then comes from somewhere out there
+  const at = boss.root?.position ?? farPoint(40);
+  if (!sfx.voice("boss_roar", at, { ref: 30, rate: 0.8, vol: 1.2 })) sfx.growl(at, true);
 }
 
 function onDragonSpawn(dragon) {
   if (net.isHost) net.send({ t: "lev", e: "dragon", n: director.level.n });
   gameHud.showBanner({ title: "DRAGON", sub: "Something is circling above", text: "Get under a roof when it dives.", color: dragon.def.color, duration: 4 });
-  sfx.dragonRoar(25);
+  sfx.dragonRoar(dragon.root?.position ?? farPoint(60));
 }
 
 // Dragon fireballs: a burst of flame where they land, and burning ground
@@ -2327,7 +2472,7 @@ function onBoltImpact(gun, pos) {
   const y = Math.max(0.3, pos.y);
   fireFX.blast(pos.x, y, pos.z);
   const d = Math.hypot(pos.x - characterBody.position.x, pos.z - characterBody.position.z);
-  sfx.explosion(d + 25);
+  sfx.explosion(pos, 0.55);
   cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - d / 25, 0, 1) * 0.35);
   // One burning patch per burst is plenty (the fires are pooled)
   const now = performance.now();
@@ -2341,7 +2486,7 @@ function onBoltImpact(gun, pos) {
 function onMonsterCrash(m) {
   const p = m.body.position;
   const d = Math.hypot(p.x - characterBody.position.x, p.z - characterBody.position.z);
-  sfx.thud(d);
+  sfx.thud(p);
   cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - d / 40, 0, 1) * 0.9);
   _vecA.set(p.x, 0.3, p.z);
   for (let i = 0; i < 4; i++) effects.impact(_vecA, Math.random() - 0.5, 1, Math.random() - 0.5, "dust", 14);
@@ -2363,7 +2508,9 @@ const throwables = new Throwables({
   material: projectileMaterial,
   effects,
   fireFX,
+  smokeFX,
   sfx,
+  onSmoke: pos => sfx.smokeHiss(pos),
   onExplode: onGrenadeExplode,
   onIgnite: (x, z, hitZombie, owner) => {
     if (net.isClient) return; // the host's copy of this throw does the damage
@@ -3012,6 +3159,14 @@ const remotePlayers = new RemotePlayers({
   capsule: { radius: CHARACTER_RADIUS, height: CAPSULE_HEIGHT },
   addCapsule: addCapsuleToBody,
 });
+// Smoke hides enemy name tags in the battle royale
+remotePlayers.concealed = (from, to) => smokeFX.blocks(from, to);
+// Teammates' and enemies' footsteps, from where they are
+const _stepAt = { x: 0, y: 0, z: 0 };
+remotePlayers.onStep = (p, x, feetY, z, vol) => {
+  _stepAt.x = x; _stepAt.y = feetY + 0.1; _stepAt.z = z;
+  sfx.footstep(footSurface(x, feetY, z), vol, _stepAt);
+};
 
 // What the monsters can target: you + every teammate
 const localTarget = { id: 0, pos: characterBody.position, vel: characterBody.velocity, alive: true, vis: 1, local: true };
@@ -3031,7 +3186,7 @@ function getTargets() {
 
 /** A monster hit a player: you take it directly, teammates get a message. */
 function onPlayerHit(target, dmg, kx, kz, shake, sx, sz) {
-  if (target.local) dealDamageToPlayer(dmg, kx, kz, shake, sx, sz);
+  if (target.local) dealDamageToPlayer(dmg, kx, kz, shake, sx, sz, "monster");
   else net.send({ t: "hurt", to: target.id, d: +dmg.toFixed(1), kx: +kx.toFixed(2), kz: +kz.toFixed(2), sh: shake, sx: +sx.toFixed(2), sz: +sz.toFixed(2) });
 }
 
@@ -3151,10 +3306,10 @@ net.on("pin", msg => {
   setPin(msg.from, msg.c ? null : msg.x, msg.c ? null : msg.z);
   if (!msg.c && fresh) inventoryUI.feed(`${net.players.get(msg.from)?.name ?? "A teammate"} marked a spot`, "info");
 });
-net.on("shot", msg => remotePlayers.shot(msg.from, msg, characterBody.position));
-net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz));
+net.on("shot", msg => remotePlayers.shot(msg.from, msg));
+net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz, "monster"));
 net.on("throw", msg => {
-  throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.from);
+  throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.from, msg.c ?? 0);
 });
 net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
 net.on("light", msg => {
@@ -3174,12 +3329,64 @@ net.on("world", msg => {
     [rickshaw.x, rickshaw.z, rickshaw.yaw, rickshaw.fuel] = msg.veh;
   }
 });
-net.on("drop", msg => {
-  // a: [ammo, reserve] of a dropped gun (null reserve = ∞) · c: throwable count · i: shared loot id
-  const data = msg.a ? { ammo: msg.a[0], reserve: msg.a[1] ?? Infinity } : msg.c ? { count: msg.c } : pickupData(msg.k);
-  pickups.spawn(msg.k, msg.x, msg.z, data, msg.l ?? Infinity, msg.i ?? null, msg.y ?? null);
+net.on("drop", msg => pickups.spawn(msg.k, msg.x, msg.z, unpackLoot(msg), msg.l ?? Infinity, msg.i ?? null, msg.y ?? null));
+
+// ── Shared loot: the host decides who gets it ────────────────────────────────
+// Taking a shared pickup (battle royale loot, anyone's drops) asks the host
+// first; the host grants the first claim and tells everyone it's gone, so two
+// players can't both take one item. Solo / unshared loot is taken at once.
+const lootClaims = new Map();  // id → { entry, apply, t } waiting for the host
+const takenLoot = new Set();   // host: ids already given out
+
+function claimLoot(entry, apply) {
+  const id = entry.id;
+  if (id === null || !net.connected) { apply(); return; }
+  if (net.isHost) {
+    if (takenLoot.has(id)) { pickups.release(entry); return; }
+    takenLoot.add(id);
+    net.send({ t: "take", i: id, by: net.id });
+    apply();
+    return;
+  }
+  if (lootClaims.has(id)) return;
+  entry.pending = true;
+  lootClaims.set(id, { entry, apply, t: performance.now() });
+  net.send({ t: "claim", i: id, to: "host" });
+}
+
+net.on("claim", msg => {
+  if (!net.isHost) return;
+  if (takenLoot.has(msg.i)) { net.send({ t: "deny", i: msg.i, to: msg.from }); return; }
+  takenLoot.add(msg.i);
+  pickups.releaseById(msg.i);
+  net.send({ t: "take", i: msg.i, by: msg.from });
 });
-net.on("take", msg => pickups.releaseById(msg.i));
+net.on("take", msg => {
+  if (net.isHost) takenLoot.add(msg.i);
+  const c = lootClaims.get(msg.i);
+  lootClaims.delete(msg.i);
+  if (c && msg.by === net.id) { c.apply(); return; } // ours: apply() takes and releases it
+  if (c) inventoryUI.feed("Someone else got there first", "info");
+  pickups.releaseById(msg.i);
+});
+net.on("deny", msg => {
+  const c = lootClaims.get(msg.i);
+  lootClaims.delete(msg.i);
+  if (!c) return;
+  c.entry.pending = false;
+  pickups.release(c.entry); // the host gave it to someone else
+  inventoryUI.feed("Item no longer available", "info");
+});
+/** Claims the host never answered (it left mid-claim): let the loot be tried again. */
+function expireLootClaims() {
+  if (!lootClaims.size) return;
+  const now = performance.now();
+  for (const [id, c] of lootClaims) {
+    if (now - c.t < 2500) continue;
+    lootClaims.delete(id);
+    c.entry.pending = false;
+  }
+}
 net.on("kill", msg => {
   // c: how it died (killCause), from the host
   const m = monsterSync?.findPuppet(msg.n);
@@ -3241,7 +3448,7 @@ function netTick(delta) {
       by: +bodyYaw.toFixed(3), ay: +aimYaw.toFixed(3), ap: +aimPitch.toFixed(3),
       aim: input.aim ? 1 : 0, fire: timeSinceShot < 0.15 ? 1 : 0,
       w: inventory.current, hp: Math.max(0, Math.round(playerHealth)), dead: playerHealth <= 0 ? 1 : 0,
-      vis: +playerVisibility().toFixed(2), k: killsThisLife, sn: STANCE_RANK[stance],
+      vis: +playerVisibility().toFixed(2), k: killsThisLife, sn: STANCE_RANK[stance], g: _gearCode || undefined,
       ph: isBR() ? (br.ghost ? PHASE_PLANE : br.flight) : PHASE_GROUND,
       veh: drive.on
         ? [+rickshaw.x.toFixed(2), +rickshaw.z.toFixed(2), +rickshaw.yaw.toFixed(3), +rickshaw.speed.toFixed(2), +rickshaw.fuel.toFixed(1)]
@@ -3422,7 +3629,7 @@ function updateDriving(delta) {
   jumpQueued = false;
   if (crash > 3) {
     cameraTrauma = Math.min(1, cameraTrauma + Math.min(0.7, crash * 0.05));
-    sfx.thud(4);
+    sfx.thud(null, false);
     if (crash > 10) dealDamageToPlayer((crash - 10) * 3, 0, 0, 0.5);
   }
   // The camera swings in behind you unless you're looking around with the mouse
@@ -3452,7 +3659,7 @@ function rickshawRunOver() {
     hitMonster(z, v * 14 * (z.def.bigBody ? 0.5 : 1), fx * dir * v * 0.5, fz * dir * v * 0.5);
     _vecA.set(p.x, p.y + 0.6, p.z);
     effects.impact(_vecA, fx * dir, 0.4, fz * dir, "blood", 14);
-    sfx.thud(2);
+    sfx.thud(p, false);
     rickshaw.speed *= z.def.bigBody ? 0.4 : 0.8;
   }
   if (!isBR()) return;
@@ -3463,7 +3670,7 @@ function rickshawRunOver() {
     _runOver.set(t.id, now);
     net.send({ t: "pvp", to: t.id, d: Math.round(v * 5), hs: 0, w: "rickshaw", sx: +rickshaw.x.toFixed(1), sz: +rickshaw.z.toFixed(1) });
     showHitMarker(false, false);
-    sfx.thud(2);
+    sfx.thud(t.pos, false);
   }
 }
 
@@ -3477,14 +3684,17 @@ function rickshawAfterStep() {
   characterRoot.rotation.y = bodyYaw;
 }
 
+const _rickshawAt = { x: 0, y: 0, z: 0 };
 /** Engine sound, and the speed / petrol gauge while you drive. */
 function updateRickshawFx() {
   if (!rickshaw) return;
+  // Someone else driving: the engine is placed at the rickshaw and fades with distance
   let vol = 0;
   if (rickshaw.driver !== null && rickshaw.fuel > 0) {
-    vol = drive.on ? 1 : THREE.MathUtils.clamp(1 - rickshaw.distanceTo(camera.position.x, camera.position.z) / 45, 0, 1);
+    vol = drive.on ? 1 : rickshaw.distanceTo(camera.position.x, camera.position.z) < 90 ? 1 : 0;
   }
-  sfx.setRickshaw(vol, Math.min(1, Math.abs(rickshaw.speed) / RICKSHAW.maxSpeed * 0.8 + rickshaw.throttle * 0.25));
+  _rickshawAt.x = rickshaw.x; _rickshawAt.y = groundHeight(rickshaw.x, rickshaw.z) + 0.8; _rickshawAt.z = rickshaw.z;
+  sfx.setRickshaw(vol, Math.min(1, Math.abs(rickshaw.speed) / RICKSHAW.maxSpeed * 0.8 + rickshaw.throttle * 0.25), drive.on ? null : _rickshawAt);
 
   const show = drive.on;
   if (show !== vehHud.shown) {
@@ -3521,7 +3731,12 @@ net.on("st", msg => {
     rickshaw.releaseRemote();
   }
 });
-net.on("vfuel", msg => { if (rickshaw) rickshaw.fuel = msg.f; });
+net.on("vfuel", msg => {
+  if (!rickshaw) return;
+  // A teammate topping it up: you hear it from the rickshaw
+  if (msg.f > rickshaw.fuel + 1) sfx.refuel({ x: rickshaw.x, y: groundHeight(rickshaw.x, rickshaw.z) + 0.8, z: rickshaw.z });
+  rickshaw.fuel = msg.f;
+});
 
 
 /** [x, z, yaw, fuel] of the parked rickshaw, for late joiners. */
@@ -3603,7 +3818,6 @@ const br = {
   zoneTick: 1,
   respawnTimer: 0,
   atkId: null, atkW: "", atkHs: false, atkAt: -99, // who hurt you last (kill credit)
-  dropSeq: 0,
   netTimer: 0,
   hudTimer: 0,
 };
@@ -3692,6 +3906,7 @@ function brResetPlayer(x, y, z, empty) {
   moveVelocity.set(0, 0, 0);
   camPivot.set(x, y - FEET_OFFSET + cameraRig.pivotHeight, z);
   inventory.reset(empty);
+  if (!empty) inventory.addThrowable("smoke", SMOKE.warmupKit); // try it out before the drop
   onWeaponChanged(false);
   cancelThrow();
   soldier.revive();
@@ -3715,6 +3930,8 @@ function brEnterWarmup() {
   throwables.clear();
   fireFX.clear();
   pickups.clear();
+  takenLoot.clear(); // the next match's loot reuses the ids
+  lootClaims.clear();
   brHud.hideResult();
   setMapOpen(false);
   brWarmSpawn();
@@ -3751,6 +3968,8 @@ function brStartMatch(seed, ids, t) {
   throwables.clear();
   fireFX.clear();
   pickups.clear();
+  takenLoot.clear(); // the next match's loot reuses the ids
+  lootClaims.clear();
   brSpawnLoot(seed);
   rickshaw?.reset();
   brHud.hideResult();
@@ -3787,14 +4006,36 @@ function brSpawnLoot(seed) {
 }
 
 /** A pickup every player sees, and that disappears for everyone when taken. */
-function brSpawnShared(k, x, z, data, y = groundHeight(x, z)) {
-  const id = `${net.id}.${br.dropSeq++}`;
-  pickups.spawn(k, x, z, data, Infinity, id, y);
-  net.send({
-    t: "drop", k, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), i: id,
-    a: data && data.ammo !== undefined ? [data.ammo, data.reserve === Infinity ? null : data.reserve] : undefined,
-    c: data?.count,
-  });
+/** A pickup every player sees, and that disappears for everyone when taken. */
+function spawnShared(k, x, z, data, y = groundHeight(x, z)) {
+  const id = `${net.id}.${dropSeq++}`;
+  const entry = pickups.spawn(k, x, z, data, Infinity, id, y);
+  net.send({ t: "drop", k, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), i: id, ...packLoot(data) });
+  return entry;
+}
+let dropSeq = 0;
+
+/**
+ * Pickup data on the wire. a: [ammo, reserve] of a gun (null reserve = ∞),
+ * m: its attachments [optic, muzzle, mag, grip], c: stack count, d: armor durability.
+ */
+function packLoot(data) {
+  if (!data) return {};
+  const out = {};
+  if (data.ammo !== undefined) out.a = [data.ammo, data.reserve === Infinity ? null : data.reserve];
+  if (data.att && Object.values(data.att).some(Boolean)) out.m = [data.att.optic, data.att.muzzle, data.att.mag, data.att.grip];
+  if (data.count) out.c = data.count;
+  if (data.dur !== undefined && data.dur !== null) out.d = Math.round(data.dur);
+  return out;
+}
+function unpackLoot(msg) {
+  if (msg.a) {
+    const m = msg.m ?? [];
+    return { ammo: msg.a[0], reserve: msg.a[1] ?? Infinity, att: { optic: m[0] ?? null, muzzle: m[1] ?? null, mag: m[2] ?? null, grip: m[3] ?? null } };
+  }
+  if (msg.c) return { count: msg.c };
+  if (msg.d !== undefined) return { dur: msg.d };
+  return pickupData(msg.k);
 }
 
 /** Your loot spills out around your body for whoever gets there first. */
@@ -3803,15 +4044,18 @@ function brDropLoot() {
   const items = [];
   for (const id of inventory.ownedWeapons) {
     const s = inventory.weapons[id];
-    items.push([id, { ammo: s.ammo, reserve: s.reserve }]);
+    items.push([id, { ammo: s.ammo, reserve: s.reserve, att: { ...s.att } }]);
   }
   for (const k of THROWABLE_ORDER) if (inventory.throwables[k] > 0) items.push([k, { count: inventory.throwables[k] }]);
-  for (let i = 0; i < inventory.medkits; i++) items.push(["medkit", null]);
+  if (inventory.medkits) items.push(["medkit", { count: inventory.medkits }]);
+  if (inventory.fuelCans) items.push(["fuel", { count: inventory.fuelCans }]);
+  for (const [k, n] of Object.entries(inventory.bag)) if (n > 0) items.push([k, { count: n }]);
+  for (const piece of Object.values(inventory.gear)) if (piece) items.push([piece.id, { dur: piece.dur }]);
   if (items.length) items.push(["ammo", null]);
   items.forEach(([k, data], i) => {
     const a = (i / items.length) * Math.PI * 2;
     const x = p.x + Math.cos(a) * 1.5, z = p.z + Math.sin(a) * 1.5;
-    brSpawnShared(k, x, z, data, floorY(x, z, p.y - FEET_OFFSET));
+    spawnShared(k, x, z, data, floorY(x, z, p.y - FEET_OFFSET));
   });
   inventory.reset(true);
   onWeaponChanged(false);
@@ -3981,6 +4225,7 @@ function brHandleElim({ v, k, w, hs }) {
   br.alive.delete(v);
   if (v === net.id) {
     br.inMatch = false;
+    postFx.kick(0.4, 0xff2a1a);
     const place = br.placement || br.alive.size + 1;
     progress.brFinished(place, br.started);
     brHud.showResult({
@@ -4018,6 +4263,7 @@ function brShowEnd(w) {
   const lines = [["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`], ["XP", `+${progress.runXp}`]];
   if (w === net.id) {
     brHud.showResult({ title: "WINNER", sub: "Last one standing", lines: [["PLACE", "#1"], ...lines], color: "#ffd84d" });
+    postFx.kick(0.6, 0xffd27a);
     sfx.levelCleared();
     confetti.celebrate("victory");
   } else {
@@ -4175,7 +4421,7 @@ net.on("elim", msg => { if (isBR()) brHandleElim(msg); });
 net.on("pvp", msg => {
   if (!isBR() || playerHealth <= 0 || br.ghost || br.flight === PHASE_PLANE) return;
   brNoteAttacker(msg.from, msg.w, !!msg.hs);
-  dealDamageToPlayer(msg.d, 0, 0, msg.hs ? 0.5 : 0.25, msg.sx, msg.sz);
+  dealDamageToPlayer(msg.d, 0, 0, msg.hs ? 0.5 : 0.25, msg.sx, msg.sz, msg.w === "rickshaw" ? "raw" : msg.hs ? "head" : "body");
 });
 
 
@@ -4383,9 +4629,17 @@ function animate() {
   throwables.update(delta);
   if (zombieManager) fireFX.syncBodies(zombieManager.active, characterBody.position.x, characterBody.position.z);
   fireFX.update(delta);
+  // Smoke dims with the daylight and underground, so it never glows at night
+  const smokeLight = (1 - env.darkness * 0.7) * (1 - caveDepth * 0.6);
+  smokeFX.update(delta, smokeLight);
+  updateSmokeOverlay(smokeLight);
+  updateAudio(delta);
   effects.update(delta);
   updatePickups(delta);
   inventoryUI.update();
+  syncGearModel();
+  expireLootClaims();
+  if (inventoryOpen) lootScreen.update(realDelta);
 
   timeSinceHit += delta;
   cameraTrauma = Math.max(0, cameraTrauma - delta * 1.6);
@@ -4661,7 +4915,7 @@ async function boot() {
     zombieManager.surfaceAt = (x, z, y, ground) => houses.surfaceAt(x, z, y, ground);
     zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4);
     zombieManager.onDoorBang = (x, z) => {
-      sfx.doorBang(Math.hypot(x - characterBody.position.x, z - characterBody.position.z));
+      sfx.doorBang({ x, y: groundHeight(x, z) + 1.2, z });
     };
     spawnWorldLoot();
 
@@ -4683,6 +4937,8 @@ async function boot() {
 
     if (BENCH_ENABLED) startBenchmark();
     else lobby.show();
+    // The inventory screen's 3D character loads in the background
+    lootScreen.initPreview(gltfLoader);
     loadingScreen.classList.add("hidden");
     loadingScreen.addEventListener("transitionend", () => loadingScreen.remove(), { once: true });
   } catch (err) {

@@ -79,12 +79,6 @@ export class EnemyFire {
     this.onBoltImpact = null; // (gun, pos, visualOnly) — dragon fireballs set the ground alight
   }
 
-  /** Distance from the local player (for sound volume). */
-  _playerFeetDist(x, z) {
-    const t = this.getTargets().find(q => q.local);
-    return t ? Math.hypot(t.pos.x - x, t.pos.z - z) : 30;
-  }
-
   // ── Lasers ──────────────────────────────────────────────────────────────────
 
   beginFrame() { this._laserUsed = 0; }
@@ -119,8 +113,8 @@ export class EnemyFire {
     this._dmgMul = damageMul;
     this._visual = visualOnly;
     if (!visualOnly) this.onFire?.(gun, from, target, spreadMul, srcX, srcZ);
-    const dist = this._playerFeetDist(srcX, srcZ);
-    this.sfx.gunshot(gun.sound, Math.max(0.12, 0.85 / (1 + dist * 0.06)));
+    // Placed at the muzzle: distance, direction and air absorption come from Sfx
+    this.sfx.gunshot(gun.sound, 0.85, from);
     this.effects.enemyFlash(from, gun.tracer ?? gun.color);
     if (gun.kind === "bolt") {
       _a.subVectors(target, from).normalize();

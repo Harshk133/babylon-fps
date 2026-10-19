@@ -287,8 +287,6 @@ export class ZombieManager {
       m.fallV = 0;
       m.rollSide = Math.random() < 0.5 ? -1 : 1;
       if (m.kind.painClips.length) this._setAnimation(m, m.kind.painClips[0], 99);
-      if (m.def.voice === "dragon") this.sfx?.dragonRoar(this._localDist(m.body.position.x, m.body.position.z), true);
-      else if (m.def.voice === "hound") this.sfx?.yelp(this._localDist(m.body.position.x, m.body.position.z));
     }
     if (this.boss === m) this.boss = null;
     this.kills++;
@@ -335,7 +333,7 @@ export class ZombieManager {
     m.boredTimer = 0;
   }
 
-  /** quiet: a pack member answering the call (no extra howl). */
+  /** quiet: a pack member answering the call (MonsterAudio keeps the pack to one howl). */
   _spot(m, x, z, target = null, quiet = false) {
     if (m.state === "chase" || m.state === "alert" || m.dying) return;
     const def = m.def;
@@ -348,10 +346,7 @@ export class ZombieManager {
     m.markerTimer = 1.6;
     m.animLockTimer = 0;
     if (m.actions.point && Math.random() < 0.6) this._setAnimation(m, "point", m.stateTimer);
-    const d = this._localDist(m.body.position.x, m.body.position.z);
-    if (def.voice === "hound") { if (!quiet) this.sfx?.howl(d); }
-    else if (def.voice === "dragon") this.sfx?.dragonRoar(d);
-    else this.sfx?.growl(d, !!def.bigBody);
+    // Voices (growl, bark, roar) come from MonsterAudio, which watches the state change
     this.onSpotted?.(m);
     // Pack hunters: one spots you, the rest nearby come running
     if (def.pack) {
@@ -724,7 +719,6 @@ export class ZombieManager {
     this._setAnimation(m, "jump", pc.time);
     const jump = m.actions.jump;
     jump?.setEffectiveTimeScale(jump.getClip().duration / (pc.time * 1.6));
-    this.sfx?.snarl(this._localDist(m.body.position.x, m.body.position.z));
     return true;
   }
 

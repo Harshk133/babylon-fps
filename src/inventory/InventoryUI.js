@@ -1,4 +1,4 @@
-import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, MEDKIT, FUEL_CAN } from "../combat/weapons.js";
+import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, FUEL_CAN, GEAR } from "../combat/weapons.js";
 
 const FEED_LIFE = 2600; // ms
 const fmtReserve = r => (r === Infinity ? "∞" : `${r}`);
@@ -23,25 +23,22 @@ function setClass(node, cache, key, cls, on) {
 }
 
 /**
- * DOM for everything inventory-related: the always-on hotbar, the pickup
- * prompt, the pickup feed, and the full inventory screen (Tab).
+ * The always-on inventory DOM: the hotbar, the pickup prompt and the pickup
+ * feed. The full inventory screen (Tab) is src/ui/LootScreen.js.
  */
 export class InventoryUI {
-  constructor({ inventory, icons, onEquip, onDrop, onSelectThrowable, onUseMedkit, onClose }) {
+  constructor({ inventory, icons }) {
     this.inv = inventory;
     this.icons = icons;
-    this.cb = { onEquip, onDrop, onSelectThrowable, onUseMedkit, onClose };
     this._ver = -1;
-    this._panelVer = -1;
-    this.open = false;
 
     this.promptEl = document.getElementById("pickup-prompt");
     this.feedEl = document.getElementById("pickup-feed");
-    this.panelEl = document.getElementById("inventory");
     this._prompt = null;
 
     this._buildHotbar(document.getElementById("hotbar"));
-    this._buildPanel();
+    this.gearEl = document.getElementById("gear-hud");
+    this._gearSig = "";
   }
 
   // ── Hotbar ──────────────────────────────────────────────────────────────────
@@ -123,12 +120,30 @@ export class InventoryUI {
       setClass(s.slot, s.cache, "sel", "selected", inv.selectedThrowable === kind);
       setClass(s.slot, s.cache, "empty", "empty", n === 0);
     }
+    this._updateGear();
     setText(this.medSlot.count, this.medSlot.cache, "n", `${inv.medkits}`);
     setClass(this.medSlot.slot, this.medSlot.cache, "empty", "empty", inv.medkits === 0);
     setText(this.fuelSlot.count, this.fuelSlot.cache, "n", `${inv.fuelCans}`);
     setClass(this.fuelSlot.slot, this.fuelSlot.cache, "empty", "empty", inv.fuelCans === 0);
 
-    if (this.open) this._renderPanel();
+  }
+
+  /** Helmet / vest / backpack chips under the health card, with armor durability. */
+  _updateGear() {
+    if (!this.gearEl) return;
+    let sig = "", html = "";
+    for (const slot of ["helmet", "vest", "backpack"]) {
+      const p = this.inv.gear[slot];
+      if (!p) continue;
+      const g = GEAR[p.id];
+      const pct = g.durability ? Math.round((p.dur / g.durability) * 100) : null;
+      sig += `${p.id}:${pct};`;
+      html += `<span class="gh-chip lv${g.level}${pct !== null && pct < 30 ? " low" : ""}" title="${g.name}">
+        <img src="${this.icons[p.id] ?? ""}" alt=""><b>${g.level}</b>${pct !== null ? `<i style="--d:${pct}%"></i>` : ""}</span>`;
+    }
+    if (sig === this._gearSig) return;
+    this._gearSig = sig;
+    this.gearEl.innerHTML = html;
   }
 
   // ── Prompt + feed ───────────────────────────────────────────────────────────
@@ -163,127 +178,5 @@ export class InventoryUI {
     this.feedEl.prepend(item);
     while (this.feedEl.children.length > 5) this.feedEl.lastChild.remove();
     setTimeout(() => item.remove(), FEED_LIFE);
-  }
-
-  // ── Inventory screen ────────────────────────────────────────────────────────
-
-  _buildPanel() {
-    const p = this.panelEl;
-    p.innerHTML = `
-      <div class="inv-panel" role="dialog" aria-label="Inventory">
-        <header class="inv-head">
-          <h2>INVENTORY</h2>
-          <span class="inv-hint"><kbd>Tab</kbd> or <kbd>Esc</kbd> to close</span>
-        </header>
-        <h3 class="inv-section">WEAPONS</h3>
-        <div class="inv-weapons"></div>
-        <h3 class="inv-section">EQUIPMENT</h3>
-        <div class="inv-items"></div>
-      </div>`;
-    this.weaponsEl = p.querySelector(".inv-weapons");
-    this.itemsEl = p.querySelector(".inv-items");
-    // Clicking the dimmed backdrop closes the screen
-    p.addEventListener("mousedown", e => { if (e.target === p) this.cb.onClose(); });
-    p.addEventListener("click", e => {
-      const btn = e.target.closest("button[data-act]");
-      if (!btn || btn.disabled) return;
-      const { act, id } = btn.dataset;
-      if (act === "equip") this.cb.onEquip(id);
-      else if (act === "drop") this.cb.onDrop(id);
-      else if (act === "select") this.cb.onSelectThrowable(id);
-      else if (act === "medkit") this.cb.onUseMedkit();
-    });
-  }
-
-  setOpen(open) {
-    this.open = open;
-    this.panelEl.classList.toggle("visible", open);
-    if (open) this._renderPanel();
-  }
-
-  _statBar(label, v) {
-    const pct = Math.round(Math.max(0.04, Math.min(1, v)) * 100);
-    return `<div class="stat"><span>${label}</span><div class="stat-bar"><i style="width:${pct}%"></i></div></div>`;
-  }
-
-  _renderPanel() {
-    const inv = this.inv;
-    if (this._panelVer === inv.version) return;
-    this._panelVer = inv.version;
-    const canDrop = inv.ownedWeapons.length > 1;
-
-    this.weaponsEl.innerHTML = WEAPON_ORDER.map(id => {
-      const d = WEAPONS[id];
-      const w = inv.weapons[id];
-      const eq = inv.current === id;
-      const stats =
-        this._statBar("Damage", (d.damage * d.pellets) / 160) +
-        this._statBar("Fire rate", d.fireRate / 11) +
-        this._statBar("Accuracy", 1 - (d.spreadHip + d.spreadAim) / 0.13) +
-        this._statBar("Range", d.range / 300);
-      if (!w) {
-        return `
-          <div class="inv-card locked">
-            <div class="card-top"><span class="card-key">${d.slot}</span><span class="card-name">${d.name}</span></div>
-            <img class="card-icon" src="${this.icons[id]}" alt="">
-            <div class="card-ammo">Not found yet</div>
-            <div class="stats">${stats}</div>
-          </div>`;
-      }
-      return `
-        <div class="inv-card${eq ? " equipped" : ""}">
-          <div class="card-top">
-            <span class="card-key">${d.slot}</span><span class="card-name">${d.name}</span>
-            ${eq ? '<span class="card-badge">EQUIPPED</span>' : ""}
-          </div>
-          <img class="card-icon" src="${this.icons[id]}" alt="">
-          <div class="card-ammo"><b>${w.ammo}</b> / ${fmtReserve(w.reserve)} <small>${d.auto ? "AUTO" : "SEMI"} · ${d.magSize} RND</small></div>
-          <div class="stats">${stats}</div>
-          <div class="card-actions">
-            <button data-act="equip" data-id="${id}" ${eq ? "disabled" : ""}>${eq ? "In hand" : "Equip"}</button>
-            <button data-act="drop" data-id="${id}" class="ghost" ${canDrop ? "" : "disabled"}>Drop</button>
-          </div>
-        </div>`;
-    }).join("");
-
-    const throwCards = THROWABLE_ORDER.map(kind => {
-      const t = THROWABLES[kind];
-      const n = inv.throwables[kind];
-      const sel = inv.selectedThrowable === kind;
-      const desc = kind === "grenade"
-        ? "Bounces, explodes after 2 s. Huge blast radius."
-        : "Shatters on impact. Burns the area for 8 s.";
-      return `
-        <div class="inv-card item${sel ? " equipped" : ""}">
-          <div class="card-top"><span class="card-name">${t.name}</span>${sel ? '<span class="card-badge">READY</span>' : ""}</div>
-          <img class="card-icon small" src="${this.icons[kind]}" alt="">
-          <div class="card-count"><b>${n}</b> / ${t.max}</div>
-          <p class="card-desc">${desc}</p>
-          <div class="card-actions">
-            <button data-act="select" data-id="${kind}" ${sel ? "disabled" : ""}>${sel ? "Selected" : "Select"}</button>
-          </div>
-        </div>`;
-    }).join("");
-
-    const medCard = `
-      <div class="inv-card item">
-        <div class="card-top"><span class="card-name">${MEDKIT.name}</span></div>
-        <div class="card-icon medkit-icon">+</div>
-        <div class="card-count"><b>${inv.medkits}</b> / ${MEDKIT.max}</div>
-        <p class="card-desc">Restores ${MEDKIT.heal} health. Press <kbd>H</kbd> in game.</p>
-        <div class="card-actions">
-          <button data-act="medkit" ${inv.medkits > 0 ? "" : "disabled"}>Use</button>
-        </div>
-      </div>`;
-
-    const fuelCard = `
-      <div class="inv-card item">
-        <div class="card-top"><span class="card-name">${FUEL_CAN.name}</span></div>
-        <img class="card-icon small" src="${this.icons.fuel}" alt="">
-        <div class="card-count"><b>${inv.fuelCans}</b> / ${FUEL_CAN.max}</div>
-        <p class="card-desc">Petrol for the auto-rickshaw. Press <kbd>T</kbd> next to it (or while driving) to fill up.</p>
-      </div>`;
-
-    this.itemsEl.innerHTML = throwCards + medCard + fuelCard;
   }
 }

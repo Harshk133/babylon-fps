@@ -244,6 +244,23 @@ export class PostFX {
       bloom += 0.55 * s.frenzy;
     }
 
+    // Battle royale: caught outside the blue zone, it closes in cold and pulsing
+    if (s.zone > 0) {
+      const pulse = 0.5 + 0.5 * Math.sin(this.time * 5.5);
+      sat -= 0.35 * s.zone;
+      _c1.lerp(_c2.setRGB(0.72, 0.9, 1.3), 0.7 * s.zone);
+      vig += (0.3 + 0.25 * pulse) * s.zone;
+      chroma += (0.6 + 0.8 * pulse) * s.zone;
+      bloom += 0.2 * s.zone;
+    }
+    // Freefall: wind-blur fringes and tunnel vision, eased off as the chute opens
+    if (s.freefall > 0) {
+      chroma += 2.2 * s.freefall;
+      vig += 0.35 * s.freefall;
+      contrast += 0.06 * s.freefall;
+      sat += 0.08 * s.freefall;
+    }
+
     if (s.dead) { sat = 0; contrast = 1.18; vig = 0.7; red = 0; chroma = 0; scan = 0; _c1.setRGB(1, 1, 1); }
 
     const k = 1 - Math.exp(-6 * dt);

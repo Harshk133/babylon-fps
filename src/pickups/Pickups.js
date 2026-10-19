@@ -5,7 +5,7 @@ import { getItemTemplate } from "../items/ItemModels.js";
 
 const HOVER_HEIGHT    = 0.6;
 const MAX_ACTIVE      = 240;  // battle royale scatters a lot of loot
-const INTERACT_RADIUS = 2.2;   // weapons: shows the [E] prompt
+const INTERACT_RADIUS = 2.2;   // weapons, gear, attachments: shows the [E] prompt
 const AUTO_RADIUS     = 1.4;   // ammo / throwables / medkits: walk over to collect
 const BLINK_TIME      = 5;     // timed drops blink for their last few seconds
 const FAR_SKIP        = 90;    // don't animate (or draw) pickups this far away
@@ -13,7 +13,9 @@ const MODEL_RANGE     = 40;    // past this only the light beam is drawn
 const MODELS_PER_KIND = 96;    // instances per item kind within MODEL_RANGE
 
 const CATEGORY_COLOR = {
-  weapon:    0xffa630,
+  weapon:     0xffa630,
+  gear:       0x5aa8ff,
+  attachment: 0xb98cff,
   ammo:      0xffe066,
   throwable: 0xff5a3a,
   medkit:    0x4dff88,
@@ -74,8 +76,9 @@ export class Pickups {
     this.scene = scene;
     this.pools = {};          // kind → entry[]
     this.active = [];
-    this.nearestWeapon = null;
+    this.nearestWeapon = null; // nearest E-pickup (gun, gear, attachment) this frame
     this.touching = [];       // consumables within AUTO_RADIUS this frame
+    this._uid = 0;            // every spawn gets a fresh uid, so a stale UI row can't take a reused entry
     this.byId = new Map();    // network id → entry (battle royale loot shared by every player)
     this._time = 0;
 
@@ -157,6 +160,9 @@ export class Pickups {
       this.pools[kind].push(entry);
     }
     entry.active = true;
+    entry.uid = ++this._uid;
+    entry.pending = false;    // claimed from the host, waiting for its answer
+    entry.dropLock = false;   // you just dropped it: no walk-over pickup until you step away
     entry.x = x;
     entry.z = z;
     entry.y = y ?? groundHeight(x, z);
@@ -179,6 +185,14 @@ export class Pickups {
     if (this.nearestWeapon === entry) this.nearestWeapon = null;
   }
 
+  /**
+   * Something you just dropped: walking over it won't pick it back up until
+   * you've stepped out of reach once (E and the inventory screen still can).
+   */
+  lockAuto(entry) {
+    if (entry) entry.dropLock = true;
+  }
+
   releaseById(id) {
     const e = this.byId.get(id);
     if (e) this.release(e);
@@ -186,6 +200,23 @@ export class Pickups {
 
   clear() {
     for (let i = this.active.length - 1; i >= 0; i--) this.release(this.active[i]);
+  }
+
+  /**
+   * Loot within `r` m of (px, pz) on the same floor as feet height py,
+   * nearest first, into `out` (the inventory screen's vicinity list).
+   */
+  near(px, pz, py, r, out) {
+    out.length = 0;
+    for (const e of this.active) {
+      if (e.pending) continue;
+      const d2 = (e.x - px) ** 2 + (e.z - pz) ** 2;
+      if (d2 > r * r || (py !== null && Math.abs(e.y - py) > 1.4)) continue;
+      e.dist = Math.sqrt(d2);
+      out.push(e);
+    }
+    out.sort((a, b) => a.dist - b.dist);
+    return out;
   }
 
   /** py: the player's feet height (only loot on the same floor can be picked up). */
@@ -231,10 +262,12 @@ export class Pickups {
         }
       }
       if (py !== null && Math.abs(e.y - py) > 1.4) continue; // the other floor of a house
+      if (e.pending) continue;
 
-      if (e.def.category === "weapon") {
+      if (e.dropLock && d2 > (AUTO_RADIUS + 0.6) ** 2) e.dropLock = false;
+      if (e.def.interact) {
         if (d2 < best) { best = d2; this.nearestWeapon = e; }
-      } else if (d2 < AUTO_RADIUS * AUTO_RADIUS) {
+      } else if (d2 < AUTO_RADIUS * AUTO_RADIUS && !e.dropLock) {
         this.touching.push(e);
       }
     }

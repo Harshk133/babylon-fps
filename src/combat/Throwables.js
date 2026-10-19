@@ -3,7 +3,7 @@ import { groundHeight } from "../world/Terrain.js";
 import * as CANNON from "cannon-es";
 import { cloneItem } from "../items/ItemModels.js";
 import { GROUP_WORLD, GROUP_ZOMBIE, GROUP_PROJECTILE, GROUP_NONE } from "../physicsGroups.js";
-import { GRENADE, MOLOTOV } from "./weapons.js";
+import { GRENADE, MOLOTOV, SMOKE } from "./weapons.js";
 import { QUALITY } from "../quality.js";
 
 const POOL        = 8;
@@ -22,15 +22,18 @@ const _arcResult = new CANNON.RaycastResult();
 const _arcOpts = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
 
 /**
- * Grenades and molotovs: pooled physics projectiles, molotov fire zones, and
- * the hold-to-aim trajectory preview. Damage is applied through callbacks so
- * this module doesn't need to know about zombies or the player.
+ * Grenades, molotovs and smoke grenades: pooled physics projectiles, molotov
+ * fire zones, and the hold-to-aim trajectory preview. Damage is applied
+ * through callbacks so this module doesn't need to know about zombies or the
+ * player. Smoke clouds live in SmokeFX; onSmoke(pos, color) plays the sound.
  */
 export class Throwables {
-  constructor({ scene, world, material, effects, fireFX, sfx, onExplode, onIgnite, onFireTick }) {
+  constructor({ scene, world, material, effects, fireFX, smokeFX, sfx, onExplode, onIgnite, onFireTick, onSmoke }) {
     this.world = world;
     this.effects = effects;
     this.fireFX = fireFX;
+    this.smokeFX = smokeFX;
+    this.onSmoke = onSmoke;
     this.sfx = sfx;
     this.onExplode = onExplode;
     this.onIgnite = onIgnite;
@@ -53,7 +56,7 @@ export class Throwables {
       body.sleep();
 
       const holder = new THREE.Group();
-      const meshes = { grenade: cloneItem("grenade"), molotov: cloneItem("molotov") };
+      const meshes = { grenade: cloneItem("grenade"), molotov: cloneItem("molotov"), smoke: cloneItem("smoke") };
       for (const m of Object.values(meshes)) {
         m.scale.setScalar(ITEM_SCALE);
         m.visible = false;
@@ -62,9 +65,18 @@ export class Throwables {
       holder.visible = false;
       scene.add(holder);
 
-      const p = { body, holder, meshes, kind: null, active: false, age: 0, shatter: false, hitZombie: null };
+      const p = { body, holder, meshes, kind: null, active: false, age: 0, shatter: false, hitZombie: null, clink: 0 };
       body.addEventListener("collide", e => {
-        if (!p.active || p.kind !== "molotov" || p.age <= 0.03) return;
+        if (!p.active || p.age <= 0.03) return;
+        if (p.kind !== "molotov") {
+          // Grenades and smoke cans clink as they bounce (not on every tiny roll)
+          const v = body.velocity.length();
+          if (v > 1.5 && p.age - p.clink > 0.12) {
+            p.clink = p.age;
+            this.sfx.bounce(body.position, v / 6);
+          }
+          return;
+        }
         p.shatter = true;
         if (e.body?.zombie) p.hitZombie = e.body.zombie;
       });
@@ -121,8 +133,11 @@ export class Throwables {
     scene.add(this.marker);
   }
 
-  /** origin / velocity: THREE.Vector3-likes (copied). owner: thrower's player id (kill credit). */
-  throw(kind, origin, velocity, owner = null) {
+  /**
+   * origin / velocity: THREE.Vector3-likes (copied). owner: thrower's player id
+   * (kill credit). color: smoke colour index (SMOKE_COLORS), picked by the thrower.
+   */
+  throw(kind, origin, velocity, owner = null, color = 0) {
     const p = this.projectiles.find(q => !q.active)
       ?? this.projectiles.reduce((a, b) => (a.age > b.age ? a : b));
     if (p.active) this._deactivate(p);
@@ -132,9 +147,10 @@ export class Throwables {
     p.age = 0;
     p.shatter = false;
     p.hitZombie = null;
+    p.clink = 0;
     p.owner = owner;
-    p.meshes.grenade.visible = kind === "grenade";
-    p.meshes.molotov.visible = kind === "molotov";
+    p.color = color;
+    for (const k in p.meshes) p.meshes[k].visible = k === kind;
     p.holder.visible = true;
 
     const b = p.body;
@@ -195,7 +211,7 @@ export class Throwables {
     light.position.set(x, g + 1.2, z);
 
     if (hostile) return;
-    this.sfx.glassBreak();
+    this.sfx.glassBreak({ x, y: g + 0.3, z });
     this.onIgnite?.(x, z, hitZombie, owner);
   }
 
@@ -206,6 +222,7 @@ export class Throwables {
 
   clear() {
     for (const p of this.projectiles) if (p.active) this._deactivate(p);
+    this.smokeFX?.clear();
     for (const f of this.fires) {
       this._endFire(f);
       f.scorch.material.opacity = 0;
@@ -230,6 +247,13 @@ export class Throwables {
           this._deactivate(p);
           this._ignite(x, z, hit, owner);
         }
+      } else if (p.kind === "smoke") {
+        if (p.age < SMOKE.fuse) continue;
+        const x = b.position.x, z = b.position.z, color = p.color;
+        _v.set(x, groundHeight(x, z), z);
+        this._deactivate(p);
+        this.smokeFX?.spawn(_v.x, _v.y, _v.z, color);
+        this.onSmoke?.(_v, color);
       } else if (p.age >= GRENADE.fuse) {
         _v.set(b.position.x, Math.max(groundHeight(b.position.x, b.position.z) + 0.1, b.position.y), b.position.z);
         const owner = p.owner;
@@ -292,7 +316,7 @@ export class Throwables {
     const last = (count - 1) * 3;
     this.marker.visible = landed;
     this.marker.position.set(pos[last], pos[last + 1] + 0.04, pos[last + 2]);
-    this.radiusRing.scale.setScalar(kind === "grenade" ? GRENADE.radius : MOLOTOV.radius);
+    this.radiusRing.scale.setScalar(kind === "grenade" ? GRENADE.radius : kind === "smoke" ? SMOKE.radius : MOLOTOV.radius);
   }
 
   hidePreview() {

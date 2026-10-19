@@ -17,6 +17,10 @@ const MAT = {
   yellow:  new THREE.MeshStandardMaterial({ color: 0xd9a400, metalness: 0.1, roughness: 0.6 }),
   white:   new THREE.MeshStandardMaterial({ color: 0xe6e6e2, metalness: 0.0, roughness: 0.6 }),
   red:     new THREE.MeshStandardMaterial({ color: 0xc4161c, metalness: 0.0, roughness: 0.6 }),
+  canister: new THREE.MeshStandardMaterial({ color: 0x5d646b, metalness: 0.3, roughness: 0.55 }),
+  lens:    new THREE.MeshStandardMaterial({ color: 0x3fa0ff, metalness: 0.2, roughness: 0.1, emissive: 0x0a2a55 }),
+  dot:     new THREE.MeshStandardMaterial({ color: 0xff2020, emissive: 0xff2020, emissiveIntensity: 1.5 }),
+  violet:  new THREE.MeshStandardMaterial({ color: 0x9b5cff, metalness: 0.0, roughness: 0.6 }),
   cloth:   new THREE.MeshStandardMaterial({ color: 0xcfc3a3, metalness: 0.0, roughness: 1.0 }),
   liquid:  new THREE.MeshStandardMaterial({ color: 0xb8620f, metalness: 0.0, roughness: 0.3, emissive: 0x2a1000 }),
   glass:   new THREE.MeshStandardMaterial({
@@ -133,6 +137,66 @@ const BUILDERS = {
     return g;
   },
 
+  // ── Gear (one shade per level, matching what the soldier wears) ──────────
+  ...gearBuilders(),
+
+  // ── Attachments ────────────────────────────────────────────────────────────
+  reddot: () => {
+    const g = new THREE.Group();
+    box(g, 0.07, 0.025, 0.035, MAT.polymer, 0, 0, 0);
+    const ring = part(g, new THREE.TorusGeometry(0.02, 0.006, 6, 16), MAT.polymer, 0.01, 0.035, 0);
+    ring.rotation.y = Math.PI / 2;
+    part(g, new THREE.CircleGeometry(0.016, 12).rotateY(Math.PI / 2), MAT.lens, 0.012, 0.035, 0);
+    part(g, new THREE.SphereGeometry(0.004, 6, 4), MAT.dot, 0.008, 0.035, 0);
+    return g;
+  },
+  scope4x: () => {
+    const g = new THREE.Group();
+    barrel(g, 0.022, 0.16, MAT.polymer, 0, 0.03, 0);
+    barrel(g, 0.028, 0.04, MAT.polymer, 0.07, 0.03, 0);
+    barrel(g, 0.026, 0.035, MAT.polymer, -0.07, 0.03, 0);
+    part(g, new THREE.CircleGeometry(0.024, 12).rotateY(Math.PI / 2), MAT.lens, 0.091, 0.03, 0);
+    box(g, 0.1, 0.02, 0.025, MAT.metal, 0, 0, 0);
+    return g;
+  },
+  compensator: () => {
+    const g = new THREE.Group();
+    barrel(g, 0.014, 0.07, MAT.metal, 0, 0, 0);
+    for (const x of [-0.015, 0.005, 0.025]) box(g, 0.008, 0.03, 0.03, MAT.polymer, x, 0.006, 0);
+    return g;
+  },
+  suppressor: () => {
+    const g = new THREE.Group();
+    barrel(g, 0.019, 0.2, MAT.polymer, 0, 0, 0);
+    barrel(g, 0.02, 0.012, MAT.metal, 0.1, 0, 0);
+    return g;
+  },
+  extmag: () => {
+    const g = new THREE.Group();
+    box(g, 0.035, 0.16, 0.025, MAT.metal, 0, 0, 0, 0.18);
+    box(g, 0.035, 0.05, 0.027, MAT.yellow, 0.016, -0.09, 0, 0.35);
+    return g;
+  },
+  grip: () => {
+    const g = new THREE.Group();
+    box(g, 0.03, 0.09, 0.03, MAT.polymer, 0, -0.04, 0);
+    box(g, 0.06, 0.015, 0.03, MAT.metal, 0, 0.01, 0);
+    return g;
+  },
+
+  // Smoke canister: grey can, coloured bands, spoon and pin on top
+  smoke: () => {
+    const g = new THREE.Group();
+    part(g, cylGeo(0.034, 0.034, 0.12, false), MAT.canister, 0, 0, 0);
+    part(g, cylGeo(0.0345, 0.0345, 0.018, false), MAT.violet, 0, 0.03, 0);
+    part(g, cylGeo(0.0345, 0.0345, 0.018, false), MAT.violet, 0, -0.03, 0);
+    part(g, cylGeo(0.022, 0.03, 0.02, false), MAT.metal, 0, 0.07, 0);
+    box(g, 0.012, 0.09, 0.014, MAT.metal, 0.03, 0.03, 0, -0.15);
+    const ring = part(g, new THREE.TorusGeometry(0.013, 0.003, 6, 12), MAT.metal, -0.024, 0.08, 0);
+    ring.rotation.y = Math.PI / 2;
+    return g;
+  },
+
   molotov: () => {
     const g = new THREE.Group();
     part(g, cylGeo(0.036, 0.036, 0.1, false), MAT.liquid, 0, -0.015, 0);
@@ -175,6 +239,40 @@ const BUILDERS = {
     return g;
   },
 };
+
+/** Helmets, vests and backpacks at Lv. 1-3. */
+function gearBuilders() {
+  const shades = [0x5b6338, 0x9a8458, 0x2a2c2f].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.8, metalness: 0.05 }));
+  const out = {};
+  for (let lv = 1; lv <= 3; lv++) {
+    const m = shades[lv - 1];
+    out[`helmet${lv}`] = () => {
+      const g = new THREE.Group();
+      part(g, new THREE.SphereGeometry(0.13, 16, 10, 0, Math.PI * 2, 0, Math.PI * 0.52), m, 0, 0, 0);
+      part(g, new THREE.CylinderGeometry(0.137, 0.142, 0.016, 16, 1, true), m, 0, 0.002, 0);
+      if (lv === 3) box(g, 0.05, 0.03, 0.02, MAT.metal, 0, 0.09, 0.1); // night-vision mount
+      return g;
+    };
+    out[`vest${lv}`] = () => {
+      const g = new THREE.Group();
+      box(g, 0.36, 0.42, 0.09, m, 0, 0, 0);
+      for (const x of [-0.11, 0, 0.11]) box(g, 0.08, 0.08, 0.05, lv === 3 ? MAT.polymer : shades[Math.max(0, lv - 2)], x, -0.08, 0.06);
+      box(g, 0.07, 0.12, 0.09, m, -0.12, 0.25, 0);
+      box(g, 0.07, 0.12, 0.09, m, 0.12, 0.25, 0);
+      return g;
+    };
+    out[`backpack${lv}`] = () => {
+      const g = new THREE.Group();
+      const h = 0.36 + lv * 0.06, d = 0.14 + lv * 0.04;
+      box(g, 0.3, h, d, m, 0, 0, 0);
+      box(g, 0.24, 0.12, 0.04, m, 0, -h * 0.18, d / 2 + 0.02);
+      box(g, 0.31, 0.04, d + 0.01, MAT.polymer, 0, h * 0.32, 0);
+      if (lv === 3) part(g, cylGeo(0.06, 0.06, 0.32, true), shades[1], 0, h / 2 + 0.05, 0);
+      return g;
+    };
+  }
+  return out;
+}
 
 const _templates = new Map();
 

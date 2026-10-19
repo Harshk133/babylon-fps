@@ -483,6 +483,3 @@ body.touch .touch-controls {
 body.touch .touch-controls div { display: flex; gap: 10px; }
 body.touch .touch-controls b { min-width: 110px; color: #e2a42b; }
 body.touch #death-screen { zoom: 0.8; }
-body.touch #inventory { align-items: flex-start; padding: 8px; }
-body.touch .inv-panel { zoom: 0.78; }
-body.touch .inv-hint { display: none; }
