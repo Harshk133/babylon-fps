@@ -96,6 +96,10 @@ function noise3(x, y, z) {
     l(l(hash3(ix, iy, iz + 1), hash3(ix + 1, iy, iz + 1), ux), l(hash3(ix, iy + 1, iz + 1), hash3(ix + 1, iy + 1, iz + 1), ux), uy),
     uz);
 }
+/** Floor height at parameter t along segment s (flat for s.flat m, then a straight ramp). */
+function segFloor(s, t) {
+  return s.fa + (s.fb - s.fa) * Math.max(0, (t * s.len - s.flat) / (s.len - s.flat));
+}
 /** Distance from (x, z) to segment s, and the parameter t (0 at a, 1 at b). */
 function segDist(s, x, z, out) {
   const t = Math.min(1, Math.max(0, ((x - s.ax) * s.ux + (z - s.az) * s.uz) / s.len));
@@ -128,6 +132,10 @@ function prepare(def) {
       ax: A.x, az: A.z, bx: B.x, bz: B.z, len,
       ux: (B.x - A.x) / len, uz: (B.z - A.z) / len,
       fa: A.floor, fb: B.floor,
+      // A mouth tunnel out of a chamber ramps up from the chamber's edge, not
+      // its centre (the chamber floor is flat out to its radius: ramping from
+      // the centre left a ledge too high to step up at the rim)
+      flat: A.kind === "c" ? Math.min(A.r, len * 0.5) : 0,
       r: TUNNEL_R * w,
       open: len,                                     // distance from a where it leaves the hill (set below)
     };
@@ -148,7 +156,7 @@ function prepare(def) {
     if (!sg.mouth) continue;
     for (let d = 0; d <= sg.len; d += 0.5) {
       const x = sg.ax + sg.ux * d, z = sg.az + sg.uz * d;
-      const floor = sg.fa + (sg.fb - sg.fa) * (d / sg.len);
+      const floor = segFloor(sg, d / sg.len);
       if (skinHeight(net, x, z) < floor + AXIS_UP + sg.r / Y_SQUASH + 0.6) { sg.open = d; break; }
     }
   }
@@ -186,7 +194,7 @@ function corridor(net, x, z, out) {
     const d = segDist(s, x, z, _t);
     if (d < out.d) {
       out.d = d; out.seg = i; out.t = _t.t; out.ch = -1;
-      out.floor = s.fa + (s.fb - s.fa) * _t.t;
+      out.floor = segFloor(s, _t.t);
     }
   }
   for (let i = 0; i < net.chambers.length; i++) {
@@ -203,8 +211,8 @@ function voidDist(net, x, y, z) {
   let v = 1e9, nearest = Infinity, floor = net.floorY;
   for (const s of net.segs) {
     const dxz = segDist(s, x, z, _t);
-    if (dxz > s.r + 4) { if (dxz < nearest) { nearest = dxz; floor = s.fa + (s.fb - s.fa) * _t.t; } continue; }
-    const f = s.fa + (s.fb - s.fa) * _t.t;
+    if (dxz > s.r + 4) { if (dxz < nearest) { nearest = dxz; floor = segFloor(s, _t.t); } continue; }
+    const f = segFloor(s, _t.t);
     if (dxz < nearest) { nearest = dxz; floor = f; }
     const dy = (y - f - AXIS_UP) * Y_SQUASH;
     // Wider and narrower stretches along the tunnel
@@ -574,7 +582,7 @@ function placeTorches(net, grid) {
     if (s.mouth) {
       const d = Math.max(2, s.open - 4.5);
       const sd = i % 2 ? 1 : -1;
-      anchors.push({ x: s.ax + s.ux * d, z: s.az + s.uz * d, dirs: [[px * sd, pz * sd], [-px * sd, -pz * sd]], floor: s.fa + (s.fb - s.fa) * (d / s.len) });
+      anchors.push({ x: s.ax + s.ux * d, z: s.az + s.uz * d, dirs: [[px * sd, pz * sd], [-px * sd, -pz * sd]], floor: segFloor(s, d / s.len) });
     } else if (s.len > 22 && rand() < 0.6) {
       // Some long tunnels get one halfway; the rest stay dark
       const d = s.len * (0.4 + rand() * 0.2);
