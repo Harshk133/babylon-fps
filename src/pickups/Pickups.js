@@ -4,7 +4,7 @@ import { groundHeight } from "../world/Terrain.js";
 import { getItemTemplate } from "../items/ItemModels.js";
 
 const HOVER_HEIGHT    = 0.6;
-const MAX_ACTIVE      = 240;  // battle royale scatters a lot of loot
+const MAX_ACTIVE      = 720;  // battle royale: ~430 placed (most in town houses) + every player's spilled loot
 const INTERACT_RADIUS = 2.2;   // weapons, gear, attachments: shows the [E] prompt
 const AUTO_RADIUS     = 1.4;   // ammo / throwables / medkits: walk over to collect
 const BLINK_TIME      = 5;     // timed drops blink for their last few seconds

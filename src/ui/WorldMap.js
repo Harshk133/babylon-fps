@@ -350,6 +350,23 @@ export class WorldMap {
     ctx.stroke();
     ctx.setLineDash([]);
 
+    // Roads: a dark casing and a pale top, like a road atlas
+    for (const r of this.sources.roads?.() ?? []) {
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      for (const [w, col] of [[r.width * k + 3, "rgba(24, 18, 12, 0.8)"], [r.width * k, "#b9ad96"]]) {
+        ctx.strokeStyle = col;
+        ctx.lineWidth = Math.max(2.5, w);
+        ctx.beginPath();
+        for (let i = 0; i < r.pts.length; i += 2) {
+          const x = X(r.pts[i]), y = Y(r.pts[i + 1]);
+          if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+        }
+        if (r.closed) ctx.closePath();
+        ctx.stroke();
+      }
+    }
+
     // Buildings, trees, rocks
     for (const o of this.sources.obstacles?.() ?? []) {
       if (o.x > 1e5 || o.vehicle) continue; // hidden editable model; the rickshaw gets its own icon
@@ -363,7 +380,9 @@ export class WorldMap {
         ctx.save();
         ctx.translate(X(o.x), Y(o.z));
         ctx.rotate(Math.PI - o.rot);
-        const w = Math.max(3, o.w * k), d = Math.max(3, o.d * k);
+        // Yard walls are thin lines; buildings at least a few pixels
+        const min = o.wall ? 1.2 : 3;
+        const w = Math.max(min, o.w * k), d = Math.max(min, o.d * k);
         ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
         ctx.fillRect(-w / 2 + 1.5, -d / 2 + 1.5, w, d);
         ctx.fillStyle = "#d9c9a8";
@@ -413,6 +432,19 @@ export class WorldMap {
       ctx.textAlign = "center";
       ctx.fillStyle = "rgba(255, 236, 200, 0.85)";
       ctx.fillText(c.name.toUpperCase(), X(c.x), Y(c.z));
+    }
+
+    // Town names
+    ctx.textAlign = "center";
+    for (const t of this.sources.labels?.() ?? []) {
+      const size = Math.round(Math.min(26, 15 + 3 * this.zoom));
+      ctx.font = `600 ${size}px 'Teko', 'Segoe UI', sans-serif`;
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(10, 8, 6, 0.85)";
+      ctx.fillStyle = "#fff4dc";
+      const ly = Y(t.z) - 18;
+      ctx.strokeText(t.name.toUpperCase(), X(t.x), ly);
+      ctx.fillText(t.name.toUpperCase(), X(t.x), ly);
     }
 
     const car = this.sources.vehicle?.();

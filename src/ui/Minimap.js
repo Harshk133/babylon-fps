@@ -400,8 +400,25 @@ export class Minimap {
     for (let gz = Math.floor((pz - reach) / 10) * 10; gz <= pz + reach; gz += 10) { g.moveTo(0, Y(gz)); g.lineTo(half * 2, Y(gz)); }
     g.stroke();
 
+    // Roads under everything
+    for (const r of this.sources.roads?.() ?? []) {
+      g.lineCap = "round";
+      g.lineJoin = "round";
+      for (const [w, col] of [[r.width * k + 2, "rgba(20, 16, 12, 0.55)"], [r.width * k, "rgba(150, 142, 128, 0.42)"]]) {
+        g.strokeStyle = col;
+        g.lineWidth = Math.max(2, w);
+        g.beginPath();
+        for (let i = 0; i < r.pts.length; i += 2) {
+          const x = X(r.pts[i]), y = Y(r.pts[i + 1]);
+          if (i) g.lineTo(x, y); else g.moveTo(x, y);
+        }
+        if (r.closed) g.closePath();
+        g.stroke();
+      }
+    }
+
     for (const o of this.sources.obstacles()) {
-      if (o.door || o.vehicle) continue;
+      if (o.door || o.vehicle || o.pole) continue;
       if (Math.abs(o.x - px) > reach || Math.abs(o.z - pz) > reach) continue;
       if (o.type === "circle") {
         g.fillStyle = "rgba(110, 140, 80, 0.32)";

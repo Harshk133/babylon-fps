@@ -15,7 +15,7 @@ import { SmokeFX } from "./combat/SmokeFX.js";
 import { Minimap } from "./ui/Minimap.js";
 import { WorldMap } from "./ui/WorldMap.js";
 import { Waypoints } from "./ui/Waypoints.js";
-import { Houses, HOUSE_LOOT_SPOTS } from "./world/Houses.js";
+import { Houses, houseHalfSize } from "./world/Houses.js";
 import { EnemyFire } from "./combat/EnemyFire.js";
 import { LevelDirector } from "./zombies/LevelDirector.js";
 import { MONSTER_TYPES } from "./zombies/MonsterTypes.js";
@@ -25,7 +25,9 @@ import { Environment } from "./world/Environment.js";
 import { Weather } from "./world/Weather.js";
 import { Atmosphere } from "./world/Atmosphere.js";
 import { plantDeadForest } from "./world/Forest.js";
-import { buildTerrain, groundHeight, PLAY_RADIUS } from "./world/Terrain.js";
+import { buildTerrain, groundHeight, flatHeight, rawHeight, PLAY_RADIUS } from "./world/Terrain.js";
+import { Roads } from "./world/Roads.js";
+import { ROAD_DEFS, layoutTowns } from "./world/Towns.js";
 import { Backdrop } from "./world/Backdrop.js";
 import { Grass, GRASS_FLATTENERS } from "./world/Grass.js";
 import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves } from "./world/Caves.js";
@@ -94,9 +96,7 @@ const ROTATION_SPEED      = 16;
 const SHADOW_FRUSTUM_SIZE = 25;
 
 // ─── World Scatter Settings ───────────────────────────────────────────────────
-const HOUSE_COUNT        = 2;
 const BOULDER_COUNT      = 46;    // solid stones (same on every quality: they have colliders)
-const FARMHOUSE_COUNT    = 6;     // outlying houses, mostly there to loot in the battle royale
 const TREE_A_COUNT       = 5;
 const TREE_B_COUNT       = 4;
 
@@ -2048,7 +2048,7 @@ function spawnWorldLoot() {
   // A little something inside every house
   const spot = new THREE.Vector3();
   houses?.houses.forEach((h, i) => {
-    for (const s of HOUSE_LOOT_SPOTS) {
+    for (const s of houses.lootSpots(h)) {
       if (lootRng() < 0.35) continue;
       const kind = HOUSE_LOOT[(i * 3 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
       houses.lootSpot(h, s, spot);
@@ -2527,6 +2527,7 @@ const minimap = new Minimap(document.getElementById("minimap"), {
   pickups: () => pickups.active,
   fires: () => throwables.fires,
   obstacles: () => mapObstacles,
+  roads: () => roadLines,
   players: () => (isBR() ? NO_PLAYERS : remotePlayers.mapList()),
   zone: () => (isBR() && br.state === "match" ? br.zone : null),
   pins: () => pinList,
@@ -2556,6 +2557,8 @@ const worldMap = new WorldMap({
   br: () => (isBR() ? _mapState : null),
   height: (x, z) => (caves ? caves.mapHeight(x, z) : groundHeight(x, z)),
   caves: () => caveMapShapes,
+  roads: () => roadLines,
+  labels: () => townLabels,
 }, {
   touch: IS_TOUCH,
   onPin: (x, z) => setPin("me", x, z, true),
@@ -2830,6 +2833,9 @@ function setupGui() {
 // ─── Zombie Manager (Pooled MD2 Instances) ────────────────────────────────────
 let zombieManager = null;
 let houses = null;
+let roads = null;          // world/Roads.js, built in loadWorld()
+let townLabels = [];       // town names for the world map
+let roadLines = [];        // road centrelines for the maps
 
 // ─── Character GLTF Load ──────────────────────────────────────────────────────
 async function loadCharacter() {
@@ -2901,9 +2907,6 @@ async function loadWorld() {
 
   // Enterable houses (Kenney kits): per-wall colliders, animated doors, light switches
   houses = new Houses({ scene, world, gltf: houseKit, sfx, material: staticMaterial, obstacles: navObstacles });
-  houses.add(35, -35, THREE.MathUtils.degToRad(30));
-  // One close to spawn with its door facing the start
-  houses.add(-13, 20, Math.atan2(13, -20));
 
   // Scale that makes a model `mul` player heights tall
   const heightScale = (root, mul) => {
@@ -2955,50 +2958,77 @@ async function loadWorld() {
   const treeBScaleMin = CHARACTER_HEIGHT * TREE_B_HEIGHT_MUL[0] / treeBRawH;
   const treeBScaleMax = CHARACTER_HEIGHT * TREE_B_HEIGHT_MUL[1] / treeBRawH;
 
-  const housePositions = scatterPositions(HOUSE_COUNT, rng, SCATTER_RADIUS_MIN + 6,  SCATTER_RADIUS_MAX, 22);
-  for (const { x, z } of housePositions) {
-    const rot = rng() * Math.PI * 2;
-    if (!caveBlocks(x, z, 14)) houses.add(x, z, rot);
-  }
-  // Outlying farmhouses on their own RNG, so the trees and the rest of the scatter don't move
-  const farmRng = makeLCG(0xfa53a11);
-  for (const { x, z } of scatterPositions(FARMHOUSE_COUNT, farmRng, 60, 165, 45)) {
-    const rot = farmRng() * Math.PI * 2;
-    if (houses.blocks(x, z, 14) || nearObstacle(x, z, 12) || caveBlocks(x, z, 14)) continue;
-    houses.add(x, z, rot);
-  }
+  // ── Towns and roads (world/Towns.js, world/Roads.js): the same map for every player
+  roads = new Roads(ROAD_DEFS);
+  const town = layoutTowns({
+    roads, rng: makeLCG(0x7095a1), halfSize: houseHalfSize,
+    blocked: (x, z, r) => caveBlocks(x, z, r),
+    keepClear: [
+      { x: 0, z: 0, r: 16 },                                   // spawn
+      { x: RICK_SPAWN.x, z: RICK_SPAWN.z, r: 6 },              // the auto-rickshaw's parking spot
+      ...STARTER_LOOT.map(([, x, z]) => ({ x, z, r: 1.5 })),
+      ...DEBRIS_SPOTS.map(([x, z]) => ({ x, z, r: 4 })),
+      // The WRL house and the two hand-placed trees
+      ...mapObstacles.map(o => ({ x: o.x, z: o.z, r: o.type === "circle" ? o.r + 2 : Math.hypot(o.w, o.d) / 2 + 2 })),
+    ],
+    heightAt: rawHeight,
+  });
+  const plateaus = town.plateaus;
+  townLabels = town.labels;
+  for (const h of town.houses) houses.add(h.x, h.z, h.rot, { type: h.kind, base: flatHeight(h.x, h.z, plateaus), tint: h.tint });
+  for (const y of town.yards) houses.addCompound(y.x, y.z, y.rot, y.hw, y.hd, y.gateX, flatHeight(y.x, y.z, plateaus), y.tint);
+  houses.finalize();
   mapObstacles.push(...houses.mapObstacles());
 
-  // ── Rolling ground: flat under every house and prop, hills in between
+  // ── Rolling ground: towns on their own level plateaus, flat under every prop, hills in between
+  const lvl = (x, z) => flatHeight(x, z, plateaus);
   const pads = [
-    { x: 0, z: 0, r: 16, fade: 14 },                        // spawn + starter loot
-    { x: RICK_SPAWN.x, z: RICK_SPAWN.z, r: 6, fade: 8 },    // the auto-rickshaw's parking spot
+    ...plateaus,
+    { x: 0, z: 0, r: 16, fade: 14 },                                                         // spawn + starter loot
+    { x: RICK_SPAWN.x, z: RICK_SPAWN.z, r: 6, fade: 8, y: lvl(RICK_SPAWN.x, RICK_SPAWN.z) }, // the rickshaw's spot
   ];
   for (const o of mapObstacles) {
-    if (o.type === "box") pads.push({ x: o.x, z: o.z, r: Math.hypot(o.w, o.d) / 2 + 2.5, fade: 12 });
-    else pads.push({ x: o.x, z: o.z, r: 3, fade: 6 });       // the two hand-placed trees
+    if (o.house || o.wall || o.pole) continue;
+    if (o.type === "box") pads.push({ x: o.x, z: o.z, r: Math.hypot(o.w, o.d) / 2 + 2.5, fade: 12, y: lvl(o.x, o.z) });
+    else pads.push({ x: o.x, z: o.z, r: 3, fade: 6, y: lvl(o.x, o.z) }); // the two hand-placed trees
   }
-  for (const [x, z] of DEBRIS_SPOTS) pads.push({ x, z, r: 3, fade: 6 });
-  const solidBoxes = mapObstacles.filter(o => o.type === "box");
+  for (const [x, z] of DEBRIS_SPOTS) pads.push({ x, z, r: 3, fade: 6, y: lvl(x, z) });
+  // Road profiles ride the padded ground, held level through the towns
+  roads.setProfile((x, z) => flatHeight(x, z, pads), plateaus);
+  roadLines = roads.mapLines();
+  const propBoxes = mapObstacles.filter(o => o.type === "box" && !o.house && !o.wall);
   buildTerrain({
     scene, world, material: planeMaterial, physicsMaterial: groundMaterial, pads,
     renderStep: QUALITY.terrainStep,
-    // The ground sinks to the cave floors under the massifs
-    modify: caveTerrain,
-    // No grass growing through floors, props, the parked rickshaw or rock
+    // Roads level the ground under them; the ground sinks to the cave floors under the massifs
+    modify: (x, z, h) => caveTerrain(x, z, roads.modify(x, z, h)),
+    tint: (x, z, c) => roads.tint(x, z, c),
+    // No grass on roads, through floors, props, the parked rickshaw or rock; trimmed in yards
     grassMask: (x, z) => {
       if (houses.blocks(x, z, 1.5) || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 2.5) return 0;
-      for (const o of solidBoxes) if (Math.hypot(x - o.x, z - o.z) < Math.hypot(o.w, o.d) / 2 + 1) return 0;
-      return (0.55 + fbmGrass(x, z) * 0.45) * caveGrass(x, z);
+      if (roads.onRoad(x, z, 0.6)) return 0;
+      for (const o of propBoxes) if (Math.hypot(x - o.x, z - o.z) < Math.hypot(o.w, o.d) / 2 + 1) return 0;
+      return (0.55 + fbmGrass(x, z) * 0.45) * caveGrass(x, z) * (houses.inYard(x, z) ? 0.3 : 1);
     },
   });
+  roads.buildMesh(scene);
 
   // Underground cave networks under rock massifs (world/Caves.js): needs the final terrain
   caves = new Caves({ scene, world, physicsMaterial: staticMaterial, lights: QUALITY.caveLights });
   caveMapShapes = caves.mapInfo();
 
+  // Power poles along the roads (after the terrain: they stand on it)
+  roads.buildPoles({
+    scene, world, material: staticMaterial, mapObstacles, groundAt: groundHeight,
+    blocked: (x, z) => houses.blocks(x, z, 1.2) || houses.inYard(x, z) || caveBlocks(x, z, 2)
+      || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 5
+      || DEBRIS_SPOTS.some(([dx, dz]) => Math.hypot(dx - x, dz - z) < 4)
+      || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2),
+  });
+
   // Big trees stay out of houses (a scattered tree used to land on one)
-  const keepClear = (list, pad) => list.filter(({ x, z }) => !houses.blocks(x, z, pad) && !caveBlocks(x, z, pad + 4));
+  const keepClear = (list, pad) => list.filter(({ x, z }) => !houses.blocks(x, z, pad) && !caveBlocks(x, z, pad + 4)
+    && !roads.onRoad(x, z, pad) && !houses.inYard(x, z));
   const treeAPositions = keepClear(scatterPositions(TREE_A_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 8), 5);
   const treeBPositions = keepClear(scatterPositions(TREE_B_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 7), 4);
 
@@ -3046,7 +3076,7 @@ async function loadWorld() {
 
   // Stones: boulders are solid and the same everywhere; pebbles follow the quality setting
   const keepOff = (x, z, pad) => Math.hypot(x, z) < 15 || houses.blocks(x, z, pad + 2) || nearObstacle(x, z, pad)
-    || caveBlocks(x, z, pad + 2)
+    || caveBlocks(x, z, pad + 2) || roads.onRoad(x, z, pad + 1) || houses.inYard(x, z)
     || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 6 + pad
     || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2 + pad)
     || fireSpots.some(f => Math.hypot(f.x - x, f.z - z) < 4 + pad);
@@ -3063,6 +3093,7 @@ async function loadWorld() {
     count: DEAD_TREE_COUNT, playerHeight: CHARACTER_HEIGHT, heightMul: DEAD_TREE_HEIGHT_MUL,
     ringMin: 14, ringMax: 175, mapObstacles,
     blocked: (x, z) => Math.hypot(x, z) < 12 || houses.blocks(x, z, 4) || nearObstacle(x, z, 3.5) || caveBlocks(x, z, 4)
+      || roads.onRoad(x, z, 3) || houses.inYard(x, z, -3)
       || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 8
       || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 3)
       || fireSpots.some(s => Math.hypot(s.x - x, s.z - z) < 5),
@@ -3994,7 +4025,7 @@ function brStartMatch(seed, ids, t) {
 function brSpawnLoot(seed) {
   const spots = [];
   for (const h of houses.houses) {
-    for (const s of HOUSE_LOOT_SPOTS) {
+    for (const s of houses.lootSpots(h)) {
       houses.lootSpot(h, s, _lootSpot);
       spots.push({ x: _lootSpot.x, y: _lootSpot.y, z: _lootSpot.z });
     }
@@ -4604,6 +4635,7 @@ function animate() {
   characterRoot.position.set(characterBody.position.x, smoothY, characterBody.position.z);
 
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
+  houses?.cull(camera);
   if (isBR()) {
     brUpdate(delta);
   } else if (net.isClient) {
@@ -4836,7 +4868,9 @@ async function warmUpGpu() {
   const lods = [];
   scene.traverse(o => { if (o.isLOD) { lods.push(o); o.autoUpdate = false; for (const l of o.levels) l.object.visible = true; } });
   renderer.shadowMap.needsUpdate = true;
+  houses?.warmup(true);
   renderFrame(); // uploads textures + buffers, compiles shadow programs
+  houses?.warmup(false);
   [sc.left, sc.right, sc.top, sc.bottom, sc.far] = box;
   sc.updateProjectionMatrix();
   for (const o of lods) o.autoUpdate = true;

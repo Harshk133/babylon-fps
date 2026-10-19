@@ -94,26 +94,39 @@ export const TERRAIN_GLSL = /* glsl */ `
 `;
 
 /**
+ * Height after the pads: each pad flattens a disc to its own level y
+ * (default 0) and blends back into the hills over `fade` metres. Where pads
+ * overlap, the one holding the ground flattest wins.
+ */
+export function flatHeight(x, z, pads) {
+  let flat = 1, py = 0;
+  for (const p of pads) {
+    const dx = x - p.x, dz = z - p.z;
+    const reach = p.r + p.fade;
+    if (dx * dx + dz * dz >= reach * reach) continue;
+    const f = smooth(p.r, reach, Math.sqrt(dx * dx + dz * dz));
+    if (f < flat) { flat = f; py = p.y ?? 0; }
+  }
+  return py + (rawHeight(x, z) - py) * flat;
+}
+
+/**
  * Builds the ground.
- *   pads: [{ x, z, r, fade }] flat (y = 0) discs under houses, props and spawn
+ *   pads: [{ x, z, r, fade, y }] flat discs (at height y, default 0) under towns, houses, props and spawn
  *   grassMask(x, z): 0..1 grass density (0 inside houses, on props)
  *   renderStep: 1 = every height sample in the mesh, 2 = every other one
- *   modify(x, z, h): optional final say on each height (the caves sink the ground under them)
+ *   modify(x, z, h): optional final say on each height (roads level it, the caves sink it)
+ *   tint(x, z, color): optional final say on each vertex colour (dirt road shoulders)
  * Returns { mesh, bodies }.
  */
-export function buildTerrain({ scene, world, material, physicsMaterial, pads, grassMask, renderStep = 1, modify = null }) {
+export function buildTerrain({ scene, world, material, physicsMaterial, pads, grassMask, renderStep = 1, modify = null, tint = null }) {
   const N = TERRAIN_N, H = TERRAIN_HALF, S = TERRAIN_STEP;
   heights = new Float32Array(N * N);
   for (let iz = 0; iz < N; iz++) {
     const z = -H + iz * S;
     for (let ix = 0; ix < N; ix++) {
       const x = -H + ix * S;
-      let flat = 1;
-      for (const p of pads) {
-        const d = Math.hypot(x - p.x, z - p.z);
-        if (d < p.r + p.fade) flat = Math.min(flat, smooth(p.r, p.r + p.fade, d));
-      }
-      const h = rawHeight(x, z) * flat;
+      const h = flatHeight(x, z, pads);
       heights[iz * N + ix] = modify ? modify(x, z, h) : h;
     }
   }
@@ -162,6 +175,7 @@ export function buildTerrain({ scene, world, material, physicsMaterial, pads, gr
       const patch = fbm(x / 14, z / 14, 2, 77);
       c.copy(grass).lerp(dirt, smooth(0.45, 0.75, patch) * 0.55).lerp(rock, smooth(0.35, 0.8, slope));
       c.multiplyScalar(0.86 + smooth(-3, 3, y) * 0.18);
+      if (tint) tint(x, z, c);
       col[k * 3] = c.r; col[k * 3 + 1] = c.g; col[k * 3 + 2] = c.b;
     }
   }
