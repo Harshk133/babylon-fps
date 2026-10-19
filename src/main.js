@@ -55,6 +55,8 @@ import { WeaponWheel } from "./ui/WeaponWheel.js";
 import { KillStreak } from "./ui/KillStreak.js";
 import { PostFX } from "./render/PostFX.js";
 import { Confetti } from "./ui/Confetti.js";
+import { Progress } from "./meta/Progress.js";
+import { ProgressUI } from "./ui/ProgressUI.js";
 import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
 import { STANCES, setCapsuleStance } from "./player/Stance.js";
 import { PerfOverlay, PERF_ENABLED, BENCH_ENABLED } from "./debug/PerfOverlay.js";
@@ -130,6 +132,7 @@ const healthValEl     = document.getElementById("health-val");
 const threatEl        = document.getElementById("threat");
 const threatCountEl   = document.getElementById("threat-count");
 const deathScreenEl   = document.getElementById("death-screen");
+const deathXpEl       = document.getElementById("death-xp");
 
 let damageFlash   = 0;   // 0..1, decays every frame
 let cameraTrauma  = 0;   // 0..1, drives camera shake
@@ -230,6 +233,7 @@ function onPlayerDeath() {
   exitRickshaw();
   if (isBR()) { brOnLocalDeath(); return; }
   if (deathKillsEl) deathKillsEl.textContent = `${killsThisLife}`;
+  if (deathXpEl) deathXpEl.textContent = progress.runXp ? `+${progress.runXp.toLocaleString()} XP this life` : "";
   if (deathScreenEl) deathScreenEl.classList.add("visible");
   releaseLock();
 }
@@ -254,6 +258,7 @@ function respawnPlayer() {
   fireFX.clear();
   enemyFire.clear();
   killsThisLife = 0;
+  progress.resetRun();
   soldier.revive();
   setStance("stand", true);
   if (!net.connected) director?.restart(); // solo: same level, from the top
@@ -2095,9 +2100,21 @@ function slowFor(seconds, scale) {
 
 const killStreak = new KillStreak();
 const confetti = new Confetti();
+// XP, levels and daily challenges; the benchmark doesn't count
+const progress = new Progress();
+progress.enabled = !BENCH_ENABLED;
+new ProgressUI(progress, {
+  profile: document.getElementById("lobby-profile"),
+  card: document.getElementById("lobby-progress"),
+  onLevelUp: () => { postFx.kick(0.35, 0xffd27a); sfx.levelStart(); },
+  onComplete: () => postFx.kick(0.22, 0x4dff88),
+});
+const NIGHT_DARKNESS = 0.5; // env.darkness above this counts as "at night"
+
 /** Every kill credited to this player (solo, co-op, battle royale). */
 function onLocalKill(headshot) {
   const r = killStreak.kill(headshot);
+  progress.streak(killStreak.count);
   if (r.heal > 0 && !isBR() && playerHealth > 0) playerHealth = Math.min(MAX_HEALTH, playerHealth + r.heal);
   if (r.tier) {
     postFx.kick(r.tier.frenzy ? 0.4 : 0.22, r.tier.color);
@@ -2267,6 +2284,7 @@ function onLevelStart(level) {
 
 function onLevelCleared(level) {
   if (net.isHost) net.send({ t: "lev", e: "clear", n: level.n });
+  progress.levelCleared(level.n);
   // The last kill of a level plays out in slow motion, with a golden flash
   slowFor(1.6, 0.3);
   postFx.kick(0.45, 0xffd27a);
@@ -3163,11 +3181,13 @@ net.on("drop", msg => {
 });
 net.on("take", msg => pickups.releaseById(msg.i));
 net.on("kill", msg => {
-  killsThisLife++;
-  onLocalKill(false);
-  showHitMarker(false, true);
-  sfx.kill();
+  // c: how it died (killCause), from the host
   const m = monsterSync?.findPuppet(msg.n);
+  killsThisLife++;
+  progress.kill(m?.type, msg.c ?? "gun", env.darkness > NIGHT_DARKNESS);
+  onLocalKill(msg.c === "head");
+  showHitMarker(msg.c === "head", true);
+  sfx.kill();
   if (m) gameHud.killFeed(m.def.label, "KILLED", m.def.color, false);
 });
 
@@ -3398,6 +3418,7 @@ function updateDriving(delta) {
     inventoryUI.feed(`Out of petrol! ${IS_TOUCH ? "Tap the petrol can in the hotbar" : "Press T with a petrol can"}`, "info", "fuel");
   }
   const crash = rickshaw.drive(delta, { throttle, steer, handbrake: keys.jump }, solidAt);
+  progress.drive(Math.abs(rickshaw.speed) * delta);
   jumpQueued = false;
   if (crash > 3) {
     cameraTrauma = Math.min(1, cameraTrauma + Math.min(0.7, crash * 0.05));
@@ -3700,6 +3721,7 @@ function brEnterWarmup() {
   brResetPlayer(_spawn.x, groundHeight(_spawn.x, _spawn.z) + FEET_OFFSET + 0.02, _spawn.z, false);
   rickshaw?.reset();
   killsThisLife = 0;
+  progress.resetRun();
 }
 
 function brHostStart() {
@@ -3725,6 +3747,7 @@ function brStartMatch(seed, ids, t) {
   br.ghost = !br.inMatch;
   br.spectating = null; br.placement = 0; br.zoneTick = 1; br.netTimer = 0; br.outside = false;
   killsThisLife = 0;
+  progress.resetRun();
   throwables.clear();
   fireFX.clear();
   pickups.clear();
@@ -3949,6 +3972,7 @@ function brHandleElim({ v, k, w, hs }) {
   gameHud.killFeed(kName ? `${kName} ▸ ${vName}` : vName, verb, brColor(kName ? k : v), !!hs);
   if (k === net.id && v !== net.id) {
     killsThisLife++;
+    progress.pvpKill(!!hs);
     onLocalKill(!!hs);
     showHitMarker(!!hs, true);
     sfx.kill();
@@ -3957,10 +3981,12 @@ function brHandleElim({ v, k, w, hs }) {
   br.alive.delete(v);
   if (v === net.id) {
     br.inMatch = false;
+    const place = br.placement || br.alive.size + 1;
+    progress.brFinished(place, br.started);
     brHud.showResult({
       title: "ELIMINATED",
       sub: kName ? `by ${kName}` : w === "zone" ? "Caught outside the zone" : "",
-      lines: [["PLACE", `#${br.placement || br.alive.size + 1}`], ["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`]],
+      lines: [["PLACE", `#${place}`], ["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`], ["XP", `+${progress.runXp}`]],
       foot: br.alive.size ? "Spectating in a moment…" : "",
       color: "#ff4b3a",
       duration: 4.5,
@@ -3988,7 +4014,8 @@ function brShowEnd(w) {
   br.outside = false;
   zoneWall.hide();
   dropPlane.visible = false;
-  const lines = [["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`]];
+  if (w === net.id) progress.brFinished(1, br.started);
+  const lines = [["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`], ["XP", `+${progress.runXp}`]];
   if (w === net.id) {
     brHud.showResult({ title: "WINNER", sub: "Last one standing", lines: [["PLACE", "#1"], ...lines], color: "#ffd84d" });
     sfx.levelCleared();
@@ -4609,9 +4636,10 @@ async function boot() {
       // Kill credit goes to whoever landed the last hit
       if (zombie.lastHitBy === null || zombie.lastHitBy === localTarget.id) {
         killsThisLife++;
+        progress.kill(zombie.type, zombie.killCause ?? "gun", env.darkness > NIGHT_DARKNESS);
         onLocalKill(zombie.killCause === "head");
         gameHud.killFeed(zombie.def.label, KILL_VERB[zombie.killCause] ?? "KILLED", zombie.def.color, zombie.killCause === "head");
-      } else net.send({ t: "kill", to: zombie.lastHitBy, n: zombie.netId });
+      } else net.send({ t: "kill", to: zombie.lastHitBy, n: zombie.netId, c: zombie.killCause });
       zombie.killCause = null;
       rollZombieDrop(zombie);
       director.onKill(zombie);

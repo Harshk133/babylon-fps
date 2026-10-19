@@ -61,7 +61,7 @@ Most monsters are the Quake 2 MD2 player models from the three.js examples (`web
 ### Co-op multiplayer (`server/`, `src/net/`)
 
 - **`server/relay.mjs`** is a dumb WebSocket relay: rooms (max 8), names and colours, host election (the longest-connected player takes over if the host leaves), and forwarding (`to: id | "host"`, or everyone else). It's attached to the Vite dev/preview server at `/ws` by the plugin in `vite.config.js`, so the game and the relay share one origin. It can also run standalone.
-- **`Net`** is the client (`on(type, fn)`, `send(msg)`, `isHost` / `isClient`). **`Lobby`** handles name and room entry (`?room=` prefills it) and the mode: solo, co-op, or battle royale.
+- **`Net`** is the client (`on(type, fn)`, `send(msg)`, `isHost` / `isClient`). **`Lobby`** handles name and room entry (`?room=` prefills it and preselects co-op) and the mode: solo, co-op, or battle royale. You pick a mode card, then press Play; the last mode is remembered (`babylon-fps:mode`). Its styles live in `src/net/lobby.css` (responsive: desktop, sideways phones, portrait), and the selected mode's colour (`--mode`) tints the screen.
 - **Authority:** the host runs `ZombieManager` + `LevelDirector` and streams `mon` snapshots (`MonsterSync`, 12 Hz: 12 numbers per monster) plus `lvl` (2 Hz) and `lev` events. Clients turn their pools into kinematic puppets (`pool.setPuppetMode(true)`), never run AI, and send `hit` / `noise` to the host. Every player streams `st` (20 Hz). `RemotePlayers` renders teammates (Soldier + name-tag sprite + kinematic capsule whose `body.playerTarget` makes them targetable).
 - **Targets:** `ZombieManager` / `EnemyFire` take `getTargets()` (local + remote players) and report hits through `onPlayerHit(target, …)`, which sends `hurt` to a remote target. Monsters pick the seen/nearest player and switch to a much closer visible one.
 - GLB creatures sync like the rest: a flyer's altitude rides in the snapshot's root y, `MonsterSync.ANIMS` gained `walk` (appended, because indices are on the wire), and clients play the procedural deaths locally.
@@ -132,6 +132,12 @@ Two underground networks (`NETWORKS`: Hollow Ridge, Bone Hollow), each a rock ma
 - **`Confetti`** (`src/ui/Confetti.js`, after React Bits Pro's Celebration Cursor): tumbling paper on one 2D canvas with its own rAF loop that runs only while pieces live (pooled, `MAX_PIECES`). `celebrate("level" | "victory")` fires corner cannons and bursts on a cleared level and a battle royale win; while it runs and the mouse is free, moving spills a trail and clicking bursts.
 - **Pause**: Esc (or anything that drops the pointer lock, including the Tab inventory) freezes a solo game: `gamePaused()` makes `animate()` pass `delta = 0` and the audio is suspended. Co-op and the BR can't pause (`canPause()`); the pause screen says so. After the first click in, the start screen reads PAUSED / "Click to resume".
 - **Bullet time** (solo only): `slowFor(seconds, scale)` dips `timeScale` (level cleared 1.6 s at 0.3, headshot kills a 0.12 s hitch), combined with the weapon wheel's slow motion in `updateWeaponWheel()`.
+
+### XP & daily challenges (`src/meta/Progress.js`, `src/ui/ProgressUI.js`)
+
+- **`Progress`** is pure state in localStorage (`babylon-fps:progress`): total XP (level cost `levelCost(l)`, rank titles `RANKS`), three daily challenges (easy / medium / hard, dealt from a seed of the local date so everyone gets the same ones, at most one battle-royale challenge, one reroll a day), a +150 XP bonus for finishing all three, and a day streak. Kill XP is per monster type (`KILL_XP`). Rebalance in `CHALLENGES` / `XP`.
+- `main.js` only reports events: `progress.kill(type, killCause, night)` (solo/host `onKill`, and co-op `kill`, whose message now carries `c` = killCause), `pvpKill`, `streak` (from `onLocalKill`), `levelCleared`, `brFinished(place, players)` (practice drops don't count), `drive(metres)`. `runXp` resets with `killsThisLife` and shows on the death screen and BR results. The benchmark doesn't count.
+- **`ProgressUI`**: the level / XP badge in the lobby's top bar (`#lobby-profile`), the daily challenges panel (`#lobby-progress`), the "+XP" ticker under the crosshair, and toasts for challenge progress, completion and level-ups. Event-driven, nothing per frame.
 
 ### Graphics quality (`src/quality.js`)
 

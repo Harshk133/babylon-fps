@@ -486,20 +486,3 @@ body.touch #death-screen { zoom: 0.8; }
 body.touch #inventory { align-items: flex-start; padding: 8px; }
 body.touch .inv-panel { zoom: 0.78; }
 body.touch .inv-hint { display: none; }
-body.touch #lobby { align-items: flex-start; overflow-y: auto; padding: 10px; }
-/* Lobby: name / room / graphics side by side, modes in a row */
-body.touch .lobby-panel {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px 14px;
-  width: min(820px, 100%);
-  margin: auto;
-  padding: 16px 20px;
-  zoom: 0.85;
-}
-body.touch .lobby-panel > :not(.lobby-field) { grid-column: 1 / -1; }
-body.touch .lobby-panel h1 { margin: 0; }
-body.touch .lobby-sub { margin: -6px 0 0; }
-body.touch .lobby-modes { flex-direction: row; }
-body.touch .lobby-mode { flex: 1; }
-body.touch .lobby-hint { display: none; }

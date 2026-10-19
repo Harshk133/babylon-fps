@@ -158,14 +158,20 @@
     <!-- Squad (co-op teammates) -->
     <div id="squad"></div>
 
-    <!-- Lobby: name + room, solo or co-op -->
+    <!-- Lobby: profile, mode select, room code, play (src/net/Lobby.js, src/net/lobby.css) -->
     <div id="lobby">
-      <div class="lobby-panel">
-        <h1>SURVIVE THE HORDE</h1>
-        <p class="lobby-sub">Choose your fight</p>
-        <label class="lobby-field"><span>Your name</span><input id="lobby-name" maxlength="16" placeholder="Survivor" autocomplete="off" spellcheck="false"></label>
-        <label class="lobby-field"><span>Room code</span><input id="lobby-room" maxlength="24" placeholder="horde" autocomplete="off" spellcheck="false"></label>
-        <label class="lobby-field"><span>Graphics</span>
+      <div class="lb-glow" aria-hidden="true"></div>
+      <header class="lb-top">
+        <div class="lb-player">
+          <div id="lobby-profile" class="lb-profile"></div>
+          <label class="lb-name">
+            <span class="lb-label">Callsign</span>
+            <input id="lobby-name" maxlength="16" placeholder="Survivor" autocomplete="off" spellcheck="false">
+          </label>
+        </div>
+        <label class="lb-gfx">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v11H3zM8 20h8M12 16v4"/></svg>
+          <span class="lb-label">Graphics</span>
           <select id="lobby-quality">
             <option value="auto">Auto</option>
             <option value="low">Low: old PCs, 4 GB RAM, integrated graphics</option>
@@ -173,23 +179,51 @@
             <option value="high">High</option>
           </select>
         </label>
-        <div class="lobby-modes">
-          <button id="lobby-solo" class="lobby-mode">
-            <span class="mode-name">Solo</span>
-            <span class="mode-desc">You against the horde, level by level</span>
-          </button>
-          <button id="lobby-coop" class="lobby-mode">
-            <span class="mode-name">Co-op vs Zombies</span>
-            <span class="mode-desc">Squad up in a room; the horde grows with every player</span>
-          </button>
-          <button id="lobby-br" class="lobby-mode br">
-            <span class="mode-name">Battle Royale</span>
-            <span class="mode-desc">Drop from the plane with nothing, loot, outlast the blue zone. Last one standing wins</span>
-          </button>
-        </div>
-        <div id="lobby-status"></div>
-        <p class="lobby-hint">For co-op and battle royale, friends open this same page address and type the same room code.</p>
-      </div>
+      </header>
+
+      <main class="lb-main">
+        <section class="lb-side">
+          <h1 class="lb-logo"><span>Survive</span><span>the Horde</span></h1>
+          <div id="lobby-progress" class="lobby-progress"></div>
+        </section>
+
+        <section class="lb-deploy">
+          <h2 class="lb-heading">Choose your fight</h2>
+          <div class="lobby-modes" role="radiogroup" aria-label="Game mode">
+            <button id="lobby-solo" class="lobby-mode" data-mode="solo" role="radio" style="--mode:#e0383e">
+              <svg class="mode-icon" viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="14"/><circle cx="24" cy="24" r="2.5" class="fill"/><path d="M24 3v12M24 33v12M3 24h12M33 24h12"/></svg>
+              <span class="mode-name">Solo</span>
+              <span class="mode-desc">You against the horde, level by level</span>
+              <span class="mode-tag">1 player · offline</span>
+            </button>
+            <button id="lobby-coop" class="lobby-mode" data-mode="coop" role="radio" style="--mode:#e2a42b">
+              <svg class="mode-icon" viewBox="0 0 48 48" aria-hidden="true"><circle cx="16" cy="15" r="6"/><circle cx="32" cy="15" r="6"/><path d="M4 41c0-8 5-14 12-14 4 0 7 2 9 5M44 41c0-8-5-14-12-14s-12 6-12 14"/></svg>
+              <span class="mode-name">Co-op</span>
+              <span class="mode-desc">Squad up against the horde. It grows with every player</span>
+              <span class="mode-tag">2–8 players</span>
+            </button>
+            <button id="lobby-br" class="lobby-mode" data-mode="br" role="radio" style="--mode:#3d9bff">
+              <svg class="mode-icon" viewBox="0 0 48 48" aria-hidden="true"><path d="M4 21C4 11 13 4 24 4s20 7 20 17c-3-2-6-2-10 0-3-2-7-2-10 0-3-2-7-2-10 0-4-2-7-2-10 0z"/><path d="M4 21l17 17M44 21L27 38M24 21v17"/><rect x="20" y="37" width="8" height="8" class="fill"/></svg>
+              <span class="mode-name">Battle Royale</span>
+              <span class="mode-desc">Drop in with nothing, loot, outlast the blue zone. Last one standing wins</span>
+              <span class="mode-tag">2–8 players · PvP</span>
+            </button>
+          </div>
+
+          <div class="lb-launch">
+            <label class="lb-room">
+              <span class="lb-label">Room code</span>
+              <input id="lobby-room" maxlength="24" placeholder="horde" autocomplete="off" spellcheck="false">
+              <span class="lb-room-hint">Friends type the same code on this page to join you</span>
+            </label>
+            <button id="lobby-play" class="lb-play">
+              <span class="lb-play-main">Play</span>
+              <span class="lb-play-sub" id="lobby-play-sub">Solo</span>
+            </button>
+          </div>
+          <div id="lobby-status" role="status"></div>
+        </section>
+      </main>
     </div>
 
     <!-- Start / pause screen -->
@@ -238,6 +272,7 @@
     <div id="death-screen">
       <h1>YOU DIED</h1>
       <p class="death-score"><span id="death-kills">0</span> zombies put down</p>
+      <p id="death-xp" class="death-xp"></p>
       <p class="death-cta"><span class="desk-only">Click</span><span class="touch-only">Tap</span> to rise again</p>
     </div>
 
