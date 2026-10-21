@@ -36,6 +36,14 @@ const MODELS = [
     src: "public/models/soldier/soldier.glb", ratio: 1, error: 0, tex: 1024,
     keepAnimations: ["Idle_Gun", "Run", "Run_Back", "Run_Left", "Run_Right", "Idle_Gun_Pointing", "Idle_Gun_Shoot", "Death"],
   },
+  // Indian models (Sketchfab, CC BY: credits in src/world/IndiaAssets.js)
+  { src: "public/models/india/autorickshaw.glb",  ratio: 1,    error: 0,     tex: 1024 },
+  { src: "public/models/india/thar.glb",          ratio: 0.06, error: 0.01,  tex: 1024, prune: true }, // 223k triangles → ~15k
+  { src: "public/models/india/truck.glb",         ratio: 0.07, error: 0.01,  tex: 512, prune: true }, // 208k triangles, 55 textures: a parked prop
+  { src: "public/models/india/panchayat.glb",     ratio: 1,    error: 0,     tex: 1024 },
+  { src: "public/models/india/town_building.glb", ratio: 1,    error: 0,     tex: 1024 },
+  { src: "public/models/india/parle_g.glb",       ratio: 0.03, error: 0.02,  tex: 512 },  // a 20 cm pickup: 77k triangles → ~2k
+  { src: "public/models/india/rupees_2000.glb",   ratio: 1,    error: 0,     tex: 512 },
 ];
 // ratio / error as above, applied to the .opt.glb
 const LODS = [

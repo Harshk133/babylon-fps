@@ -1,0 +1,10 @@
+Download each model from Sketchfab (Download -> "glTF" or "Autoconverted format (glb)") and drop the
+.zip or .glb here, with any name. All are CC Attribution: credit the authors (the game's credits list them).
+
+  panchayat building game asset  - nayan pachori       https://sketchfab.com/3d-models/panchayat-building-game-asset-dbe13724c0c5446084313dce5a98a1d8
+  Autorikshaw - Indian Tuk Tuk   - bhagathartworks     https://sketchfab.com/3d-models/autorikshaw-indian-tuk-tuk-5775d012693741008acff9dad410e92d
+  Indian Truck                   - AFJAL ANSARI        https://sketchfab.com/3d-models/indian-truck-8c7650b96d6846de8cc54391ab16cf20
+  Mahindra - Thar Roxx           - ansari_studios      https://sketchfab.com/3d-models/mahindra-thar-roxx-f85210fe98774b7fab1199d8ee151ead
+  Town Building                  - nayan pachori       https://sketchfab.com/3d-models/town-building-b441ed4dac864c089435f76ba055d7ab
+  Indian cookie (Parle-G)        - seirogan            https://sketchfab.com/3d-models/1e19b60d29994ff08e5b37e4c0592604
+  Indian 2000 rupees notes       - varun pal           https://sketchfab.com/3d-models/indian-2000-rupees-notes-a273c3495d644057ac4618a7c319340d

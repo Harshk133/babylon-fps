@@ -3,7 +3,7 @@
 // or attachment added there shows up here without UI changes). Pure data.
 
 import {
-  WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, MEDKIT, FUEL_CAN, PICKUP_KINDS,
+  WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, MEDKIT, BISCUIT, FUEL_CAN, PICKUP_KINDS,
   GEAR, ATTACHMENTS, ATTACH_SLOTS, ITEM_WEIGHT,
 } from "../combat/weapons.js";
 
@@ -49,10 +49,20 @@ ITEMS.medkit = {
   weight: ITEM_WEIGHT.medkit, rarity: "uncommon", equipmentSlot: null, compatibleSlots: [], stackable: true,
   desc: `Restores ${MEDKIT.heal} health. Press H to use.`,
 };
+ITEMS.biscuit = {
+  id: "biscuit", name: BISCUIT.name, type: "heal", group: "Healing", icon: "biscuit", maxStack: BISCUIT.max,
+  weight: ITEM_WEIGHT.biscuit, rarity: "common", equipmentSlot: null, compatibleSlots: [], stackable: true,
+  desc: `A quick snack: +${BISCUIT.heal} health. H eats one when you aren't hurt enough for a medkit.`,
+};
+ITEMS.cash = {
+  id: "cash", name: "₹2000 Notes", type: "cash", group: null, icon: "cash", maxStack: 1, weight: 0,
+  rarity: "uncommon", equipmentSlot: null, compatibleSlots: [], stackable: false,
+  desc: "Money. Spend it at a dukaan (shop stall) in any town.",
+};
 ITEMS.fuel = {
   id: "fuel", name: FUEL_CAN.name, type: "utility", group: "Utility", icon: "fuel", maxStack: FUEL_CAN.max,
   weight: ITEM_WEIGHT.fuel, rarity: "common", equipmentSlot: null, compatibleSlots: [], stackable: true,
-  desc: "Fills the auto-rickshaw. Press T next to it.",
+  desc: "Fills a rickshaw or a Thar. Press T next to it.",
 };
 ITEMS.ammo = {
   id: "ammo", name: PICKUP_KINDS.ammo.label, type: "ammo", group: null, icon: "ammo", maxStack: 1, weight: 0,
@@ -125,6 +135,7 @@ export function weaponStats(id, att) {
     if (m.alertMul) d.alertRadius *= m.alertMul;
     if (m.magMul) d.magSize = Math.round(d.magSize * m.magMul);
     if (m.suppressed) d.suppressed = true;
+    if (m.scope) d.scope = true;
   }
   _stats.set(key, d);
   return d;

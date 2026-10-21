@@ -1,4 +1,4 @@
-import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, FUEL_CAN, GEAR } from "../combat/weapons.js";
+import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, FUEL_CAN, BISCUIT, GEAR } from "../combat/weapons.js";
 
 const FEED_LIFE = 2600; // ms
 const fmtReserve = r => (r === Infinity ? "∞" : `${r}`);
@@ -27,9 +27,11 @@ function setClass(node, cache, key, cls, on) {
  * feed. The full inventory screen (Tab) is src/ui/LootScreen.js.
  */
 export class InventoryUI {
-  constructor({ inventory, icons }) {
+  /** promptIcon(key) → SVG markup shown in a prompt row (optional). */
+  constructor({ inventory, icons, promptIcon = null }) {
     this.inv = inventory;
     this.icons = icons;
+    this.promptIcon = promptIcon;
     this._ver = -1;
 
     this.promptEl = document.getElementById("pickup-prompt");
@@ -78,11 +80,22 @@ export class InventoryUI {
     }
     const med = el("div", "hb-tslot hb-med");
     med.dataset.hb = "medkit";
-    const medIcon = el("span", "hb-medicon", "+");
+    const medIcon = el("img", "hb-medicon-img");
+    medIcon.src = this.icons.medkit;
+    medIcon.alt = "Medkit";
     const medCount = el("span", "hb-count", "0");
     med.append(medIcon, medCount, el("kbd", "hb-kbd", "H"));
     itemsRow.append(med);
     this.medSlot = { slot: med, count: medCount, cache: {} };
+    const bis = el("div", "hb-tslot hb-biscuit");
+    bis.dataset.hb = "biscuit";
+    const bisIcon = el("img", "hb-ticon");
+    bisIcon.src = this.icons.biscuit;
+    bisIcon.alt = BISCUIT.name;
+    const bisCount = el("span", "hb-count", "0");
+    bis.append(bisIcon, bisCount);
+    itemsRow.append(bis);
+    this.bisSlot = { slot: bis, count: bisCount, cache: {} };
     const fuel = el("div", "hb-tslot hb-fuel");
     fuel.dataset.hb = "fuel";
     const fuelIcon = el("img", "hb-ticon");
@@ -95,6 +108,12 @@ export class InventoryUI {
 
     const hints = el("div", "hb-hints");
     hints.innerHTML = "<kbd>G</kbd> throw <kbd>Q</kbd> switch <kbd>Tab</kbd> inventory";
+
+    // Wallet: rupees for the dukaan
+    const wallet = el("div", "hb-wallet");
+    wallet.innerHTML = `<img class="hb-ticon" alt="" src="${this.icons.cash}"><b>₹0</b>`;
+    itemsRow.append(wallet);
+    this.wallet = { value: wallet.querySelector("b"), cache: {} };
 
     root.append(weaponsRow, itemsRow, hints);
   }
@@ -123,6 +142,9 @@ export class InventoryUI {
     this._updateGear();
     setText(this.medSlot.count, this.medSlot.cache, "n", `${inv.medkits}`);
     setClass(this.medSlot.slot, this.medSlot.cache, "empty", "empty", inv.medkits === 0);
+    setText(this.bisSlot.count, this.bisSlot.cache, "n", `${inv.biscuits}`);
+    setClass(this.bisSlot.slot, this.bisSlot.cache, "empty", "empty", inv.biscuits === 0);
+    setText(this.wallet.value, this.wallet.cache, "v", `₹${inv.cash.toLocaleString("en-IN")}`);
     setText(this.fuelSlot.count, this.fuelSlot.cache, "n", `${inv.fuelCans}`);
     setClass(this.fuelSlot.slot, this.fuelSlot.cache, "empty", "empty", inv.fuelCans === 0);
 
@@ -160,7 +182,10 @@ export class InventoryUI {
     this.promptEl.replaceChildren();
     for (let i = 0; i < count; i += 2) {
       const row = el("div", "prompt-row");
-      row.append(el("kbd", null, rows[i]), el("span", null, rows[i + 1]));
+      row.append(el("kbd", null, rows[i]));
+      const svg = this.promptIcon?.(rows[i]);
+      if (svg) row.insertAdjacentHTML("beforeend", svg);
+      row.append(el("span", null, rows[i + 1]));
       this.promptEl.append(row);
     }
     this.promptEl.classList.toggle("visible", count > 0);

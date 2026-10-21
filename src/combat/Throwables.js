@@ -136,8 +136,9 @@ export class Throwables {
   /**
    * origin / velocity: THREE.Vector3-likes (copied). owner: thrower's player id
    * (kill credit). color: smoke colour index (SMOKE_COLORS), picked by the thrower.
+   * fuse: seconds a grenade has left (it was cooked in the hand).
    */
-  throw(kind, origin, velocity, owner = null, color = 0) {
+  throw(kind, origin, velocity, owner = null, color = 0, fuse = GRENADE.fuse) {
     const p = this.projectiles.find(q => !q.active)
       ?? this.projectiles.reduce((a, b) => (a.age > b.age ? a : b));
     if (p.active) this._deactivate(p);
@@ -150,6 +151,7 @@ export class Throwables {
     p.clink = 0;
     p.owner = owner;
     p.color = color;
+    p.fuse = fuse;
     for (const k in p.meshes) p.meshes[k].visible = k === kind;
     p.holder.visible = true;
 
@@ -254,7 +256,7 @@ export class Throwables {
         this._deactivate(p);
         this.smokeFX?.spawn(_v.x, _v.y, _v.z, color);
         this.onSmoke?.(_v, color);
-      } else if (p.age >= GRENADE.fuse) {
+      } else if (p.age >= p.fuse) {
         _v.set(b.position.x, Math.max(groundHeight(b.position.x, b.position.z) + 0.1, b.position.y), b.position.z);
         const owner = p.owner;
         this._deactivate(p);

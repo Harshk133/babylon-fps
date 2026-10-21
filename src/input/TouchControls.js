@@ -8,6 +8,7 @@
 // behaves exactly like its key.
 
 import "./touch.css";
+import { icon } from "../ui/gameIcons.js";
 
 const SETTINGS_KEY = "babylon-fps:touch";
 const DEG = Math.PI / 180;
@@ -39,22 +40,12 @@ function loadSettings() {
   catch { return { ...DEFAULTS }; }
 }
 
-const ICONS = {
-  fire: '<svg viewBox="0 0 24 24"><path d="M3 9h13l2-2h3v4h-2v2h-4l-1 2H9l-1 4H4l1-5H3z"/></svg>',
-  scope: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="none" stroke-width="2"/><path d="M12 2v6M12 16v6M2 12h6M16 12h6" stroke-width="2"/></svg>',
-  jump: '<svg viewBox="0 0 24 24"><path d="M12 4l7 8h-4v8H9v-8H5z"/></svg>',
-  crouch: '<svg viewBox="0 0 24 24"><circle cx="13" cy="4.6" r="2.4"/><path d="M10.5 8.2h4.3l2.4 5.3-3.1 1.1V21h-2.6v-5.2L8.3 16.6 6.8 21H4.1l2.5-7 3.6-1.6z"/></svg>',
-  prone: '<svg viewBox="0 0 24 24"><circle cx="19.6" cy="11.4" r="2.3"/><path d="M1.5 15.2h9.3l3.2-3.1h3.6v3.1l-4.2 2.3H1.5z"/><path d="M14 18h6v1.6h-6z"/></svg>',
-  reload: '<svg viewBox="0 0 24 24"><path d="M12 5a7 7 0 1 0 7 7h-2.5A4.5 4.5 0 1 1 12 7.5V11l5-4.5L12 2z"/></svg>',
-  grenade: '<svg viewBox="0 0 24 24"><circle cx="12" cy="14" r="6.5"/><path d="M10 4h5v3h-5zM15 5h3l1 2" fill="none" stroke-width="1.6"/></svg>',
-  swap: '<svg viewBox="0 0 24 24"><path d="M4 8h12l-3-3 1.5-1.5L20 9l-5.5 5.5L13 13l3-3H4zM20 16H8l3 3-1.5 1.5L4 15l5.5-5.5L11 11l-3 3h12z"/></svg>',
-  bag: '<svg viewBox="0 0 24 24"><path d="M8 7V5a4 4 0 0 1 8 0v2h3l1 14H4L5 7zm2 0h4V5a2 2 0 0 0-4 0z"/></svg>',
-  torch: '<svg viewBox="0 0 24 24"><path d="M7 2h10v5l-3 4v11h-4V11L7 7z"/></svg>',
-  pause: '<svg viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>',
-  gear: '<svg viewBox="0 0 24 24"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.7a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1L11 21h4l.4-2.7a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>',
-  map: '<svg viewBox="0 0 24 24"><path d="M3 5l6-2 6 2 6-2v16l-6 2-6-2-6 2zm6 0v13l6 2V7z"/></svg>',
-  gyro: '<svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2" fill="none" stroke-width="2"/><path d="M2 9a10 10 0 0 0 0 6M22 9a10 10 0 0 1 0 6" fill="none" stroke-width="2"/></svg>',
-};
+// Button icons: the game-icons.net set (src/ui/gameIcons.js), like the rest of the HUD
+const ICONS = Object.fromEntries(Object.entries({
+  fire: "fire", scope: "scope", jump: "jump", crouch: "crouch", prone: "prone", reload: "reload",
+  grenade: "grenade", swap: "swap", bag: "bag", torch: "flashlight", pause: "pause", gear: "gear",
+  map: "map", gyro: "gyro", heal: "medkit", door: "door", drive: "steering", shop: "shop",
+}).map(([k, name]) => [k, icon(name)]));
 
 function el(tag, cls, html) {
   const e = document.createElement(tag);
@@ -133,6 +124,9 @@ export class TouchControls {
     this.throwCount = el("span", "tc-badge", "0");
     this.throwBtn.append(this.throwCount);
     this.swapBtn = btn("tc-swap", "swap");
+    this.healBtn = btn("tc-heal", "heal");
+    this.healCount = el("span", "tc-badge", "0");
+    this.healBtn.append(this.healCount);
     this.bagBtn = btn("tc-bag tc-small", "bag");
     this.torchBtn = btn("tc-torch tc-small", "torch");
     this.mapBtn = btn("tc-map tc-small", "map");
@@ -383,6 +377,7 @@ export class TouchControls {
     this._tapKey(this.reloadBtn, "KeyR");
     this._hold(this.throwBtn, () => cb.key("KeyG", true), () => cb.key("KeyG", false), true);
     this._tapKey(this.swapBtn, "KeyQ");
+    this._tapKey(this.healBtn, "KeyH");
     this._tapKey(this.bagBtn, "KeyI");
     this._tapKey(this.torchBtn, "KeyF");
     this._tapKey(this.mapBtn, "KeyM");
@@ -482,13 +477,13 @@ export class TouchControls {
 
   /**
    * ctx: { playing, alive, aiming, inventoryOpen, lobby, spectating, br, canStart,
-   *        driving, jumpLabel, throwCount, stance }. Only touches the DOM when
+   *        driving, jumpLabel, throwCount, healCount, stance }. Only touches the DOM when
    *        something visible changes.
    */
   update(ctx) {
     this._ctx = ctx;
     if (!ctx.playing && (this._touches.size || this._joy !== null || this.aimOn)) this.reset();
-    const sig = `${ctx.playing}|${ctx.alive}|${ctx.inventoryOpen}|${ctx.lobby}|${ctx.spectating}|${ctx.br}|${ctx.canStart}|${ctx.driving}|${ctx.jumpLabel}|${ctx.throwCount}|${ctx.airborne}|${ctx.stance}`;
+    const sig = `${ctx.playing}|${ctx.alive}|${ctx.inventoryOpen}|${ctx.lobby}|${ctx.spectating}|${ctx.br}|${ctx.canStart}|${ctx.driving}|${ctx.jumpLabel}|${ctx.throwCount}|${ctx.healCount}|${ctx.airborne}|${ctx.stance}`;
     if (sig === this._shown) return;
     this._shown = sig;
     const r = this.root.classList;
@@ -504,6 +499,8 @@ export class TouchControls {
     this.jumpBtn.style.display = ctx.jumpLabel ? "" : "none"; // nothing to do under the parachute
     this.throwCount.textContent = `${ctx.throwCount}`;
     this.throwBtn.classList.toggle("empty", ctx.throwCount === 0);
+    this.healCount.textContent = `${ctx.healCount ?? 0}`;
+    this.healBtn.classList.toggle("empty", !ctx.healCount);
     this.crouchBtn.classList.toggle("on", ctx.stance === "crouch");
     this.proneBtn.classList.toggle("on", ctx.stance === "prone");
   }

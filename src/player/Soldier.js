@@ -51,6 +51,22 @@ const _axisX = new THREE.Vector3(1, 0, 0);
 const _axisY = new THREE.Vector3(0, 1, 0);
 const _v0 = new THREE.Vector3();
 
+/**
+ * Shows or hides a gun / gear piece. A hidden one is taken off its bone (and
+ * put back where it was): hidden objects are still matrix-updated every frame,
+ * and every soldier carries 5 guns and 9 gear pieces, so in a 100-player match
+ * that's thousands of updates for nothing.
+ */
+function showPart(obj, on) {
+  obj.visible = on;
+  if (!on && obj.parent) {
+    obj.userData.home = obj.parent;
+    obj.parent.remove(obj);
+  } else if (on && !obj.parent && obj.userData.home) {
+    obj.userData.home.add(obj);
+  }
+}
+
 function findClip(animations, name) {
   return animations.find(a => a.name === name || a.name.endsWith("|" + name));
 }
@@ -276,6 +292,7 @@ export class Soldier {
     group.updateMatrixWorld(true);
     bone.attach(group); // keep the world fit, follow the bone from now on
     this.gearMeshes[slot].push(group);
+    showPart(group, false);
   }
 
   /** levels: { helmet, vest, backpack } (0 = none). Cheap: only visibility changes. */
@@ -284,7 +301,7 @@ export class Soldier {
       const lv = levels?.[slot] ?? 0;
       if (this.gear[slot] === lv) continue;
       this.gear[slot] = lv;
-      this.gearMeshes[slot].forEach((m, i) => { m.visible = i === lv - 1; });
+      this.gearMeshes[slot].forEach((m, i) => showPart(m, i === lv - 1));
     }
   }
 
@@ -322,8 +339,8 @@ export class Soldier {
       if (id === "smg") continue;
       const model = cloneItem(id);
       model.position.copy(gripLocal);
-      model.visible = false;
       holder.add(model);
+      showPart(model, false);
       this.guns[id] = { model, muzzle: gripLocal.clone().add(model.userData.muzzle) };
     }
 
@@ -360,12 +377,12 @@ export class Soldier {
   setWeapon(id) {
     if (id === null) {
       this.currentGun = null;
-      for (const g of Object.values(this.guns)) g.model.visible = false;
+      for (const g of Object.values(this.guns)) showPart(g.model, false);
       return;
     }
     if (!this.guns[id]) return;
     this.currentGun = id;
-    for (const [gid, g] of Object.entries(this.guns)) g.model.visible = gid === id;
+    for (const [gid, g] of Object.entries(this.guns)) showPart(g.model, gid === id);
     this.muzzle.position.copy(this.guns[id].muzzle);
   }
 

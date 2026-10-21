@@ -499,6 +499,7 @@ export class MonsterPools {
     this._resetAnimations(m);
     m.body.velocity.set(0, 0, 0);
     m.body.angularVelocity.set(0, 0, 0);
+    if (!m.body.world) this.world.addBody(m.body);
     const g = groundHeight(x, z);
     m.body.position.set(x, g + m.visualOffY + m.flyY, z);
     this.orient(m);
@@ -523,6 +524,10 @@ export class MonsterPools {
     m.body.position.set(m.parkX ?? 0, POOL_HIDE_Y, 0);
     m.body.aabbNeedsUpdate = true; // a sleeping body's box isn't refreshed otherwise
     m.body.sleep();
+    // Out of the physics world while pooled: even asleep, every body is sorted
+    // and swept by the broadphase each step (100+ parked monsters cost more
+    // than the 20 alive ones). Only the THREE side has to stay in the scene.
+    if (m.body.world) this.world.removeBody(m.body);
     m.root.visible = false;
     m.root.position.set(0, POOL_HIDE_Y, 0);
     m.root.rotation.set(0, 0, 0);

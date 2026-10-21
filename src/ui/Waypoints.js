@@ -253,7 +253,15 @@ export class Waypoints {
     this._cNext = now + 1000 / COMPASS_HZ;
 
     const cv = this.compassCanvas;
-    const w = cv.clientWidth || 300, h = cv.clientHeight || 30;
+    // Its CSS size, read once per window size: reading layout every frame forces a reflow
+    if (!this._cSize) {
+      const cw = cv.clientWidth, ch = cv.clientHeight;
+      if (cw > 0) {
+        this._cSize = { w: cw, h: ch || 30 };
+        if (!this._cResize) { this._cResize = true; addEventListener("resize", () => { this._cSize = null; }); }
+      }
+    }
+    const w = this._cSize?.w ?? 300, h = this._cSize?.h ?? 30;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); this._tape = null; }
     const ctx = this.cctx;

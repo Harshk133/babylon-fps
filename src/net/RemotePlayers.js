@@ -298,6 +298,9 @@ export class RemotePlayers {
         });
       }
 
+      // Battle royale: no name tag or health bar over enemies
+      if (this._pvp) { p.tag.visible = false; continue; }
+
       // Name tag: readable size at any distance, redrawn only when it changes
       const key = `${Math.round(p.hp / 5)}|${p.dead}`;
       if (key !== p.tagKey) {

@@ -55,6 +55,8 @@ const YARD_WALL_H = 1.8;
 const YARD_WALL_T = 0.24;
 const YARD_GATE = 4.2;                  // gate gap width
 const YARD_PIER = 3.6;                  // a pier every this many metres
+const CLIMB_REACH = 0.95;               // m from a yard wall's centreline that counts as "at the wall"
+const VAULT_REACH = 1.1;                // kit units from a window pane
 
 // ── House kinds ───────────────────────────────────────────────────────────────
 // Walls: [piece, x, z, rotY]. Walls spanning X are rotated 90°; the doorway is
@@ -715,6 +717,72 @@ export class Houses {
     this._yardWorld(c, gateX, hd - 1.6, c.gateIn);
     this.compounds.push(c);
     return c;
+  }
+
+  // ── Climbing and vaulting ──────────────────────────────────────────────────
+
+  /**
+   * The yard wall someone at feet (x, z), facing (fx, fz) (unit), is standing
+   * against: { x, z } on the wall, { nx, nz } the way over, topY. null if none
+   * (gate gaps don't count). out is reused.
+   */
+  wallClimbSpot(x, z, fx, fz, out = this._climbOut ??= {}) {
+    for (const c of this.compounds) {
+      const l = this._yardLocal(c, x, z, _a);
+      if (Math.abs(l.x) > c.hw + CLIMB_REACH || Math.abs(l.z) > c.hd + CLIMB_REACH) continue;
+      const flx = fx * c.cos - fz * c.sin, flz = fx * c.sin + fz * c.cos;
+      const g0 = c.gateX - YARD_GATE / 2 - 0.3, g1 = c.gateX + YARD_GATE / 2 + 0.3;
+      // [walls along X at z = ±hd, walls along Z at x = ±hw]
+      for (const [alongX, at] of [[true, c.hd], [true, -c.hd], [false, -c.hw], [false, c.hw]]) {
+        const perp = (alongX ? l.z : l.x) - at, along = alongX ? l.x : l.z;
+        const half = alongX ? c.hw : c.hd;
+        if (Math.abs(perp) > CLIMB_REACH || Math.abs(along) > half - 0.3) continue;
+        if (alongX && at > 0 && along > g0 && along < g1) continue; // the gate: just walk through
+        const over = perp > 0 ? -1 : 1;                             // toward the wall and past it
+        if ((alongX ? flz : flx) * over < 0.55) continue;
+        const nlx = alongX ? 0 : over, nlz = alongX ? over : 0;
+        this._yardWorld(c, alongX ? along : at, alongX ? at : along, out);
+        out.nx = nlx * c.cos + nlz * c.sin;
+        out.nz = -nlx * c.sin + nlz * c.cos;
+        out.topY = c.base + YARD_WALL_H;
+        return out;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The window someone at (x, feetY, z), facing (fx, fz), can vault through:
+   * { x, z } the pane's centre, { nx, nz } the way through, sillY, topY. The
+   * sill has to be between knee and chest height (upstairs windows work from
+   * the inside: out you go). null if none.
+   */
+  windowVaultSpot(x, feetY, z, fx, fz, out = this._vaultOut ??= {}) {
+    const S = HOUSE_SCALE;
+    for (const h of this.houses) {
+      if (Math.abs(x - h.x) > h.radius + 2 || Math.abs(z - h.z) > h.radius + 2) continue;
+      const l = this._toLocal(h, x, z, _a);
+      const flx = fx * h.cos - fz * h.sin, flz = fx * h.sin + fz * h.cos;
+      for (const g of h.T.glassBoxes) {
+        // Pane frame: span (sin rot, cos rot), normal (cos rot, −sin rot), kit units
+        const sx = Math.sin(g.rot), sz = Math.cos(g.rot);
+        const dx = l.x - g.x, dz = l.z - g.z;
+        const along = dx * sx + dz * sz, perp = dx * sz - dz * sx;
+        if (Math.abs(along) > g.hz + 0.1 || Math.abs(perp) > VAULT_REACH) continue;
+        const over = perp > 0 ? -1 : 1;
+        if ((flx * sz - flz * sx) * over < 0.5) continue;
+        const sill = h.base + (g.y - g.hy) * S;
+        if (sill - feetY < 0.25 || sill - feetY > 1.45) continue;
+        this._toWorld(h, g.x, g.z, out);
+        const nlx = sz * over, nlz = -sx * over;
+        out.nx = nlx * h.cos + nlz * h.sin;
+        out.nz = -nlx * h.sin + nlz * h.cos;
+        out.sillY = sill;
+        out.topY = h.base + (g.y + g.hy) * S;
+        return out;
+      }
+    }
+    return null;
   }
 
   _yardWorld(c, lx, lz, out) {

@@ -5,7 +5,9 @@ import { groundHeight } from "./Terrain.js";
 // Stones: a few lumpy low-poly rock shapes, drawn as instanced meshes (one
 // draw call per shape and size class). Boulders are solid (a sphere collider
 // each, on the minimap and in the way of the auto-rickshaw); pebbles are
-// decoration only, so their count can follow the quality setting.
+// decoration only, so their count can follow the quality setting. Cover rocks
+// are big and tall (taller than a standing player) to hide behind in a
+// firefight; each gets an upright cylinder collider, so bullets stop at them.
 
 const VARIANTS = 3;
 
@@ -44,7 +46,7 @@ function instanced(scene, geos, material, list, castShadow) {
     mesh.count = mine.length;
     mine.forEach((r, i) => {
       q.setFromEuler(e.set(r.tilt, r.rot, r.tilt * 0.5));
-      mesh.setMatrixAt(i, m4.compose(p.set(r.x, r.y, r.z), q, s.set(r.s * r.sx, r.s, r.s * r.sz)));
+      mesh.setMatrixAt(i, m4.compose(p.set(r.x, r.y, r.z), q, s.set(r.s * r.sx, r.s * (r.sy ?? 1), r.s * r.sz)));
     });
     mesh.instanceMatrix.needsUpdate = true;
     mesh.computeBoundingSphere();
@@ -58,18 +60,19 @@ function instanced(scene, geos, material, list, castShadow) {
 }
 
 /**
- * boulderRng must be the same on every machine (boulders have colliders);
- * pebbleRng / pebbles may differ by quality.
+ * boulderRng / coverRng must be the same on every machine (boulders and cover
+ * rocks have colliders); pebbleRng / pebbles may differ by quality.
  * blocked(x, z, r): true where a stone must not go.
  */
 export function scatterRocks({
-  scene, world, material, boulderRng, pebbleRng, boulders, pebbles, ringMin, ringMax, blocked, mapObstacles,
+  scene, world, material, boulderRng, pebbleRng, coverRng = null, boulders, pebbles, cover = 0, ringMin, ringMax, blocked, mapObstacles,
 }) {
   const geos = [];
   for (let i = 0; i < VARIANTS; i++) geos.push(rockGeometry(boulderRng));
   const rockMat = new THREE.MeshStandardMaterial({ color: 0x7a7570, roughness: 0.95, metalness: 0, flatShading: true, vertexColors: true });
 
-  const place = (rng, count, rMin, rMax, solid) => {
+  // tall: cover rocks are stretched up (sy) and kept well apart so there's room to fight round them
+  const place = (rng, count, rMin, rMax, solid, avoid = [], tall = false) => {
     const out = [];
     for (let attempt = 0; attempt < count * 20 && out.length < count; attempt++) {
       const a = rng() * Math.PI * 2;
@@ -77,18 +80,35 @@ export function scatterRocks({
       const x = Math.cos(a) * d, z = Math.sin(a) * d;
       const s = rMin + rng() * (rMax - rMin);
       const r = { x, z, s, v: (rng() * VARIANTS) | 0, rot: rng() * Math.PI * 2, tilt: (rng() - 0.5) * 0.3, sx: 0.8 + rng() * 0.5, sz: 0.8 + rng() * 0.5 };
+      if (tall) { r.sy = 1.5 + rng() * 0.4; r.tilt *= 0.3; }
       if (blocked(x, z, s * 1.4 + 0.5)) continue;
-      if (solid && out.some(o => Math.hypot(o.x - x, o.z - z) < o.s + s + 2)) continue;
+      const gap = tall ? 14 : 2;
+      if (solid && out.some(o => Math.hypot(o.x - x, o.z - z) < o.s + s + gap)) continue;
+      if (avoid.some(o => Math.hypot(o.x - x, o.z - z) < o.s * 1.3 + s + 2)) continue;
       r.y = groundHeight(x, z) - s * 0.18;
       out.push(r);
     }
     return out;
   };
 
-  const big = place(boulderRng, boulders, 0.9, 2.4, true);
-  const small = place(pebbleRng, pebbles, 0.14, 0.45, false);
+  const tall = coverRng && cover ? place(coverRng, cover, 2.8, 3.8, true, [], true) : [];
+  const big = place(boulderRng, boulders, 0.9, 2.4, true, tall);
+  const small = place(pebbleRng, pebbles, 0.14, 0.45, false, tall);
   instanced(scene, geos, rockMat, big, true);
+  if (tall.length) instanced(scene, geos, rockMat, tall, true);
   if (small.length) instanced(scene, geos, rockMat, small, false);
+
+  // Cover rocks: an upright cylinder from below the ground to about the rock's top
+  for (const r of tall) {
+    const rad = r.s * Math.min(r.sx, r.sz) * 0.82;
+    const top = r.y + r.s * r.sy * 0.55;        // the lumpy top averages ~0.6 of the scale
+    const bottom = r.y - 0.4;
+    const body = new CANNON.Body({ mass: 0, material });
+    body.addShape(new CANNON.Cylinder(rad, rad, top - bottom, 10));
+    body.position.set(r.x, (top + bottom) / 2, r.z);
+    world.addBody(body);
+    mapObstacles.push({ type: "circle", x: r.x, z: r.z, r: rad, rock: true });
+  }
 
   for (const r of big) {
     const body = new CANNON.Body({ mass: 0, material });
@@ -98,5 +118,5 @@ export function scatterRocks({
     world.addBody(body);
     mapObstacles.push({ type: "circle", x: r.x, z: r.z, r: rad * 0.95, rock: true });
   }
-  return { boulders: big, pebbles: small };
+  return { boulders: big, pebbles: small, cover: tall };
 }

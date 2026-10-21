@@ -51,7 +51,8 @@ export const WEAPONS = {
     reloadTime: 2.8, damage: 160, pellets: 1, headshotMultiplier: 3, range: 300,
     spreadHip: 0.05, spreadAim: 0.0, spreadMove: 0.03, spreadAir: 0.06,
     bloomPerShot: 0, bloomMax: 0, bloomRecovery: 0.12,
-    recoilPitch: 0.07, recoilYaw: 0.01, push: 5, alertRadius: 60, aimFov: 16,
+    // scope: aiming looks down a real scope (overlay, first-person, ~9x zoom)
+    recoilPitch: 0.07, recoilYaw: 0.01, push: 5, alertRadius: 60, aimFov: 7, scope: true,
     sound: "sniper", tracersPerShot: 1,
   },
 };
@@ -68,13 +69,26 @@ export const THROWABLES = {
 export const THROWABLE_ORDER = ["grenade", "molotov", "smoke"];
 
 export const MEDKIT = { name: "Medkit", max: 3, start: 0, heal: 50 };
+/** Parle-G: a quick snack heal. H eats one unless you're hurt enough for a medkit. */
+export const BISCUIT = { name: "Parle-G Biscuits", max: 8, start: 0, heal: 20, medkitBelow: 60 };
+
+/**
+ * Rupees: ₹2000 notes lying around, dropped by monsters and by eliminated
+ * players. Spent at the dukaan stalls in the towns (src/economy/Shop.js).
+ */
+export const CASH = {
+  note: 2000,                           // one bundle in the world
+  monster: { walker: 100, runner: 150, listener: 150, gunner: 300, brute: 500, hound: 200, dragon: 3000, boss: 5000 },
+  monsterChance: 0.35,                  // ordinary monsters drop cash this often (bosses always)
+};
 
 // Petrol for the auto-rickshaw: carried, poured in with T next to it (or while driving)
 export const FUEL_CAN = { name: "Petrol Can", max: 2 };
 
 // Grenade / molotov tuning
 export const GRENADE = {
-  fuse: 2.2,
+  fuse: 2.2,          // a remote throw that didn't say how long was left
+  cookTime: 5,        // the fuse starts when you pull the pin (hold G): 5…1 on screen, then it bursts
   radius: 7.5,
   maxDamage: 240,
   minDamage: 30,
@@ -138,7 +152,7 @@ export const VEST_BLAST_SHARE = 0.6;
  */
 export const ATTACHMENTS = {
   reddot:      { slot: "optic",  name: "Red Dot Sight",  fits: ["pistol", "smg", "shotgun", "rifle"], mods: { aimFovMul: 0.86, spreadAimMul: 0.65 } },
-  scope4x:     { slot: "optic",  name: "4x ACOG Scope",  fits: ["smg", "rifle", "sniper"],            mods: { aimFov: 12, spreadAimMul: 0.5 } },
+  scope4x:     { slot: "optic",  name: "4x ACOG Scope",  fits: ["smg", "rifle", "sniper"],            mods: { aimFov: 12, spreadAimMul: 0.5, scope: true } },
   compensator: { slot: "muzzle", name: "Compensator",    fits: ["smg", "rifle", "sniper"],            mods: { recoilMul: 0.68 } },
   suppressor:  { slot: "muzzle", name: "Suppressor",     fits: ["pistol", "smg", "rifle", "sniper"],  mods: { alertMul: 0.4, recoilMul: 0.9, suppressed: true } },
   extmag:      { slot: "mag",    name: "Extended Mag",   fits: ["pistol", "smg", "rifle", "sniper"],  mods: { magMul: 1.5 } },
@@ -150,7 +164,7 @@ export const ATTACH_SLOT_NAMES = { optic: "Optic", muzzle: "Muzzle", mag: "Magaz
 // ── Carrying ─────────────────────────────────────────────────────────────────
 /** Weight of one of each carried item. Guns, their ammo and worn gear weigh nothing. */
 export const ITEM_WEIGHT = {
-  grenade: 18, molotov: 18, smoke: 14, medkit: 20, fuel: 30,
+  grenade: 18, molotov: 18, smoke: 14, medkit: 20, fuel: 30, biscuit: 5,
   reddot: 10, scope4x: 15, compensator: 10, suppressor: 12, extmag: 15, grip: 10,
 };
 /** Capacity with no backpack and no vest (backpacks / vests add GEAR[…].capacity). */
@@ -171,7 +185,9 @@ export const PICKUP_KINDS = {
   molotov: { category: "throwable", label: "Molotov",        scale: 1.8 },
   smoke:   { category: "throwable", label: "Smoke Grenade",  scale: 2.0 },
   medkit:  { category: "medkit",    label: "Medkit",         scale: 1.4 },
+  biscuit: { category: "medkit",    label: "Parle-G Biscuits", scale: 2.4 },
   fuel:    { category: "fuel",      label: "Petrol Can",     scale: 1.6 },
+  cash:    { category: "cash",      label: "₹2000 Notes",    scale: 2.4 },
 };
 for (const [id, g] of Object.entries(GEAR)) {
   PICKUP_KINDS[id] = { category: "gear", label: g.name, scale: g.slot === "helmet" ? 2.2 : 1.5, interact: true };

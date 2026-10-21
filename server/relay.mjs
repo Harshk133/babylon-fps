@@ -13,7 +13,8 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
 const COLORS = ["#4dd2ff", "#ffb347", "#7dff6a", "#ff6ad5", "#ffe14d", "#b48cff", "#ff6a6a", "#6affd8"];
-const MAX_PER_ROOM = 8;
+const MAX_PER_ROOM = 8;      // co-op rooms
+const MAX_PER_BR_ROOM = 100; // battle royale rooms ("br-<code>")
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "").split(",").map(s => s.trim().replace(/\/$/, "")).filter(Boolean);
 
 const rooms = new Map(); // room name → { players: Map<id, client>, hostId }
@@ -36,7 +37,8 @@ function join(ws, msg) {
   const roomName = String(msg.room ?? "horde").trim().slice(0, 24).toLowerCase() || "horde";
   let room = rooms.get(roomName);
   if (!room) { room = { players: new Map(), hostId: null }; rooms.set(roomName, room); }
-  if (room.players.size >= MAX_PER_ROOM) { send(ws, { t: "full" }); ws.close(); return null; }
+  const max = roomName.startsWith("br-") ? MAX_PER_BR_ROOM : MAX_PER_ROOM;
+  if (room.players.size >= max) { send(ws, { t: "full" }); ws.close(); return null; }
 
   const used = new Set([...room.players.values()].map(c => c.color));
   const client = {

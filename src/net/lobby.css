@@ -280,6 +280,8 @@
 .mode-icon .fill { fill: var(--bone-dim); stroke: none; }
 .lobby-mode.selected .mode-icon { stroke: var(--mode); filter: drop-shadow(0 0 10px var(--mode)); }
 .lobby-mode.selected .mode-icon .fill { fill: var(--mode); }
+.mode-icon.gi { fill: var(--bone-dim); stroke: none; transition: fill 0.2s ease, filter 0.2s ease; }
+.lobby-mode.selected .mode-icon.gi { fill: var(--mode); }
 
 .mode-name {
   margin-top: 14px;

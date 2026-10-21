@@ -20,6 +20,7 @@ const CATEGORY_COLOR = {
   throwable: 0xff5a3a,
   medkit:    0x4dff88,
   fuel:      0x37e0c8,
+  cash:      0xff5fd2,
 };
 
 const _m = new THREE.Matrix4();

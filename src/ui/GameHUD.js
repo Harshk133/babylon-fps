@@ -2,11 +2,13 @@
 // Every setter caches what it last wrote and only touches the DOM when the
 // shown value changes.
 
+import { icon } from "./gameIcons.js";
+
 const HIT_POOL = 4;
 const HIT_LIFE = 1.1;
 const FEED_MAX = 5;
 const FEED_LIFE = 4.5;
-const PHASE_ICON = { Night: "☾", Dawn: "◒", Day: "☀", Dusk: "◓" };
+const PHASE_ICON = { Night: "moon", Dawn: "cloud", Day: "sun", Dusk: "cloud" };
 
 /** A small tile of monochrome noise for the film-grain overlay. */
 function grainDataUrl() {
@@ -124,7 +126,7 @@ export class GameHUD {
     this._set("envTime", time, v => { this.envTimeEl.textContent = v; });
     this._set("envPhase", phase, v => {
       this.envPhaseEl.textContent = v;
-      this.envIconEl.textContent = PHASE_ICON[v] ?? "☾";
+      this.envIconEl.innerHTML = icon(PHASE_ICON[v] ?? "moon");
       this.envEl.dataset.phase = v.toLowerCase();
     });
     this._set("envWeather", weather, v => { this.envWeatherEl.textContent = v; });

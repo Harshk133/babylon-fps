@@ -132,6 +132,7 @@ export class LootActions {
         if (!inv.ammoFull() || this._attHome(e.data?.att)) return yes("merge");
         return no(`${WEAPONS[kind].short}: ammo full`);
       case "ammo": return inv.ammoFull() ? no("Ammo full") : yes("merge");
+      case "cash": return yes("pickup");
       case "gear":
         if (inv._capacityWith(GEAR[kind].slot, kind) < inv.load) return no("Too much in your backpack for that");
         return yes(inv.gear[GEAR[kind].slot] ? "swap" : "equip");
@@ -255,6 +256,12 @@ export class LootActions {
         if (r.error) { this.spawnLoot(kind, data, at); return no(r.error); }
         if (r.prev) this.spawnLoot(r.prev.id, { dur: r.prev.dur });
         msg = r.prev ? `Swapped for ${GEAR[kind].name}` : `Equipped ${GEAR[kind].name}`;
+        break;
+      }
+      case "cash": {
+        const amount = data.count ?? 0;
+        inv.addCash(amount);
+        msg = `+₹${amount.toLocaleString("en-IN")}`;
         break;
       }
       case "attachment": {
