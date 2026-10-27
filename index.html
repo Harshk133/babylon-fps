@@ -11,18 +11,184 @@
          Offline / LAN play falls back to the system fonts. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Creepster&family=Special+Elite&family=Teko:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <!-- Not render-blocking: the loading screen paints at once with system fonts, then swaps -->
+    <link href="https://fonts.googleapis.com/css2?family=Creepster&family=Special+Elite&family=Teko:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+    <!-- The loading art first, before the game's scripts and models -->
+    <link rel="preload" as="image" href="/loading/town-hd.webp" media="(min-width: 1000px)" fetchpriority="high" />
+    <link rel="preload" as="image" href="/loading/town-960.webp" media="(max-width: 999.98px)" fetchpriority="high" />
+    <!-- The biggest models start downloading while the game's scripts load and parse, instead of
+         after (low priority: the scripts come first). Same mode as three's loaders, so they're reused. -->
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/trees/old_tree_with_vine_3d_model_free.opt.glb" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/dragon_gold.opt.glb" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/trees/dreftwood%20tree.opt.glb" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/india/truck.opt.glb" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/soldier/soldier.opt.glb" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/zombie_dog_animation.opt.glb" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/india/autorickshaw.opt.glb" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/md2/ogro/ogro.md2" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/md2/ratamahatta/ratamahatta.md2" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/house/house-kit.glb?v=2" />
+    <style>
+      /* Loading screen: inline so it's on screen before the stylesheet and scripts arrive */
+      #loading-screen {
+        position: fixed; inset: 0; z-index: 9999; overflow: hidden;
+        background: #0b0d12 url("data:image/jpeg;base64,/9j/2wBDAA4KCw0LCQ4NDA0QDw4RFiQXFhQUFiwgIRokNC43NjMuMjI6QVNGOj1OPjIySGJJTlZYXV5dOEVmbWVabFNbXVn/2wBDAQ8QEBYTFioXFypZOzI7WVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVn/wAARCAASACADASIAAhEBAxEB/8QAGgAAAQUBAAAAAAAAAAAAAAAAAAECBAUGA//EACMQAAICAgECBwAAAAAAAAAAAAECAAMEESExURMUIiMyYZH/xAAWAQEBAQAAAAAAAAAAAAAAAAABAgT/xAAaEQADAQADAAAAAAAAAAAAAAAAAQIRAxJB/9oADAMBAAIRAxEAPwDO4uKjKCyne+DJyeDQw0gBMg1ZYWvbD48iLTl+adtqFUdJM0LWl7TehA2v5LHHvxFHuAnf1M8lwRPTye0fdkhUBDc9pdcipYEz1KBOkfXxYQOIQmXxlHcE7HJiqTswhCRP/9k=") center / cover no-repeat;
+        color: #f4ead8; font-family: Teko, "Segoe UI", system-ui, sans-serif;
+        opacity: 1; transition: opacity 0.7s ease, visibility 0.7s;
+        user-select: none; -webkit-user-select: none;
+      }
+      #loading-screen.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+      .ld-art {
+        position: absolute; inset: -2%;
+        background: url("/loading/town-hd.webp") center 40% / cover no-repeat;
+        opacity: 0; transform: scale(1.02); transform-origin: 62% 45%;
+        transition: opacity 1.1s ease;
+        animation: ld-drift 40s ease-in-out infinite alternate;
+      }
+      @media (max-width: 999.98px) { .ld-art { background-image: url("/loading/town-960.webp"); } }
+      .ld-art.ready { opacity: 1; }
+      @keyframes ld-drift { from { transform: scale(1.02) translate(0, 0); } to { transform: scale(1.12) translate(-1.5%, -1%); } }
+      /* Morning mist drifting across, and a warm sun bloom from the right */
+      .ld-mist {
+        position: absolute; inset: 0; pointer-events: none;
+        background:
+          radial-gradient(60% 40% at 92% 26%, rgba(255, 186, 110, 0.28), transparent 70%),
+          linear-gradient(100deg, transparent 20%, rgba(210, 222, 240, 0.12) 45%, transparent 70%);
+        background-size: 100% 100%, 220% 100%;
+        animation: ld-mist 18s linear infinite;
+        mix-blend-mode: screen;
+      }
+      @keyframes ld-mist { from { background-position: 0 0, 120% 0; } to { background-position: 0 0, -120% 0; } }
+      .ld-shade {
+        position: absolute; inset: 0; pointer-events: none;
+        background:
+          linear-gradient(180deg, rgba(5, 7, 12, 0.72) 0%, rgba(5, 7, 12, 0) 26%),
+          linear-gradient(0deg, rgba(4, 5, 9, 0.96) 0%, rgba(4, 5, 9, 0.55) 18%, rgba(4, 5, 9, 0) 42%),
+          radial-gradient(120% 90% at 50% 50%, transparent 60%, rgba(0, 0, 0, 0.55) 100%);
+      }
+      .ld-brand { position: absolute; top: max(28px, env(safe-area-inset-top)); left: max(40px, env(safe-area-inset-left)); }
+      .ld-eyebrow {
+        display: flex; align-items: center; gap: 10px;
+        font-size: 15px; font-weight: 500; letter-spacing: 0.32em; text-transform: uppercase; color: #f2c56b;
+      }
+      .ld-eyebrow::before { content: ""; width: 28px; height: 2px; background: linear-gradient(90deg, #f2c56b, transparent); }
+      .ld-title {
+        margin: 2px 0 0; font-weight: 700; line-height: 0.82; letter-spacing: 0.02em; text-transform: uppercase;
+        font-size: clamp(46px, 7.2vw, 104px);
+        background: linear-gradient(180deg, #fffaf0 0%, #f4e2bf 55%, #c9a46a 100%);
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+        filter: drop-shadow(0 4px 18px rgba(0, 0, 0, 0.6));
+      }
+      .ld-modes { margin-top: 10px; font-size: 18px; letter-spacing: 0.22em; color: rgba(244, 234, 216, 0.72); text-transform: uppercase; }
+      .ld-modes b { color: #ff5a3c; font-weight: 600; }
+      .ld-bottom {
+        position: absolute; left: 0; right: 0; bottom: 0;
+        padding: 0 max(40px, env(safe-area-inset-right)) max(30px, calc(env(safe-area-inset-bottom) + 14px)) max(40px, env(safe-area-inset-left));
+        display: flex; align-items: flex-end; justify-content: space-between; gap: 28px;
+      }
+      .ld-tip {
+        max-width: 560px; padding: 12px 18px 12px 16px;
+        background: linear-gradient(90deg, rgba(10, 12, 18, 0.7), rgba(10, 12, 18, 0.25));
+        border-left: 3px solid #f2c56b; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+      }
+      .ld-tip-label { font-size: 14px; font-weight: 600; letter-spacing: 0.28em; color: #f2c56b; }
+      .ld-tip-text {
+        font-family: "Segoe UI", system-ui, sans-serif; font-size: 15px; line-height: 1.4; color: rgba(244, 234, 216, 0.92);
+        min-height: 2.8em; transition: opacity 0.4s ease, transform 0.4s ease;
+      }
+      .ld-tip-text.out { opacity: 0; transform: translateY(6px); }
+      .ld-status { text-align: right; flex-shrink: 0; }
+      .ld-pct { font-size: 64px; font-weight: 600; line-height: 0.8; font-variant-numeric: tabular-nums; }
+      .ld-pct small { font-size: 26px; margin-left: 2px; color: #f2c56b; }
+      #loading-message {
+        margin: 6px 0 0; font-size: 17px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(244, 234, 216, 0.7);
+      }
+      .loading-track {
+        position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255, 255, 255, 0.08);
+      }
+      #loading-bar {
+        height: 100%; width: 100%; transform: scaleX(0); transform-origin: left;
+        background: linear-gradient(90deg, #c9772f, #f2c56b 70%, #fff2c9);
+        box-shadow: 0 0 14px rgba(242, 197, 107, 0.75);
+        transition: transform 0.35s ease;
+        position: relative; overflow: hidden;
+      }
+      #loading-bar::after {
+        content: ""; position: absolute; inset: 0; width: 30%;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.7), transparent);
+        animation: ld-shine 1.6s ease-in-out infinite;
+      }
+      @keyframes ld-shine { from { transform: translateX(-120%); } to { transform: translateX(420%); } }
+      .ld-spin {
+        display: inline-block; width: 14px; height: 14px; margin-right: 10px; vertical-align: -1px;
+        border: 2px solid rgba(242, 197, 107, 0.25); border-top-color: #f2c56b; border-radius: 50%;
+        animation: ld-spin 0.8s linear infinite;
+      }
+      @keyframes ld-spin { to { transform: rotate(360deg); } }
+      /* Phones: smaller type, the tip above the status */
+      @media (max-width: 760px), (max-height: 480px) {
+        .ld-brand { top: max(14px, env(safe-area-inset-top)); left: max(18px, env(safe-area-inset-left)); }
+        .ld-title { font-size: clamp(30px, 7vw, 46px); }
+        .ld-eyebrow { font-size: 12px; }
+        .ld-modes { font-size: 13px; margin-top: 6px; }
+        .ld-bottom { padding: 0 max(18px, env(safe-area-inset-right)) max(16px, calc(env(safe-area-inset-bottom) + 10px)) max(18px, env(safe-area-inset-left)); gap: 14px; }
+        .ld-tip { max-width: 60vw; padding: 8px 12px; }
+        .ld-tip-text { font-size: 12.5px; }
+        .ld-pct { font-size: 44px; }
+        .ld-pct small { font-size: 18px; }
+        #loading-message { font-size: 13px; }
+      }
+      @media (prefers-reduced-motion: reduce) { .ld-art, .ld-mist, #loading-bar::after { animation: none; } }
+    </style>
   </head>
   <body>
     <!-- Loading screen — sits on top of everything until assets are ready -->
     <div id="loading-screen">
-      <div class="loading-content">
-        <h1 class="loading-title">SURVIVE THE HORDE</h1>
-        <div class="loading-spinner"></div>
-        <p id="loading-message">Loading world…</p>
-        <div class="loading-track"><div id="loading-bar"></div></div>
+      <div class="ld-art"></div>
+      <div class="ld-mist"></div>
+      <div class="ld-shade"></div>
+      <div class="ld-brand">
+        <div class="ld-eyebrow">MSBECL · India</div>
+        <h1 class="ld-title">Survive<br />the Horde</h1>
+        <div class="ld-modes">Solo <b>/</b> Co-op <b>/</b> Battle Royale</div>
       </div>
+      <div class="ld-bottom">
+        <div class="ld-tip">
+          <div class="ld-tip-label">TIP</div>
+          <div class="ld-tip-text" id="ld-tip">Step inside a house or the panchayat office and the camera switches to first person.</div>
+        </div>
+        <div class="ld-status">
+          <div class="ld-pct"><span id="loading-pct">0</span><small>%</small></div>
+          <p id="loading-message"><span class="ld-spin"></span>Connecting…</p>
+        </div>
+      </div>
+      <div class="loading-track"><div id="loading-bar"></div></div>
     </div>
+    <script>
+      // Before the game's scripts: show the art once it's decoded, and rotate the tips
+      (function () {
+        var art = document.querySelector("#loading-screen .ld-art");
+        var img = new Image();
+        img.onload = function () { art.classList.add("ready"); };
+        img.src = innerWidth >= 1000 ? "/loading/town-hd.webp" : "/loading/town-960.webp";
+        var tips = [
+          "Step inside a house or the panchayat office and the camera switches to first person.",
+          "Press F to open doors, and to swing the college gate shut behind you.",
+          "Crouch (C) or go prone (Z): you're harder to see, harder to hear and harder to hit.",
+          "A Parle-G heals 20. Press H to eat one, or use a medkit when you're badly hurt.",
+          "Rupees buy guns, armour and petrol at any dukaan. Press B at the counter.",
+          "Hellhounds hunt by scent and come as a pack. Find a door you can close.",
+          "Thar or auto-rickshaw: V to get in. A petrol can (T) tops up the tank.",
+          "Loot lies on the ground with a white outline. Walk over ammo and medkits to grab them.",
+          "Battle Royale: stay inside the blue zone, and watch the map for red fight zones."
+        ];
+        var el = document.getElementById("ld-tip"), i = 0;
+        window.__ldTips = setInterval(function () {
+          el.classList.add("out");
+          setTimeout(function () { i = (i + 1) % tips.length; el.textContent = tips[i]; el.classList.remove("out"); }, 400);
+        }, 5200);
+      })();
+    </script>
 
     <!-- Screen-space mood: vignette (deeper at night), film grain, low-health pulse, hit flash -->
     <div id="vignette"></div>

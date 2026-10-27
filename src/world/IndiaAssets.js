@@ -26,18 +26,11 @@ export const CREDITS = [
   ["Indian 2000 rupees notes", "varun pal"],
 ];
 
-/** True if the dev server / host has a real model at url (Vite answers a missing file with index.html). */
-async function exists(url) {
-  try {
-    const r = await fetch(url, { method: "HEAD" });
-    return r.ok && !(r.headers.get("content-type") ?? "").includes("text/html");
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Loads every model that's there: { key: THREE.Group | null }.
+ * Loads every model that's there: { key: THREE.Group | null }. The optimized
+ * copy is fetched straight away (no HEAD request first: on a phone every
+ * round trip is 100+ ms); if it's missing, the original; if that's missing too
+ * (the dev server answers with index.html, which won't parse), null.
  * gltfLoader: a GLTFLoader with the meshopt decoder set.
  */
 export async function loadIndiaModels(gltfLoader) {
@@ -45,12 +38,10 @@ export async function loadIndiaModels(gltfLoader) {
   await Promise.all(Object.entries(INDIA_MODELS).map(async ([key, url]) => {
     out[key] = null;
     const opt = url.replace(/\.glb$/, ".opt.glb");
-    const use = (await exists(opt)) ? opt : (await exists(url)) ? url : null;
-    if (!use) return;
     try {
-      out[key] = (await gltfLoader.loadAsync(use)).scene;
-    } catch (err) {
-      console.warn(`India model ${key}:`, err);
+      out[key] = (await gltfLoader.loadAsync(opt)).scene;
+    } catch {
+      try { out[key] = (await gltfLoader.loadAsync(url)).scene; } catch { /* not there: left out */ }
     }
   }));
   return out;

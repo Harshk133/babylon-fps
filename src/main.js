@@ -30,7 +30,7 @@ import { Roads, ROAD_HALF } from "./world/Roads.js";
 import { ROAD_DEFS, layoutTowns } from "./world/Towns.js";
 import { Backdrop } from "./world/Backdrop.js";
 import { Grass, GRASS_FLATTENERS } from "./world/Grass.js";
-import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves } from "./world/Caves.js";
+import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves, adoptCavesData } from "./world/Caves.js";
 import { scatterRocks } from "./world/Rocks.js";
 import { COLLEGE_GATE, placeCollegeGate } from "./world/CollegeGate.js";
 import { loadIndiaModels } from "./world/IndiaAssets.js";
@@ -77,6 +77,21 @@ import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
 import { STANCES, setCapsuleStance } from "./player/Stance.js";
 import { PerfOverlay, PERF_ENABLED, BENCH_ENABLED } from "./debug/PerfOverlay.js";
 import { StaticGridBroadphase } from "./physics/StaticGridBroadphase.js";
+
+// The caves' heavy lifting (rock field, mesh, torches, baked light) runs on a
+// worker from the very start, in parallel with every download; if workers
+// aren't available it's done on this thread in loadWorld() instead.
+const cavesPrecomputed = new Promise(resolve => {
+  let worker;
+  try {
+    worker = new Worker(new URL("./world/cavesWorker.js", import.meta.url), { type: "module" });
+  } catch {
+    resolve();
+    return;
+  }
+  worker.onmessage = e => { adoptCavesData(e.data.nets); worker.terminate(); resolve(); };
+  worker.onerror = () => { worker.terminate(); resolve(); };
+});
 import { GROUP_WORLD, GROUP_PLAYER, GROUP_ZOMBIE } from "./physicsGroups.js";
 
 // ─── Game mode ────────────────────────────────────────────────────────────────
@@ -630,9 +645,9 @@ effects.groundAt = (x, z) => groundHeight(x, z) + (roads && roads.distance(x, z)
 const screenBlood = new ScreenBlood();             // aqua drops on the screen when you're hit
 const _bleedAt = new THREE.Vector3();
 // HRTF 3D audio on desktop (headphones hear left / right / behind); phones pan cheaper.
-// The samples start downloading now, alongside the models.
+// The samples download once the models are in (loadWorld), so they don't
+// share a phone's bandwidth with what the loading screen is waiting for.
 const sfx = new Sfx({ hrtf: !IS_TOUCH });
-sfx.preload();
 
 // ─── Physics World ────────────────────────────────────────────────────────────
 const world = new CANNON.World();
@@ -3364,6 +3379,8 @@ async function loadCharacter() {
 // One GLTF loader for everything, with meshopt decoding for the optimized assets
 const gltfLoader = new GLTFLoader();
 gltfLoader.setMeshoptDecoder(MeshoptDecoder);
+// Decompress meshes on worker threads: the main thread stays free to parse the next file
+try { MeshoptDecoder.useWorkers(Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1))); } catch { /* single-threaded decode */ }
 
 /**
  * Loads "<name>.opt.glb" (written by `npm run optimize-assets`) when present,
@@ -3385,8 +3402,10 @@ async function loadWorld() {
 
   // Fetch and parse everything at once instead of one model after another
   // (the dragon and the hellhound are monsters now: MonsterPool loads them)
+  const indiaDownload = loadIndiaModels(gltfLoader);
   const downloads = Promise.all([
-    settle(loadGLB("/models/autorickshaw_3d_model_free.glb")),
+    // The old free rickshaw is only the fallback for the Indian one: fetched only when that's missing
+    indiaDownload.then(m => (m.rickshaw ? null : settle(loadGLB("/models/autorickshaw_3d_model_free.glb")))),
     settle(vrmlLoader.loadAsync("/models/house.wrl")),
     // ?v=: bump when the kit changes (/models is cached for a day, a stale kit would miss pieces)
     gltfLoader.loadAsync("/models/house/house-kit.glb?v=2"),
@@ -3396,14 +3415,14 @@ async function loadWorld() {
     settle(gltfLoader.loadAsync("/trees/old_tree_with_vine_3d_model_free.lod1.glb")),
     settle(gltfLoader.loadAsync("/trees/dreftwood tree.lod1.glb")),
     settle(loadGLB("/models/msbecl_gate_final.glb")),
-    loadIndiaModels(gltfLoader),
+    indiaDownload,
   ]);
-  // The caves' heavy lifting (rock field, mesh, torches, baked light) needs no
-  // terrain: do it while the models above are still downloading
-  await new Promise(r => setTimeout(r, 0));
+  // The caves' rock: from the worker (started at boot), or here if it couldn't run
+  await cavesPrecomputed;
   precomputeCaves();
   const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf, treeALod, treeBLod, gateGltf, india] = await downloads;
   loadMark("world downloaded");
+  sfx.preload();
   indiaModels = india;
   // The real Parle-G pack and ₹2000 notes replace the procedural ones (before any pickup is built)
   if (india.biscuit) setItemModel("biscuit", india.biscuit, 0.22);
@@ -5486,13 +5505,29 @@ window.addEventListener("resize", () => {
 const loadingScreen = document.getElementById("loading-screen");
 const loadingMsg    = document.getElementById("loading-message");
 
-function setLoadMsg(text) { if (loadingMsg) loadingMsg.textContent = text; }
+// The status line keeps its spinner; only the text after it changes
+const loadingMsgText = loadingMsg?.lastChild?.nodeType === Node.TEXT_NODE
+  ? loadingMsg.lastChild
+  : (loadingMsg ?? document.createElement("p")).appendChild(document.createTextNode(""));
+function setLoadMsg(text) { loadingMsgText.data = text; }
 
-// Progress counts files across every loader (GLTF, MD2, textures, VRML)
+// One bar for the whole load: downloads fill most of it, then building the
+// world and warming up the GPU (loadMark moves it on). It never goes back,
+// although the file total grows as loaders discover more files.
 const loadingBarEl = document.getElementById("loading-bar");
+const loadingPctEl = document.getElementById("loading-pct");
+const DOWNLOAD_SHARE = 72;
+let loadShown = 0;
+function setLoadProgress(pct) {
+  pct = Math.min(100, pct);
+  if (pct <= loadShown) return;
+  loadShown = pct;
+  if (loadingBarEl) loadingBarEl.style.transform = `scaleX(${pct / 100})`;
+  if (loadingPctEl) loadingPctEl.textContent = String(Math.floor(pct));
+}
 THREE.DefaultLoadingManager.onProgress = (_url, loaded, total) => {
-  if (loadingBarEl) loadingBarEl.style.transform = `scaleX(${Math.min(1, loaded / Math.max(1, total))})`;
-  setLoadMsg(`Loading assets… ${loaded} / ${total}`);
+  setLoadProgress(DOWNLOAD_SHARE * loaded / Math.max(1, total));
+  if (loadShown < DOWNLOAD_SHARE) setLoadMsg("Downloading the world");
 };
 
 /**
@@ -5509,13 +5544,17 @@ async function warmUpGpu() {
     for (const m of o.material ? [].concat(o.material) : []) if (m.transparent && m.side === THREE.DoubleSide) m.forceSinglePass = true;
   });
   fireFX.setWarmup(true);
-  const compile = async () => {
+  // target: the whole scene, or one object compiled against the scene's lights
+  // (a full pass walks ~1000 objects and every material's parameters: on a
+  // phone that's most of a second each, and the monster variants need 16)
+  const compile = async (target = scene) => {
     // Into the same target the game draws to: tone mapping and colour space
     // are part of each program, so the screen's variants would be the wrong ones
     postFx.begin();
-    if (renderer.compileAsync) await renderer.compileAsync(scene, camera);
-    else renderer.compile(scene, camera);
-    renderer.compile(backdrop.scene, backdrop.camera);
+    const lightsFrom = target === scene ? null : scene;
+    if (renderer.compileAsync) await renderer.compileAsync(target, camera, lightsFrom);
+    else renderer.compile(target, camera, lightsFrom);
+    if (target === scene) renderer.compile(backdrop.scene, backdrop.camera);
     renderer.setRenderTarget(null);
   };
   await compile();
@@ -5526,7 +5565,7 @@ async function warmUpGpu() {
     if (!m) continue;
     for (const mat of [t.skinMats[0].hit, t.skinMats[0].burn]) {
       m.mesh.material = mat;
-      await compile();
+      await compile(m.root);
     }
     m.mesh.material = t.skinMats[0].base;
   }
@@ -5568,9 +5607,37 @@ async function warmUpGpu() {
   fireFX.setWarmup(false);
 }
 
-// Load timeline (?perf=1 prints it): ms since the page started, per phase
+/**
+ * Production builds keep their files on the device (public/sw.js), so the
+ * second visit loads from storage. The files this visit downloaded are handed
+ * to it straight away. Not in dev (Vite's live reload) or the Android app
+ * (its files are already local).
+ */
+function registerOfflineCache() {
+  if (!import.meta.env.PROD || !("serviceWorker" in navigator) || window.Capacitor || !window.isSecureContext) return;
+  navigator.serviceWorker.register("/sw.js").then(() => navigator.serviceWorker.ready).then(reg => {
+    const urls = performance.getEntriesByType("resource").map(e => e.name);
+    reg.active?.postMessage({ type: "warm", urls });
+  }).catch(() => { /* no offline cache: the HTTP cache still applies */ });
+}
+
+// Load timeline (?perf=1 prints it): ms since the page started, per phase.
+// Each phase also moves the loading bar on and says what comes next.
 const _loadMarks = [];
-function loadMark(name) { _loadMarks.push([name, Math.round(performance.now())]); }
+const LOAD_STAGES = {
+  "boot": [1, "Downloading the world"],
+  "world downloaded": [DOWNLOAD_SHARE + 2, "Building towns, roads and caves"],
+  "world built": [84, "Preparing shaders"],
+  "warm-up: scene programs": [93, "Warming up the GPU"],
+  "warm-up: monster variants": [96, "Almost there"],
+  "warm-up: first frame (shadows, uploads)": [99, "Almost there"],
+  "ready": [100, "Ready"],
+};
+function loadMark(name) {
+  _loadMarks.push([name, Math.round(performance.now())]);
+  const stage = LOAD_STAGES[name];
+  if (stage) { setLoadProgress(stage[0]); setLoadMsg(stage[1]); }
+}
 
 async function boot() {
   try {
@@ -5648,7 +5715,6 @@ async function boot() {
     };
     spawnWorldLoot();
 
-    setLoadMsg("Preparing shaders…");
     updateThirdPersonCamera(1 / 60);
     await warmUpGpu();
 
@@ -5671,7 +5737,9 @@ async function boot() {
     else lobby.show();
     // The inventory screen's 3D character loads in the background
     lootScreen.initPreview(gltfLoader);
+    clearInterval(window.__ldTips);
     loadingScreen.classList.add("hidden");
+    setTimeout(registerOfflineCache, 2500);
     loadingScreen.addEventListener("transitionend", () => loadingScreen.remove(), { once: true });
   } catch (err) {
     console.error("Boot failure:", err);

@@ -667,6 +667,35 @@ export function precomputeCaves() {
   for (const net of NETS) meshNet(net);
 }
 
+/**
+ * precomputeCaves() for a worker (world/cavesWorker.js): the results as plain
+ * data, with the typed arrays to transfer rather than copy.
+ */
+export function precomputeCavesData() {
+  precomputeCaves();
+  const transfer = new Set();
+  const nets = NETS.map(net => {
+    const m = net.mesh;
+    const mesh = { ...m, tris: Uint32Array.from(m.tris) };
+    for (const k of ["P", "col", "sky", "torch", "tris"]) transfer.add(mesh[k].buffer);
+    const v = t => [t.x, t.y, t.z];
+    return { mesh, torches: net.torches.map(t => ({ mount: v(t.mount), dir: v(t.dir), flame: v(t.flame), seed: t.seed })) };
+  });
+  return { nets, transfer: [...transfer] };
+}
+
+/** Takes what precomputeCavesData() made in a worker, as if precomputeCaves() had run here. */
+export function adoptCavesData(nets) {
+  if (_precomputed || nets.length !== NETS.length) return;
+  _precomputed = true;
+  nets.forEach((d, i) => {
+    const net = NETS[i];
+    net.mesh = d.mesh;
+    const v = a => new THREE.Vector3(a[0], a[1], a[2]);
+    net.torches = d.torches.map(t => ({ mount: v(t.mount), dir: v(t.dir), flame: v(t.flame), seed: t.seed, net }));
+  });
+}
+
 // ── The caves ────────────────────────────────────────────────────────────────
 export class Caves {
   /**
