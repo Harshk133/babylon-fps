@@ -946,12 +946,13 @@ export class Houses {
   warmup(on) {
     if (!this._finalized) this.finalize();
     const all = [...Object.values(this.types).flatMap(T => [...T.shellMeshes, ...T.interiorMeshes]), ...this.doorMeshes, this.bulbMesh, this.leverMesh];
-    for (const im of all) im.count = on ? im.instanceMatrix.count : 0;
+    for (const im of all) { im.count = on ? im.instanceMatrix.count : 0; im.visible = on; }
     this._shownSig = 0;
   }
 
   _commit(im, count) {
     im.count = count;
+    im.visible = count > 0;   // three.js issues a draw call even for zero instances
     im.instanceMatrix.needsUpdate = true;
     if (im.instanceColor) im.instanceColor.needsUpdate = true;
   }

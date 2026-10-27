@@ -26,7 +26,7 @@ import { Weather } from "./world/Weather.js";
 import { Atmosphere } from "./world/Atmosphere.js";
 import { plantDeadForest } from "./world/Forest.js";
 import { buildTerrain, groundHeight, flatHeight, rawHeight, PLAY_RADIUS } from "./world/Terrain.js";
-import { Roads } from "./world/Roads.js";
+import { Roads, ROAD_HALF } from "./world/Roads.js";
 import { ROAD_DEFS, layoutTowns } from "./world/Towns.js";
 import { Backdrop } from "./world/Backdrop.js";
 import { Grass, GRASS_FLATTENERS } from "./world/Grass.js";
@@ -61,8 +61,8 @@ import { LootScreen } from "./ui/LootScreen.js";
 import { Inventory } from "./inventory/Inventory.js";
 import { InventoryUI } from "./inventory/InventoryUI.js";
 import { Pickups } from "./pickups/Pickups.js";
-import { renderItemIcon, setItemModel } from "./items/ItemModels.js";
-import { applyStaticIcons, useGameItemIcons } from "./ui/applyIcons.js";
+import { renderItemIcon, setItemModel, cloneItem } from "./items/ItemModels.js";
+import { applyStaticIcons, gameItemIcon } from "./ui/applyIcons.js";
 import { icon } from "./ui/gameIcons.js";
 import { SHOP_ITEMS, ShopUI, fmtRupees } from "./economy/Shop.js";
 import { shopSpots, buildShops, SHOP_RANGE } from "./world/Shops.js";
@@ -70,11 +70,13 @@ import { WeaponWheel } from "./ui/WeaponWheel.js";
 import { KillStreak } from "./ui/KillStreak.js";
 import { PostFX } from "./render/PostFX.js";
 import { Confetti } from "./ui/Confetti.js";
+import { ScreenBlood } from "./ui/ScreenBlood.js";
 import { Progress } from "./meta/Progress.js";
 import { ProgressUI } from "./ui/ProgressUI.js";
 import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
 import { STANCES, setCapsuleStance } from "./player/Stance.js";
 import { PerfOverlay, PERF_ENABLED, BENCH_ENABLED } from "./debug/PerfOverlay.js";
+import { StaticGridBroadphase } from "./physics/StaticGridBroadphase.js";
 import { GROUP_WORLD, GROUP_PLAYER, GROUP_ZOMBIE } from "./physicsGroups.js";
 
 // ─── Game mode ────────────────────────────────────────────────────────────────
@@ -228,6 +230,20 @@ function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX =
   }
   sfx.hurt();
   postFx.hurt(Math.min(1, amount / 30));
+  // Aqua blood: a spray off the body (away from whoever hit you) and drops on the screen
+  if (amount > 0.5) {
+    const p = characterBody.position;
+    _bleedAt.set(p.x, p.y + (kind === "head" ? 0.6 : 0.2), p.z);
+    const away = srcX !== null;
+    effects.bleed(_bleedAt, away ? p.x - srcX : Math.random() - 0.5, away ? p.z - srcZ : Math.random() - 0.5, Math.min(22, 6 + amount * 0.5));
+    let screenAngle = null;
+    if (away) {
+      const dx = srcX - p.x, dz = srcZ - p.z;
+      screenAngle = Math.atan2(dx * -Math.cos(aimYaw) + dz * Math.sin(aimYaw), dx * Math.sin(aimYaw) + dz * Math.cos(aimYaw));
+    }
+    screenBlood.hit(Math.min(1, amount / 35), screenAngle);
+    playerAnim.hurt(amount);
+  }
   timeSinceHit = 0;
   damageFlash  = Math.min(1, damageFlash + Math.max(0.25, shake * 1.5));
   cameraTrauma = Math.min(1, cameraTrauma + shake);
@@ -538,24 +554,32 @@ const canvas = document.getElementById("webgl");
 // With post-processing on, the MSAA lives on PostFX's scene target instead
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: QUALITY.antialias && QUALITY.post === "off", powerPreference: "high-performance" });
 renderer.setSize(window.innerWidth, window.innerHeight);
+// Asking the driver whether each program linked waits for it to finish compiling,
+// one program at a time; in a release build that stall is pure loading time
+renderer.debug.checkShaderErrors = import.meta.env.DEV;
 
 // ─── Dynamic resolution ───────────────────────────────────────────────────────
 // Drops the render scale when frames run long and creeps back up when there's
 // headroom, so a heavy moment (big horde, explosions) costs sharpness, not FPS.
 const MAX_PIXEL_RATIO = Math.min(window.devicePixelRatio, QUALITY.pixelRatioMax);
 const MIN_PIXEL_RATIO = Math.min(QUALITY.pixelRatioMin, MAX_PIXEL_RATIO);
-const perf = { ratio: MAX_PIXEL_RATIO, avg: 16.7, logic: 8, slow: 0, fast: 0 };
+const perf = { ratio: MAX_PIXEL_RATIO, avg: 16.7, logic: 8, slow: 0, fast: 0, upWait: 3000, raisedAt: -1e9 };
 renderer.setPixelRatio(perf.ratio);
 
 /**
- * frameMs: time since the last frame. logicMs: JavaScript spent on the game
- * (physics, AI, animation) before drawing. When that alone eats most of the
- * frame, the CPU is the limit (typical on phones) and a lower resolution would
- * only blur the picture without making it any faster, so it stays sharp.
+ * frameMs: time since the last frame. cpuMs: JavaScript spent on the frame,
+ * game logic (physics, AI, animation) and issuing the draw calls. When that
+ * eats most of the frame, the CPU is the limit (typical on phones, and on
+ * integrated GPUs with many draw calls) and a lower resolution would only blur
+ * the picture without making it any faster, so it stays sharp.
+ *
+ * Every change reallocates the canvas and the post-processing targets (a
+ * hitch), so it backs off: a raise that gets taken back within 8 s doubles
+ * the wait before the next try (up to a minute).
  */
-function updateDynamicResolution(frameMs, logicMs) {
+function updateDynamicResolution(frameMs, cpuMs) {
   perf.avg += (Math.min(frameMs, 100) - perf.avg) * 0.05;
-  perf.logic += (Math.min(logicMs, 100) - perf.logic) * 0.05;
+  perf.logic += (Math.min(cpuMs, 100) - perf.logic) * 0.05;
   const cpuBound = perf.logic > perf.avg * 0.6;
   // Frame budget: 60 FPS, or 30 when a phone is capped there (a capped frame isn't a slow one)
   const budget = 1000 / frameCap();
@@ -565,8 +589,14 @@ function updateDynamicResolution(frameMs, logicMs) {
   else { perf.slow = 0; perf.fast = 0; }
 
   let next = perf.ratio;
-  if (perf.slow > 600) next = Math.max(MIN_PIXEL_RATIO, perf.ratio - 0.1);
-  else if (perf.fast > 3000) next = Math.min(MAX_PIXEL_RATIO, perf.ratio + 0.05);
+  const now = performance.now();
+  if (perf.slow > 600) {
+    next = Math.max(MIN_PIXEL_RATIO, perf.ratio - 0.1);
+    if (next !== perf.ratio && now - perf.raisedAt < 8000) perf.upWait = Math.min(60000, perf.upWait * 2);
+  } else if (perf.fast > perf.upWait) {
+    next = Math.min(MAX_PIXEL_RATIO, perf.ratio + 0.05);
+    if (next !== perf.ratio) perf.raisedAt = now;
+  }
   if (next !== perf.ratio) {
     perf.ratio = next;
     perf.slow = 0;
@@ -595,6 +625,10 @@ function syncPostSize() {
 }
 
 const effects = new Effects(scene);
+// Blood drops land on the terrain, or on the asphalt (drawn up to 10 cm over the levelled ground)
+effects.groundAt = (x, z) => groundHeight(x, z) + (roads && roads.distance(x, z) < ROAD_HALF ? 0.11 : 0);
+const screenBlood = new ScreenBlood();             // aqua drops on the screen when you're hit
+const _bleedAt = new THREE.Vector3();
 // HRTF 3D audio on desktop (headphones hear left / right / behind); phones pan cheaper.
 // The samples start downloading now, alongside the models.
 const sfx = new Sfx({ hrtf: !IS_TOUCH });
@@ -603,10 +637,11 @@ sfx.preload();
 // ─── Physics World ────────────────────────────────────────────────────────────
 const world = new CANNON.World();
 world.gravity.set(0, -20, 0); // Earth gravity
-world.broadphase = new CANNON.SAPBroadphase(world);
-// Pairs are confirmed by bounding boxes, not bounding spheres: long walls,
-// roads and flat static bodies have spheres far bigger than they are
-world.broadphase.useBoundingBoxes = true;
+// Static bodies in a grid, built once; only moving bodies are swept each step
+// (physics/StaticGridBroadphase.js). Pairs are confirmed by bounding boxes, not
+// bounding spheres: long walls, roads and flat static bodies have spheres far
+// bigger than they are.
+world.broadphase = new StaticGridBroadphase(world);
 world.allowSleep = true;
 world.solver.iterations = 8;
 world.solver.tolerance = 0.0001;
@@ -668,6 +703,7 @@ function freezeStatic(root) {
 const mapObstacles = [];
 const navObstacles = [];
 let caves = null;          // world/Caves.js, built in loadWorld()
+let indiaBuildings = null; // world/IndiaProps.js: the panchayat offices and town buildings you can walk into
 let caveMapShapes = [];
 /** What you'd stand on from above: the ground, or the top of a cave hill. */
 function surfaceHeight(x, z) {
@@ -991,7 +1027,7 @@ function setKey(code, pressed, repeat) {
       case "KeyQ": cycleThrowable(); break;
       case "KeyH": useHeal(); break;
       case "KeyB": if (nearShop) setShopOpen(!shopUI.open); break;
-      case "KeyF": if (nearDoor) useDoor(!nearDoor.doorOpen); break;
+      case "KeyF": if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); break;
       case "KeyC": toggleStance("crouch"); break;
       case "KeyZ": toggleStance("prone"); break;
       case "KeyL": useLightSwitch(); break;
@@ -1311,6 +1347,7 @@ function startClimb() {
   climb.dirZ = s.nz;
   climb.active = true;
   climb.t = 0;
+  playerAnim.gesture(climb.kind === "wall" ? "climb" : "vault", climb.dur);
   climb.wait = 0;
   climb.offer = "";
   if (stance !== "stand") setStance("stand", true);
@@ -1358,8 +1395,29 @@ function cancelClimb() {
   characterBody.collisionResponse = true;
 }
 
+// Animations beyond the clips the soldier walks and aims with (Soldier.playClip / playGesture).
+// Teammates see them too: each one goes out as an "anim" message.
+let airPose = 0;                 // eased 0..1: knees tucked in the air
+const playerAnim = {
+  clip(name, dur, weight = 1) {
+    soldier.playClip(name, dur, weight);
+    net.send({ t: "anim", c: name, d: dur, w: weight });
+  },
+  gesture(name, dur) {
+    soldier.playGesture(name, dur);
+    net.send({ t: "anim", g: name, d: +dur.toFixed(2) });
+  },
+  /** Flinch when hit: harder hits, the bigger reaction. */
+  hurt(amount) {
+    if (playerHealth <= 0 || soldier.gesture?.name === "vault" || soldier.gesture?.name === "climb") return;
+    this.clip(amount > 18 ? "hit2" : "hit", amount > 18 ? 0.7 : 0.5, 0.4);
+  },
+};
+
 function updateSoldier(delta) {
   characterRoot.updateMatrixWorld(true);
+  const inAir = !onGround && !climb.active && !drive.on && !brAirborne() && Math.abs(characterBody.velocity.y) > 1.2;
+  airPose += ((inAir ? 1 : 0) - airPose) * (1 - Math.exp(-10 * delta));
   const vx = characterBody.velocity.x - knockbackVel.x;
   const vz = characterBody.velocity.z - knockbackVel.z;
   const sy = Math.sin(bodyYaw), cy = Math.cos(bodyYaw);
@@ -1373,6 +1431,8 @@ function updateSoldier(delta) {
     firing: timeSinceShot < 0.12,
     aimYawOffset: angleDiff(aimYaw + recoilYaw, bodyYaw),
     aimPitch: aimPitch + recoilPitch,
+    health: playerHealth / MAX_HEALTH,
+    air: airPose,
   });
 }
 
@@ -1503,7 +1563,7 @@ function updateMood(delta) {
   // Underground: how far from daylight the camera is (0 outside … 1 deep in a cave), eased
   const deep = caves ? caves.depthAt(camera.position.x, camera.position.y, camera.position.z) : 0;
   caveDepth += (deep - caveDepth) * (1 - Math.exp(-3 * delta));
-  indoor = !!houses?.houseAt(camera.position.x, camera.position.z) || deep > 0.05;
+  indoor = !!houses?.houseAt(camera.position.x, camera.position.z) || !!indiaBuildings?.inside(camera.position.x, camera.position.z) || deep > 0.05;
   env.update(delta, camera, weather);
   if (caveDepth > 0.001) dimUnderground(caveDepth);
   caves?.update(delta, camera.position, renderer.domElement.height);
@@ -1582,7 +1642,8 @@ function updateThirdPersonCamera(delta) {
   blendAirRig(isBR() ? br.flight : PHASE_GROUND, delta, drive.on);
   // Inside a house the camera moves into your head; outside it's the shoulder camera again
   const inside = alive && !drive.on && !climb.active && !brAirborne()
-    && !!houses?.houseAt(characterBody.position.x, characterBody.position.z);
+    && (!!houses?.houseAt(characterBody.position.x, characterBody.position.z)
+      || !!indiaBuildings?.inside(characterBody.position.x, characterBody.position.z));
   fpBlend += ((inside ? 1 : 0) - fpBlend) * (1 - Math.exp(-8 * delta));
   if (!inside && fpBlend < 0.01) fpBlend = 0;
   soldier.setFirstPerson(fpBlend > 0.5);
@@ -1699,6 +1760,7 @@ function startReload() {
   const def = currentDef();
   weapon.reloading = true;
   weapon.reloadTimer = def.reloadTime;
+  playerAnim.gesture("reload", def.reloadTime);
   sfx.reload(def.reloadTime, def.sound);
 }
 
@@ -1714,6 +1776,7 @@ function onWeaponChanged(withSound = true) {
   cameraRig.aim.fov = def ? (def.scope ? Math.max(def.aimFov, SCOPE_AIM_FOV) : def.aimFov) : 50;
   cameraRig.scope.fov = def?.scope ? def.aimFov : cameraRig.aim.fov;
   weapon.reloading = false;
+  soldier.stopGesture("reload");
   weapon.bloom = 0;
   weapon.cooldown = 0;
   weapon.switchTimer = withSound ? SWITCH_TIME : 0;
@@ -1782,6 +1845,7 @@ function updateWeapon(delta) {
 }
 
 const shotPoints = [];
+const CLOSE_SPLASH = 4.5;   // m: hits this close spatter your screen
 const pvpDamage = new Map(); // player id → damage from this shot
 const pvpHead = new Map();
 
@@ -1846,6 +1910,7 @@ function fireShot(def) {
       pvpDamage.set(victim.id, (pvpDamage.get(victim.id) ?? 0) + dmg);
       if (head) pvpHead.set(victim.id, true);
       effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", head ? 18 : def.pellets > 1 ? 4 : 9);
+      if (i === 0 && _hitPoint.distanceToSquared(camera.position) < CLOSE_SPLASH * CLOSE_SPLASH) screenBlood.splash(0.4);
       anyHit = true;
       anyHead ||= head;
     } else if (zombie && zombieManager) {
@@ -1855,6 +1920,7 @@ function fireShot(def) {
       const killed = hitMonster(zombie, damage, _shotDir.x * def.push, _shotDir.z * def.push);
       const blood = def.pellets > 1 ? 4 : headshot ? 22 : 10;
       effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", blood);
+      if (i === 0 && _hitPoint.distanceToSquared(camera.position) < CLOSE_SPLASH * CLOSE_SPLASH) screenBlood.splash(headshot ? 0.6 : 0.35);
       anyHit = true;
       anyHead ||= headshot;
       anyKill ||= killed;
@@ -2096,6 +2162,12 @@ function useHeal(kind = null) {
   if (!ok) { inventoryUI.feed(kind === "medkit" ? "No medkits" : "No Parle-G left", "info", kind); return; }
   const heal = kind === "medkit" ? MEDKIT.heal : BISCUIT.heal;
   playerHealth = Math.min(MAX_HEALTH, playerHealth + heal);
+  // A Parle-G goes in the mouth; a medkit gets put on
+  if (kind === "biscuit") {
+    if (!soldier.handProps.eat) soldier.setHandProp("eat", cloneItem("biscuit"));
+    playerAnim.gesture("eat", 1.5);
+  }
+  else playerAnim.clip("interact", 1.2);
   sfx.heal();
   inventoryUI.feed(`+${heal} health${kind === "biscuit" ? " · Parle-G" : ""}`, "medkit", kind);
 }
@@ -2151,6 +2223,12 @@ function updatePickups(delta) {
       promptRows[n++] = "F";
       promptRows[n++] = nearDoor.doorOpen ? "Close door" : "Open door";
     }
+    const gateHere = !nearDoor && !drive.on ? collegeGate?.interaction(characterBody.position.x, characterBody.position.z) : null;
+    nearGatePart = gateHere?.part ?? null;
+    if (gateHere) {
+      promptRows[n++] = "F";
+      promptRows[n++] = gateHere.label;
+    }
     if (nearSwitch) {
       promptRows[n++] = "L";
       promptRows[n++] = nearSwitch.lightOn ? "Turn lights off" : "Turn lights on";
@@ -2194,17 +2272,28 @@ function updatePickups(delta) {
 // ─── Doors & lights ───────────────────────────────────────────────────────────
 const promptRows = [];
 let nearDoor = null;
+let nearGatePart = null;   // "gate" | "booth": the college gate's lanes or its guard booth door
 let nearSwitch = null;
 
 function useDoor(open) {
   if (nearDoor && houses.setDoor(nearDoor, open)) {
+    playerAnim.clip("interact", 0.8);
     makeNoise(nearDoor.doorWorld.x, nearDoor.doorWorld.z, open ? 9 : 12, "door");
     net.send({ t: "door", h: houses.houses.indexOf(nearDoor), o: open });
   }
 }
 
+function useGate(part) {
+  const open = collegeGate.toggle(part);
+  playerAnim.clip("interact", 0.8);
+  sfx.doorBang({ x: collegeGate.x, y: groundHeight(collegeGate.x, collegeGate.z) + 1.5, z: collegeGate.z });
+  makeNoise(collegeGate.x, collegeGate.z, part === "gate" ? 20 : 9, "door");
+  net.send({ t: "gate", p: part, o: open });
+}
+
 function useLightSwitch() {
   if (!nearSwitch) return;
+  playerAnim.clip("interact", 0.6, 0.8);
   houses.toggleLight(nearSwitch);
   net.send({ t: "light", h: houses.houses.indexOf(nearSwitch.house), f: nearSwitch.index, on: nearSwitch.lightOn });
 }
@@ -2322,6 +2411,12 @@ function spawnWorldLoot() {
     }
   });
   for (const [kind, x, z] of STARTER_LOOT) pickups.spawn(kind, x, z, pickupData(kind));
+  // The panchayat offices and town buildings have a little something too
+  indiaBuildings?.lootSpots.forEach((sp, i) => {
+    if (lootRng() < 0.4) return;
+    const kind = HOUSE_LOOT[(i * 5 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
+    pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
+  });
   // The caves are worth the walk: something in most chambers and junctions
   caves?.lootSpots.forEach((sp, i) => {
     if (lootRng() < 0.3) return;
@@ -2360,23 +2455,23 @@ function setInventoryOpen(open) {
   }
 }
 
-// Item icons are rendered from the same 3D models once at startup
+// Item icons: the game-icons.net set wherever it has the item, else a white
+// silhouette rendered from the item's 3D model (each one is a render and a GPU
+// read-back, so only the ones the set lacks are drawn)
 const itemIcons = {};
-for (const id of WEAPON_ORDER) itemIcons[id] = renderItemIcon(renderer, id, { width: 160, height: 56 });
-itemIcons.grenade = renderItemIcon(renderer, "grenade", { width: 64, height: 64, yaw: 0.4 });
-itemIcons.molotov = renderItemIcon(renderer, "molotov", { width: 64, height: 64, yaw: 0.4 });
-itemIcons.smoke   = renderItemIcon(renderer, "smoke",   { width: 64, height: 64, yaw: 0.4 });
-itemIcons.ammo    = renderItemIcon(renderer, "ammo",    { width: 64, height: 64, yaw: 0.6, pitch: 0.35 });
-itemIcons.fuel    = renderItemIcon(renderer, "fuel",    { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
-itemIcons.medkit  = renderItemIcon(renderer, "medkit",  { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
-itemIcons.biscuit = renderItemIcon(renderer, "biscuit", { width: 64, height: 64, yaw: 0.5, pitch: 0.35 });
-itemIcons.cash    = renderItemIcon(renderer, "cash",    { width: 64, height: 64, yaw: 0.5, pitch: 0.45 });
+const itemIcon = (id, opts) => gameItemIcon(id) ?? renderItemIcon(renderer, id, opts);
+for (const id of WEAPON_ORDER) itemIcons[id] = itemIcon(id, { width: 160, height: 56 });
+itemIcons.grenade = itemIcon("grenade", { width: 64, height: 64, yaw: 0.4 });
+itemIcons.molotov = itemIcon("molotov", { width: 64, height: 64, yaw: 0.4 });
+itemIcons.smoke   = itemIcon("smoke",   { width: 64, height: 64, yaw: 0.4 });
+itemIcons.ammo    = itemIcon("ammo",    { width: 64, height: 64, yaw: 0.6, pitch: 0.35 });
+itemIcons.fuel    = itemIcon("fuel",    { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
+itemIcons.medkit  = itemIcon("medkit",  { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
+itemIcons.biscuit = itemIcon("biscuit", { width: 64, height: 64, yaw: 0.5, pitch: 0.35 });
+itemIcons.cash    = itemIcon("cash",    { width: 64, height: 64, yaw: 0.5, pitch: 0.45 });
 for (const id of [...Object.keys(GEAR), ...Object.keys(ATTACHMENTS)]) {
-  itemIcons[id] = renderItemIcon(renderer, id, { width: 64, height: 64, yaw: 0.6, pitch: 0.25 });
+  itemIcons[id] = itemIcon(id, { width: 64, height: 64, yaw: 0.6, pitch: 0.25 });
 }
-
-// The game-icons.net set wherever it has the item (the 3D silhouettes stay as the fallback)
-useGameItemIcons(itemIcons);
 applyStaticIcons();
 // Prompt rows show what the key does as an icon too (and that's all a phone shows)
 const PROMPT_ICONS = { O: "door", E: "bag", V: "steering", B: "shop", Space: "jump", L: "flashlight", T: "fuel", H: "medkit" };
@@ -2644,7 +2739,7 @@ let _wasOnGround = true, _fallSpeed = 0;
 /** What feet hit at (x, feetY, z): house floors are wood, caves stone, the rest grass. */
 function footSurface(x, feetY, z) {
   if (houses?.floorAt(x, feetY, z)) return "wood";
-  if (caves?.inside(x, z, feetY)) return "concrete";
+  if (caves?.inside(x, z, feetY) || indiaBuildings?.inside(x, z)) return "concrete";
   return "grass";
 }
 
@@ -2758,6 +2853,7 @@ function playerVisibility() {
   else if (Math.hypot(moveVelocity.x, moveVelocity.z) < 0.5) v *= 0.85;
   const floor = houses?.floorAt(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
   if (floor && !floor.lightOn) v *= 0.45;
+  if (indiaBuildings?.inside(characterBody.position.x, characterBody.position.z)) v *= 0.7;
   v *= STANCES[stance].vis;
   v *= 1 - env.darkness * (torch.level > 0.5 ? 0.1 : 0.5);
   v *= 1 - weather.rain * 0.25;
@@ -3299,7 +3395,7 @@ async function loadWorld() {
     // Far-away versions (~20% of the triangles), made by `npm run optimize-assets`
     settle(gltfLoader.loadAsync("/trees/old_tree_with_vine_3d_model_free.lod1.glb")),
     settle(gltfLoader.loadAsync("/trees/dreftwood tree.lod1.glb")),
-    settle(loadGLB("/models/college_gate.glb")),
+    settle(loadGLB("/models/msbecl_gate_final.glb")),
     loadIndiaModels(gltfLoader),
   ]);
   // The caves' heavy lifting (rock field, mesh, torches, baked light) needs no
@@ -3307,6 +3403,7 @@ async function loadWorld() {
   await new Promise(r => setTimeout(r, 0));
   precomputeCaves();
   const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf, treeALod, treeBLod, gateGltf, india] = await downloads;
+  loadMark("world downloaded");
   indiaModels = india;
   // The real Parle-G pack and ₹2000 notes replace the procedural ones (before any pickup is built)
   if (india.biscuit) setItemModel("biscuit", india.biscuit, 0.22);
@@ -3399,7 +3496,25 @@ async function loadWorld() {
     ...stalls.map(s => ({ x: s.x, z: s.z, r: 2.4 })),
     ...props,
   ];
-  const nearParked = (x, z, pad) => reserved.some(p => Math.hypot(x - p.x, z - p.z) < p.r + pad);
+  // Asked for every grass texel and tree / rock / pole candidate: a coarse grid keeps it to nearby spots
+  const RES_CELL = 8, RES_PAD = 6, resGrid = new Map();
+  const resKey = (ix, iz) => ix * 4096 + iz;
+  for (const p of reserved) {
+    const R = p.r + RES_PAD;
+    for (let ix = Math.floor((p.x - R) / RES_CELL); ix <= Math.floor((p.x + R) / RES_CELL); ix++) {
+      for (let iz = Math.floor((p.z - R) / RES_CELL); iz <= Math.floor((p.z + R) / RES_CELL); iz++) {
+        const k = resKey(ix, iz);
+        if (!resGrid.has(k)) resGrid.set(k, []);
+        resGrid.get(k).push(p);
+      }
+    }
+  }
+  const nearParked = (x, z, pad) => {
+    const list = pad <= RES_PAD ? resGrid.get(resKey(Math.floor(x / RES_CELL), Math.floor(z / RES_CELL))) : reserved;
+    if (!list) return false;
+    for (const p of list) if (Math.hypot(x - p.x, z - p.z) < p.r + pad) return true;
+    return false;
+  };
   const town = layoutTowns({
     roads, rng: makeLCG(0x7095a1), halfSize: houseHalfSize,
     blocked: (x, z, r) => caveBlocks(x, z, r),
@@ -3465,7 +3580,7 @@ async function loadWorld() {
 
   // Dukaan stalls and the Indian props (after the terrain too)
   shops = buildShops({ scene, world, material: staticMaterial, spots: stalls, groundAt: groundHeight, mapObstacles, navObstacles });
-  placeIndiaProps({
+  indiaBuildings = placeIndiaProps({
     scene, world, material: staticMaterial, spots: props, groundAt: groundHeight, mapObstacles, navObstacles,
     models: { truck: indiaModels.truck, panchayat: indiaModels.panchayat, townBuilding: indiaModels.townBuilding },
   });
@@ -3684,8 +3799,11 @@ function getTargets() {
 
 /** A monster hit a player: you take it directly, teammates get a message. */
 function onPlayerHit(target, dmg, kx, kz, shake, sx, sz) {
-  if (target.local) dealDamageToPlayer(dmg, kx, kz, shake, sx, sz, "monster");
-  else net.send({ t: "hurt", to: target.id, d: +dmg.toFixed(1), kx: +kx.toFixed(2), kz: +kz.toFixed(2), sh: shake, sx: +sx.toFixed(2), sz: +sz.toFixed(2) });
+  if (target.local) { dealDamageToPlayer(dmg, kx, kz, shake, sx, sz, "monster"); return; }
+  // A teammate bleeds where everyone here can see it
+  _bleedAt.set(target.pos.x, target.pos.y + 0.3, target.pos.z);
+  effects.bleed(_bleedAt, target.pos.x - sx, target.pos.z - sz, Math.min(18, 5 + dmg * 0.4));
+  net.send({ t: "hurt", to: target.id, d: +dmg.toFixed(1), kx: +kx.toFixed(2), kz: +kz.toFixed(2), sh: shake, sx: +sx.toFixed(2), sz: +sz.toFixed(2) });
 }
 
 /** Footsteps, gunfire, doors: the host's monsters hear everyone. */
@@ -3760,7 +3878,7 @@ net.on("joined", msg => {
   updateSquadPlayerCount();
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
-    if (net.isHost) net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState() });
+    if (net.isHost) net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state } });
     return;
   }
   if (net.isHost) {
@@ -3770,6 +3888,7 @@ net.on("joined", msg => {
       doors: houses.houses.map(h => h.doorOpen),
       lights: houses.houses.map(h => h.floors.map(f => f.lightOn)),
       veh: vehiclesState(),
+      gate: collegeGate && { ...collegeGate.state },
     });
   }
 });
@@ -3806,16 +3925,25 @@ net.on("shot", msg => {
   remotePlayers.shot(msg.from, msg);
   noteShot(msg.from, msg.f[0], msg.f[2]);
 });
+// A teammate reloading, eating, opening a door, flinching, vaulting
+net.on("anim", msg => {
+  const s = remotePlayers.players.get(msg.from)?.soldier;
+  if (!s) return;
+  if (msg.g) s.playGesture(msg.g, msg.d);
+  else if (msg.c) s.playClip(msg.c, msg.d, msg.w ?? 1);
+});
 net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz, "monster"));
 net.on("throw", msg => {
   throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.from, msg.c ?? 0, msg.f);
 });
 net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
+net.on("gate", msg => collegeGate?.setState(msg.p, msg.o));
 net.on("light", msg => {
   const f = houses.houses[msg.h]?.floors[msg.f ?? 0];
   if (f && f.lightOn !== msg.on) houses.toggleLight(f);
 });
 net.on("world", msg => {
+  if (msg.gate) for (const part of ["gate", "booth"]) collegeGate?.setState(part, msg.gate[part], true);
   msg.doors.forEach((o, i) => { if (houses.houses[i]) houses.setDoor(houses.houses[i], o); });
   // Per house: [ground, upstairs] (a plain boolean from an older client: the ground floor)
   msg.lights.forEach((ons, i) => {
@@ -4575,6 +4703,7 @@ function brSpawnLoot(seed) {
     }
   }
   for (const sp of caves?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
+  for (const sp of indiaBuildings?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
     pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`, it.y ?? null);
   });
@@ -5141,6 +5270,8 @@ function animate() {
     lastFrameAt = frameStart;
   }
   perfOverlay?.beginFrame(frameStart);
+  // Count every pass of the frame (backdrop, scene, post), not just the last one
+  if (perfOverlay) { renderer.info.autoReset = false; renderer.info.reset(); }
   if (bench.on) benchStep(frameStart);
   const rawDelta = clock.getDelta();
   const frameMs = rawDelta * 1000;
@@ -5185,6 +5316,7 @@ function animate() {
   characterRoot.position.set(characterBody.position.x, smoothY, characterBody.position.z);
 
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
+  collegeGate?.update(delta);
   houses?.cull(camera);
   if (isBR()) {
     brUpdate(delta);
@@ -5242,10 +5374,9 @@ function animate() {
   updateVehicleFx();
   updateSunShadow();
   if (QUALITY.shadowEvery > 1 && ++shadowFrame % QUALITY.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
-  const logicMs = performance.now() - frameStart;
   perfOverlay?.markRender(performance.now());
   renderFrame();
-  updateDynamicResolution(frameMs, logicMs);
+  updateDynamicResolution(frameMs, performance.now() - frameStart);
   if (perfOverlay) perfOverlay.endFrame(performance.now(), perfCounts());
 }
 
@@ -5388,6 +5519,7 @@ async function warmUpGpu() {
     renderer.setRenderTarget(null);
   };
   await compile();
+  loadMark("warm-up: scene programs");
   // Monster hit / burn materials only appear on demand: compile them on one of each type
   for (const t of Object.values(zombieManager?.pool.types ?? {})) {
     const m = zombieManager.pool.all.find(x => x.type === t.type);
@@ -5421,7 +5553,9 @@ async function warmUpGpu() {
   scene.traverse(o => { if (o.isLOD) { lods.push(o); o.autoUpdate = false; for (const l of o.levels) l.object.visible = true; } });
   renderer.shadowMap.needsUpdate = true;
   houses?.warmup(true);
+  loadMark("warm-up: monster variants");
   renderFrame(); // uploads textures + buffers, compiles shadow programs
+  loadMark("warm-up: first frame (shadows, uploads)");
   houses?.warmup(false);
   [sc.left, sc.right, sc.top, sc.bottom, sc.far] = box;
   sc.updateProjectionMatrix();
@@ -5433,6 +5567,10 @@ async function warmUpGpu() {
   for (const o of hidden) o.visible = false;
   fireFX.setWarmup(false);
 }
+
+// Load timeline (?perf=1 prints it): ms since the page started, per phase
+const _loadMarks = [];
+function loadMark(name) { _loadMarks.push([name, Math.round(performance.now())]); }
 
 async function boot() {
   try {
@@ -5452,6 +5590,7 @@ async function boot() {
     });
     zombieManager.onCrash = onMonsterCrash;
 
+    loadMark("boot");
     // Soldier, zombies and the world download + parse in parallel
     await Promise.all([
       loadCharacter(),
@@ -5459,6 +5598,7 @@ async function boot() {
       loadWorld(),
     ]);
     onWeaponChanged(false);
+    loadMark("world built");
 
     director = new LevelDirector({
       manager: zombieManager,
@@ -5492,6 +5632,9 @@ async function boot() {
     // Monsters walk around buildings, use doorways, and can't get through closed doors
     zombieManager.navigate = (zx, zz, tx, tz, out, big, zy, ty) => {
       // Through the cave tunnels when the monster or its target is in one; legs in the open use the houses' pathing
+      // In or out of a panchayat office / town building: through its doorway
+      const ib = indiaBuildings?.navigate(zx, zz, tx, tz, out, big, (ax, az, bx, bz, o) => houses.navigate(ax, az, bx, bz, o, big, zy, zy)) ?? -1;
+      if (ib >= 0) return ib;
       const r = caves.navigate(zx, zz, tx, tz, out, big, zy, ty, (ax, az, bx, bz, o) => houses.navigate(ax, az, bx, bz, o, big, zy, zy));
       return r >= 0 ? r : houses.navigate(zx, zz, tx, tz, out, big, zy, ty);
     };
@@ -5499,7 +5642,7 @@ async function boot() {
     zombieManager.flyFloor = (x, z) => surfaceHeight(x, z);
     // House floors and stairs are walkable surfaces too (monsters follow you upstairs)
     zombieManager.surfaceAt = (x, z, y, ground) => houses.surfaceAt(x, z, y, ground);
-    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4);
+    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z);
     zombieManager.onDoorBang = (x, z) => {
       sfx.doorBang({ x, y: groundHeight(x, z) + 1.2, z });
     };
@@ -5508,6 +5651,9 @@ async function boot() {
     setLoadMsg("Preparing shaders…");
     updateThirdPersonCamera(1 / 60);
     await warmUpGpu();
+
+    loadMark("ready");
+    if (PERF_ENABLED) console.info("LOAD_MARKS " + JSON.stringify(_loadMarks));
 
     clock.getDelta();
     _animRunning = true;

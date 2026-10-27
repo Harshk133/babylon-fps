@@ -50,6 +50,19 @@ const _qLean = new THREE.Quaternion();
 const _axisX = new THREE.Vector3(1, 0, 0);
 const _axisY = new THREE.Vector3(0, 1, 0);
 const _v0 = new THREE.Vector3();
+const _v1 = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
+
+/** 0 → 1 over [a, a + ramp], back to 0 over [b − ramp, b]. */
+function bump(k, a, b, ramp = 0.15) {
+  return THREE.MathUtils.smoothstep(k, a, a + ramp) * (1 - THREE.MathUtils.smoothstep(k, b - ramp, b));
+}
+
+// Upper-body clips played once over the locomotion (door, medkit, being hit)
+const ONE_SHOTS = { interact: "Interact", hit: "HitRecieve", hit2: "HitRecieve_2" };
+// Procedural gestures that put the gun down (the rest keep it up)
+const GUN_DOWN = new Set(["eat", "vault", "climb"]);
 
 /**
  * Shows or hides a gun / gear piece. A hidden one is taken off its bone (and
@@ -75,6 +88,13 @@ function findClip(animations, name) {
 function filterClip(clip, boneNames, keep) {
   const tracks = clip.tracks.filter(t => boneNames.has(t.name.split(".")[0]) === keep);
   return new THREE.AnimationClip(`${clip.name}_${keep ? "upper" : "lower"}`, clip.duration, tracks);
+}
+
+/** Turns a bone by angle about a world axis (skipped when there's nothing to do). */
+function turnBone(bone, axis, angle) {
+  if (!bone || Math.abs(angle) < 1e-4) return;
+  _qStep.setFromAxisAngle(axis, angle);
+  rotateBoneInWorld(bone, _qStep);
 }
 
 function rotateBoneInWorld(bone, worldDelta) {
@@ -113,6 +133,14 @@ export class Soldier {
     this.gearMeshes = { helmet: [], vest: [], backpack: [] }; // [level − 1] → mesh
     this.gear = { helmet: 0, vest: 0, backpack: 0 };
     this.firstPerson = false;    // the camera sits in the head: head and helmet hidden
+
+    // Extra animation: one-shot clips over the upper body, procedural gestures
+    this.clips = {};             // ONE_SHOTS key → action
+    this.oneShot = null;         // { action, t, dur, weight }
+    this.oneShotW = 0;
+    this.gesture = null;         // { name: "reload" | "eat" | "vault" | "climb", t, dur }
+    this.woundW = 0;             // eased 0 healthy … 1 badly hurt
+    this.handProps = {};         // gesture → object held in the left hand meanwhile (a Parle-G packet while eating)
   }
 
   async load(loader = new GLTFLoader()) {
@@ -144,10 +172,12 @@ export class Soldier {
     this.palm    = bone("Middle1R");
     this.legs = ["UpperLeg.L", "UpperLeg.R", "LowerLeg.L", "LowerLeg.R"].map(bone);
     this.arms = ["UpperArm.L", "UpperArm.R"].map(bone);
+    this.foreArms = ["LowerArm.L", "LowerArm.R"].map(bone);
+    this.wrists = ["Wrist.L", "Wrist.R"].map(bone);
     // Bones we rotate by hand every frame. The clips don't key some of them
     // (Abdomen, Neck), so without a reset each frame's rotation would pile onto
     // the last one: the head spun when prone. Their rest pose is restored first.
-    this._handPosed = [this.abdomen, this.chest, this.neck, ...this.arms, ...this.legs]
+    this._handPosed = [this.abdomen, this.chest, this.neck, ...this.arms, ...this.foreArms, ...this.wrists, ...this.legs]
       .filter(Boolean).map(b => [b, b.quaternion.clone()]);
 
     // Helmets, vests and backpacks are sized to this model while it's still in its rest pose
@@ -169,6 +199,13 @@ export class Soldier {
     this.aimAction   = this._makeAction(filterClip(pointClip, upperBones, true));
     this.shootAction = this._makeAction(filterClip(shootClip, upperBones, true));
     this.shootAction.timeScale = 1.6;
+    for (const [key, name] of Object.entries(ONE_SHOTS)) {
+      const clip = findClip(anims, name);
+      if (!clip) continue;   // an old soldier.opt.glb without them: the procedural layer still runs
+      const a = this._makeAction(filterClip(clip, upperBones, true));
+      a.setLoop(THREE.LoopOnce, 1);
+      this.clips[key] = a;
+    }
 
     this.deathAction = this.mixer.clipAction(findClip(anims, "Death"));
     this.deathAction.setLoop(THREE.LoopOnce, 1);
@@ -429,8 +466,55 @@ export class Soldier {
    *   aimYawOffset — camera yaw minus body yaw (rad)
    *   aimPitch — camera pitch (rad, + is up)
    */
+  /**
+   * Plays a one-shot upper-body clip: "interact" (doors, medkits), "hit" /
+   * "hit2" (taking damage). dur: seconds it takes; weight: how much it covers
+   * the aim / locomotion pose.
+   */
+  playClip(key, dur = null, weight = 1) {
+    const action = this.clips[key];
+    if (!action || this.dead) return;
+    if (this.oneShot && this.oneShot.action !== action) this.oneShot.action.setEffectiveWeight(0);
+    const len = action.getClip().duration;
+    action.reset();
+    action.timeScale = dur ? len / dur : 1;
+    action.play();
+    this.oneShot = { action, t: 0, dur: dur ?? len, weight };
+  }
+
+  /** A procedural gesture: "reload", "eat", "vault", "climb", lasting dur seconds. */
+  playGesture(name, dur) {
+    if (this.dead) return;
+    this.gesture = { name, t: 0, dur: Math.max(0.2, dur) };
+  }
+
+  /** Something held in the left hand while a gesture plays. */
+  setHandProp(gesture, obj) {
+    obj.visible = false;
+    obj.traverse(o => { if (o.isMesh) o.castShadow = false; });
+    this.root.add(obj);
+    this.handProps[gesture] = obj;
+  }
+
+  stopGesture(name = null) {
+    if (!name || this.gesture?.name === name) this.gesture = null;
+  }
+
   update(delta, s) {
     if (!this.mixer) return;
+    // Gestures and one-shots run on their own clocks
+    const g = this.gesture;
+    if (g) { g.t += delta; if (g.t >= g.dur) this.gesture = null; }
+    const o = this.oneShot;
+    if (o) {
+      o.t += delta;
+      const w = Math.min(1, o.t / 0.12, (o.dur - o.t) / 0.2);
+      this.oneShotW = Math.max(0, w) * o.weight;
+      if (o.t >= o.dur) { o.action.setEffectiveWeight(0); this.oneShot = null; this.oneShotW = 0; }
+    }
+    for (const name in this.handProps) this.handProps[name].visible = this.gesture?.name === name;
+    const health = s.health ?? 1;
+    this.woundW += ((1 - THREE.MathUtils.smoothstep(health, 0.22, 0.6)) - this.woundW) * (1 - Math.exp(-3 * delta));
 
     // Stance: blend toward it and pose the whole model (before the bones are posed)
     const ks = 1 - Math.exp(-STANCE_RATE * delta);
@@ -448,6 +532,9 @@ export class Soldier {
       }
       this.aimAction.setEffectiveWeight(0);
       this.shootAction.setEffectiveWeight(0);
+      for (const a of Object.values(this.clips)) a.setEffectiveWeight(0);
+      this.oneShot = null;
+      this.gesture = null;
       this.mixer.update(delta);
       return;
     }
@@ -471,7 +558,9 @@ export class Soldier {
 
     const k = 1 - Math.exp(-BLEND_RATE * delta);
     for (const key of LOCO) this.locoWeights[key] += (t[key] - this.locoWeights[key]) * k;
-    this.aimWeight   += ((s.aiming ? 1 : 0) - this.aimWeight) * (1 - Math.exp(-14 * delta));
+    // Reloading keeps the gun up; eating and climbing put it down
+    const aimTarget = this.gesture ? (GUN_DOWN.has(this.gesture.name) ? 0 : 1) : s.aiming ? 1 : 0;
+    this.aimWeight   += (aimTarget - this.aimWeight) * (1 - Math.exp(-14 * delta));
     this.shootWeight += ((s.firing ? 1 : 0) - this.shootWeight) * (1 - Math.exp(-20 * delta));
 
     // Shared phase so feet don't skate while blending between directions
@@ -495,6 +584,77 @@ export class Soldier {
     if (lean > 0.01 && this.aimWeight > 0.01) this._raiseArms(lean * this.aimWeight);
     if (this.crouchW > 0.01 && !this.seated) this._bendLegs(CROUCH_THIGH * this.crouchW, CROUCH_SHIN * this.crouchW);
     if (this.seated && !this.dead) this._bendLegs(-1.45, 1.5);
+    if (!this.seated) this._procedural(s, speed);
+  }
+
+  /**
+   * Hand-made motion on top of the clips: jump tuck, wounded posture and limp,
+   * and the gestures (reload, eat, vault, climb). Angles are about the body's
+   * own axes: side (to its right), forward, up. A negative turn about the side
+   * axis swings a hanging arm forward and up.
+   */
+  _procedural(s, speed) {
+    const side = this._sideAxis(_v0);
+    this.root.getWorldQuaternion(_q2);
+    const fwd = _v1.set(0, 0, 1).applyQuaternion(_q2);
+    const [ul, ur] = this.arms, [ll, lr] = this.foreArms, [, wr] = this.wrists;
+    const turn = turnBone;
+
+    // In the air: knees up
+    const air = s.air ?? 0;
+    if (air > 0.01 && this.proneW < 0.1) this._bendLegs(-0.8 * air, 1.25 * air);
+
+    // Badly hurt: hunched over, head down, a limp on the right leg, a hand on the wound
+    const wound = this.woundW * (1 - this.proneW);
+    if (wound > 0.01) {
+      turn(this.abdomen, side, 0.28 * wound);
+      turn(this.neck, side, 0.2 * wound);
+      if (speed > 0.5) {
+        const limp = Math.max(0, Math.sin(this.locoPhase * Math.PI * 2)) * wound;
+        turn(this.legs[1], side, 0.3 * limp);
+        turn(this.legs[3], side, -0.35 * limp);
+      }
+      const clutch = wound * (1 - this.aimWeight) * (this.gesture ? 0 : 1);
+      turn(ul, side, -0.5 * clutch);
+      turn(ul, _up, 0.7 * clutch);
+      turn(ll, side, -1.1 * clutch);
+    }
+
+    const g = this.gesture;
+    if (!g) return;
+    const k = g.t / g.dur;
+    if (g.name === "reload") {
+      // Tip the gun over, drop the left hand to the pouch, slap the mag in, level up
+      const tilt = bump(k, 0, 1, 0.18);
+      turn(wr, fwd, 0.65 * tilt);
+      turn(ur, side, 0.3 * tilt);
+      turn(this.neck, side, 0.18 * tilt);
+      const pouch = bump(k, 0.1, 0.58, 0.18);
+      turn(ul, side, 1.0 * pouch);
+      turn(ll, side, -0.5 * pouch);
+      const slap = bump(k, 0.55, 0.82, 0.1);
+      turn(ul, side, -0.3 * slap);
+    } else if (g.name === "eat") {
+      // Left hand up to the mouth, chewing
+      const lift = bump(k, 0, 1, 0.2);
+      turn(ul, side, -1.25 * lift);
+      turn(ul, _up, 0.55 * lift);
+      turn(ll, side, -1.9 * lift);
+      turn(this.neck, side, (0.06 + 0.07 * Math.sin(g.t * 17)) * THREE.MathUtils.smoothstep(k, 0.3, 0.45) * lift);
+      const prop = this.handProps.eat;
+      if (prop && this.wrists[0]) {
+        this.wrists[0].getWorldPosition(_v2).addScaledVector(fwd, 0.06);
+        prop.position.copy(this.root.worldToLocal(_v2));
+      }
+    } else if (g.name === "vault" || g.name === "climb") {
+      // Reach up and forward for the sill / top of the wall, then knees up and over
+      const reach = bump(k, 0, g.name === "climb" ? 0.7 : 0.55, 0.2);
+      for (const a of this.arms) turn(a, side, -2.3 * reach);
+      for (const a of this.foreArms) turn(a, side, -0.35 * reach);
+      const tuck = bump(k, 0.25, 1, 0.25);
+      this._bendLegs(-1.2 * tuck, 1.5 * tuck);
+      turn(this.abdomen, side, 0.4 * bump(k, 0.15, 0.95, 0.25));
+    }
   }
 
   /** Swing both thighs about the body's side axis, then the shins (driving seat, crouch). */
@@ -528,13 +688,14 @@ export class Soldier {
   }
 
   _applyWeights() {
-    const aim = this.aimWeight;
+    const aim = this.aimWeight, rest = 1 - this.oneShotW;
     for (const key of LOCO) {
       this.lower[key].setEffectiveWeight(this.locoWeights[key]);
-      this.upper[key].setEffectiveWeight(this.locoWeights[key] * (1 - aim));
+      this.upper[key].setEffectiveWeight(this.locoWeights[key] * (1 - aim) * rest);
     }
-    this.aimAction.setEffectiveWeight(aim * (1 - this.shootWeight));
-    this.shootAction.setEffectiveWeight(aim * this.shootWeight);
+    this.aimAction.setEffectiveWeight(aim * (1 - this.shootWeight) * rest);
+    this.shootAction.setEffectiveWeight(aim * this.shootWeight * rest);
+    if (this.oneShot) this.oneShot.action.setEffectiveWeight(this.oneShotW);
   }
 
   // Twist abdomen + chest so the raised gun points along the camera's aim,

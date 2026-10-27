@@ -45,18 +45,18 @@ export const VEHICLES = {
   },
   thar: {
     label: "Thar",
-    length: 4.0, width: 1.9,
+    length: 4.43, width: 2.1,   // the real Thar Roxx: 4.43 m long, 1.92 m tall
     maxSpeed: 24,         // m/s (~86 km/h)
     reverseSpeed: 7, accel: 7.5, brake: 16, coast: 1.6,
-    maxSteer: 0.55, wheelBase: 2.45,
+    maxSteer: 0.55, wheelBase: 2.71,
     fuelMax: 100, fuelStart: 55, burn: 1.1, idleBurn: 0.06, canFuel: 40,
-    enterRange: 3.8, headlight: 170,
-    seat: [-0.42, 0.95, 0.05],   // right-hand drive
-    lamps: [[0.62, 1.02, 1.98], [-0.62, 1.02, 1.98]],
-    tails: [[0.8, 0.95, -2.02], [-0.8, 0.95, -2.02]],
-    wheels: { front: 1.3, rear: -1.18, track: 0.82 },
-    hits: { z: [-1.35, 0, 1.35], r: 1.0 },
-    box: [0.95, 0.95, 2.0, 1.0],
+    enterRange: 4.21, headlight: 170,
+    seat: [-0.47, 1.05, 0.06],   // right-hand drive
+    lamps: [[0.69, 1.13, 2.19], [-0.69, 1.13, 2.19]],
+    tails: [[0.89, 1.05, -2.24], [-0.89, 1.05, -2.24]],
+    wheels: { front: 1.44, rear: -1.31, track: 0.91 },
+    hits: { z: [-1.5, 0, 1.5], r: 1.11 },
+    box: [1.05, 1.05, 2.21, 1.11],
     modelYaw: Math.PI / 2,       // the Sketchfab Thar Roxx is modelled nose along −X
     runOver: 7, tone: 0.68,
   },

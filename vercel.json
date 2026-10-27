@@ -10,7 +10,7 @@
       "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
     },
     {
-      "source": "/(models|trees|texture)/(.*)",
+      "source": "/(models|trees|texture|sounds)/(.*)",
       "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400, stale-while-revalidate=2592000" }]
     }
   ]

@@ -3,13 +3,19 @@ import * as THREE from "three";
 const TRACER_POOL     = 32;
 const ENEMY_FLASHES   = 8;
 const TRACER_LIFE     = 0.06;
-const PARTICLE_COUNT  = 400;
+const PARTICLE_COUNT  = 640;
 const PARTICLE_HIDE_Y = -1000;
 const FLASH_LIFE      = 0.05;
 const FLAME_COUNT     = 320; // the flying molotov rag and dragon fireball trails
 const BLAST_LIFE      = 0.35;
+const SPLATS          = 72;    // aqua blood stains on the ground (a ring buffer)
+const SPLAT_LIFE      = 14;    // seconds before a stain has shrunk away
+const DRIPS           = 12;    // wounds dripping at once
+const DRIP_TIME       = 0.9;   // a wound drips this long
+const DRIP_EVERY      = 0.07;
 
-const BLOOD = [new THREE.Color(0x7a0606), new THREE.Color(0xa00d0d), new THREE.Color(0x4a0303)];
+// Blood is aqua, not red
+const BLOOD = [new THREE.Color(0x19f0dc), new THREE.Color(0x00c8c8), new THREE.Color(0x7affef), new THREE.Color(0x0396a6)];
 const DUST  = [new THREE.Color(0x8a7a5c), new THREE.Color(0x6b5c45), new THREE.Color(0xb5a27c)];
 const SPARK = [new THREE.Color(0xffd27a), new THREE.Color(0xffa040)];
 
@@ -40,6 +46,30 @@ function makeFlashTexture() {
   return tex;
 }
 
+/** An irregular round stain, white (tinted by the material). */
+function makeSplatTexture() {
+  const size = 128;
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff";
+  const blob = (x, y, r, a) => {
+    g.globalAlpha = a;
+    g.beginPath();
+    g.arc(x, y, r, 0, Math.PI * 2);
+    g.fill();
+  };
+  blob(64, 64, 30, 0.9);
+  for (let i = 0; i < 14; i++) {
+    const a = Math.random() * Math.PI * 2, d = 22 + Math.random() * 30;
+    blob(64 + Math.cos(a) * d, 64 + Math.sin(a) * d, 3 + Math.random() * 9, 0.85);
+  }
+  blob(56, 56, 12, 0.35);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 function makeSoftTexture() {
   const size = 64;
   const c = document.createElement("canvas");
@@ -55,6 +85,12 @@ function makeSoftTexture() {
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
+
+const _sm = new THREE.Matrix4();
+const _sq = new THREE.Quaternion();
+const _sv = new THREE.Vector3();
+const _ss = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
 
 export class Effects {
   constructor(scene) {
@@ -99,7 +135,9 @@ export class Effects {
     geo.setAttribute("position", new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
     this.points = new THREE.Points(geo, new THREE.PointsMaterial({
-      size: 0.07,
+      size: 0.11,
+      map: makeSoftTexture(),
+      alphaTest: 0.35,          // round drops, not squares
       vertexColors: true,
       sizeAttenuation: true,
       depthWrite: false,
@@ -110,8 +148,32 @@ export class Effects {
     this.pCol = colors;
     this.pVel = new Float32Array(PARTICLE_COUNT * 3);
     this.pLife = new Float32Array(PARTICLE_COUNT);
+    this.pBlood = new Uint8Array(PARTICLE_COUNT);  // 1: leaves a stain where it lands
+    this.pFloor = new Float32Array(PARTICLE_COUNT); // where it settles (looked up once: drops land within a metre or so)
     this.pNext = 0;
     this.pAlive = 0;
+    this.groundAt = null;                          // (x, z) -> ground height; set by main.js
+
+    // ── Blood stains: one instanced flat quad each, shrinking away at the end of their life
+    this.splats = new THREE.InstancedMesh(
+      new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({
+        map: makeSplatTexture(), color: 0x14d9cc, transparent: true, opacity: 0.85, depthWrite: false,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      }),
+      SPLATS);
+    this.splats.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.splats.frustumCulled = false;
+    this.splats.renderOrder = 1;
+    this.splats.count = 0;
+    this.splats.visible = false;
+    scene.add(this.splats);
+    this.splatData = Array.from({ length: SPLATS }, () => ({ x: 0, y: 0, z: 0, r: 0, rot: 0, life: 0 }));
+    this.splatNext = 0;
+    this.splatAlive = 0;
+    // Wounds that keep dripping for a moment after a hit
+    this.drips = Array.from({ length: DRIPS }, () => ({ x: 0, y: 0, z: 0, t: 0, next: 0 }));
+    this.dripNext = 0;
 
     // ── Flames: additive soft points that rise and cool from yellow to red to nothing.
     // Shared by molotov fires, flying molotov rags and grenade fireballs.
@@ -232,17 +294,39 @@ export class Effects {
     t.life = TRACER_LIFE;
   }
 
-  /** kind: "blood" | "dust" */
+  /** kind: "blood" | "dust". Blood also leaves the wound dripping. */
   impact(pos, nx, ny, nz, kind, count) {
-    const palette = kind === "blood" ? BLOOD : DUST;
-    const speed = kind === "blood" ? 3.2 : 2.2;
-    for (let n = 0; n < count; n++) this._emit(pos, nx, ny, nz, speed, palette, 0.5 + Math.random() * 0.4);
-    if (kind === "dust") {
+    const blood = kind === "blood";
+    const palette = blood ? BLOOD : DUST;
+    const speed = blood ? 3.4 : 2.2;
+    for (let n = 0; n < count; n++) {
+      this._emit(pos, nx, ny, nz, speed, palette, blood ? 0.9 + Math.random() * 0.8 : 0.5 + Math.random() * 0.4, blood && n % 3 === 0);
+    }
+    if (blood) {
+      // A fine mist off the wound, and drips falling from it
+      for (let n = 0; n < Math.ceil(count / 2); n++) this._emit(pos, nx, ny + 0.4, nz, 1.2, BLOOD, 0.35);
+      this.drip(pos);
+    } else {
       for (let n = 0; n < 4; n++) this._emit(pos, nx, ny, nz, 5, SPARK, 0.15);
     }
   }
 
-  _emit(pos, nx, ny, nz, speed, palette, life) {
+  /** Spray from someone hit at pos, pushed away from the shooter (dx, dz). */
+  bleed(pos, dx, dz, amount = 10) {
+    const l = Math.hypot(dx, dz) || 1;
+    this.impact(pos, dx / l, 0.35, dz / l, "blood", amount);
+  }
+
+  /** The wound at pos drips for DRIP_TIME seconds. */
+  drip(pos) {
+    const d = this.drips[this.dripNext];
+    this.dripNext = (this.dripNext + 1) % DRIPS;
+    d.x = pos.x; d.y = pos.y; d.z = pos.z;
+    d.t = DRIP_TIME;
+    d.next = 0;
+  }
+
+  _emit(pos, nx, ny, nz, speed, palette, life, stain = false) {
     const i = this.pNext;
     this.pNext = (this.pNext + 1) % PARTICLE_COUNT;
     const i3 = i * 3;
@@ -258,7 +342,53 @@ export class Effects {
     this.pCol[i3 + 1] = c.g;
     this.pCol[i3 + 2] = c.b;
     this.pLife[i] = life;
+    this.pBlood[i] = stain ? 1 : 0;
+    this.pFloor[i] = (this.groundAt ? this.groundAt(pos.x, pos.z) : 0) + 0.02;
     this.pAlive = PARTICLE_COUNT;
+  }
+
+  _splat(x, y, z) {
+    const i = this.splatNext;
+    this.splatNext = (this.splatNext + 1) % SPLATS;
+    const s = this.splatData[i];
+    s.x = x; s.y = y + 0.005; s.z = z;
+    s.r = 0.12 + Math.random() * 0.22;
+    s.rot = Math.random() * Math.PI * 2;
+    s.life = SPLAT_LIFE;
+    this.splatAlive = SPLATS;
+  }
+
+  _updateSplats(delta) {
+    let n = 0;
+    for (let i = 0; i < SPLATS; i++) {
+      const s = this.splatData[i];
+      if (s.life <= 0) continue;
+      s.life -= delta;
+      if (s.life <= 0) continue;
+      // Spreads a little as it lands, shrinks away over its last two seconds
+      const grow = Math.min(1, (SPLAT_LIFE - s.life) * 6);
+      const r = s.r * (0.5 + grow * 0.5) * Math.min(1, s.life / 2);
+      _sq.setFromAxisAngle(_up, s.rot);
+      _sv.set(s.x, s.y, s.z);
+      _ss.set(r * 2, 1, r * 2);
+      this.splats.setMatrixAt(n++, _sm.compose(_sv, _sq, _ss));
+    }
+    this.splats.count = n;
+    this.splats.visible = n > 0;
+    this.splats.instanceMatrix.needsUpdate = true;
+    if (!n) this.splatAlive = 0;
+  }
+
+  _updateDrips(delta) {
+    for (const d of this.drips) {
+      if (d.t <= 0) continue;
+      d.t -= delta;
+      d.next -= delta;
+      if (d.next > 0) continue;
+      d.next = DRIP_EVERY * (0.6 + Math.random() * 0.8);
+      _sv.set(d.x + (Math.random() - 0.5) * 0.12, d.y - 0.05, d.z + (Math.random() - 0.5) * 0.12);
+      this._emit(_sv, 0, -0.2, 0, 0.6, BLOOD, 1.4, Math.random() < 0.4);
+    }
   }
 
   update(delta) {
@@ -290,6 +420,8 @@ export class Effects {
     }
 
     if (this.fAlive) this._updateFlames(delta);
+    this._updateDrips(delta);
+    if (this.splatAlive) this._updateSplats(delta);
 
     for (const t of this.tracers) {
       if (t.life <= 0) continue;
@@ -314,9 +446,11 @@ export class Effects {
       pos[i3]     += vel[i3] * delta;
       pos[i3 + 1] += vel[i3 + 1] * delta;
       pos[i3 + 2] += vel[i3 + 2] * delta;
-      if (pos[i3 + 1] < 0.02) {
-        // Settle on the ground instead of falling through it
-        pos[i3 + 1] = 0.02;
+      const floor = this.pFloor[i];
+      if (pos[i3 + 1] < floor) {
+        // Settle on the ground instead of falling through it; blood leaves a stain
+        if (this.pBlood[i]) { this._splat(pos[i3], floor, pos[i3 + 2]); this.pBlood[i] = 0; }
+        pos[i3 + 1] = floor;
         vel[i3] *= 0.5; vel[i3 + 1] = 0; vel[i3 + 2] *= 0.5;
       }
     }

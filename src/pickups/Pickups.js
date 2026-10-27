@@ -278,7 +278,13 @@ export class Pickups {
       }
     }
 
-    for (const kind in this.kindMeshes) for (const im of this.kindMeshes[kind]) if (im.count) im.instanceMatrix.needsUpdate = true;
+    // An empty InstancedMesh still costs a draw call (and a shadow one): hide the kinds with nothing in range
+    for (const kind in this.kindMeshes) {
+      for (const im of this.kindMeshes[kind]) {
+        im.visible = im.count > 0;
+        if (im.count) im.instanceMatrix.needsUpdate = true;
+      }
+    }
   }
 }
 

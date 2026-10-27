@@ -40,14 +40,8 @@ export function applyStaticIcons() {
 /** Gear and item ids that share an icon. */
 const ITEM_ICON = { helmet1: "helmet", helmet2: "helmet", helmet3: "helmet", vest1: "vest", vest2: "vest", vest3: "vest", backpack1: "backpack", backpack2: "backpack", backpack3: "backpack" };
 
-/**
- * Replaces the rendered 3D silhouettes in an item → URL icon map with the
- * game-icons versions wherever the set has one (white, tinted by CSS).
- */
-export function useGameItemIcons(icons) {
-  for (const id of Object.keys(icons)) {
-    const name = ITEM_ICON[id] ?? id;
-    if (ICON_PATHS[name]) icons[id] = iconUrl(name, "#fff");
-  }
-  return icons;
+/** The game-icons version of an item's icon (white, tinted by CSS), or null if the set has none. */
+export function gameItemIcon(id) {
+  const name = ITEM_ICON[id] ?? id;
+  return ICON_PATHS[name] ? iconUrl(name, "#fff") : null;
 }

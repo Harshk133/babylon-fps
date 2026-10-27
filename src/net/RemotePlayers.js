@@ -295,6 +295,7 @@ export class RemotePlayers {
           firing: p.fire,
           aimYawOffset: angleDiff(p.aimYaw, yaw),
           aimPitch: p.aimPitch,
+          health: p.hp / 100,
         });
       }
 
