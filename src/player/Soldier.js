@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { clone as cloneSkinned } from "three/addons/utils/SkeletonUtils.js";
 import { cloneItem } from "../items/ItemModels.js";
 import { WEAPON_ORDER } from "../combat/weapons.js";
 
@@ -106,6 +107,18 @@ function rotateBoneInWorld(bone, worldDelta) {
   bone.updateMatrixWorld(true);
 }
 
+// The soldier and SMG files are downloaded and parsed once; every soldier
+// (you, teammates, battle royale bots) gets its own clone of them
+let _sources = null;
+function loadSources(loader) {
+  _sources ??= Promise.all([
+    // Optimized copy from `npm run optimize-assets` (meshopt), else the original
+    loader.loadAsync(SOLDIER_URL.replace(/\.glb$/, ".opt.glb")).catch(() => loader.loadAsync(SOLDIER_URL)),
+    loader.loadAsync(WEAPON_URL),
+  ]).catch(err => { _sources = null; throw err; });
+  return _sources;
+}
+
 export class Soldier {
   constructor() {
     this.root = new THREE.Group();
@@ -144,11 +157,9 @@ export class Soldier {
   }
 
   async load(loader = new GLTFLoader()) {
-    const [soldier, weapon] = await Promise.all([
-      // Optimized copy from `npm run optimize-assets` (8 clips, meshopt), else the original
-      loader.loadAsync(SOLDIER_URL.replace(/\.glb$/, ".opt.glb")).catch(() => loader.loadAsync(SOLDIER_URL)),
-      loader.loadAsync(WEAPON_URL),
-    ]);
+    const [src, weaponSrc] = await loadSources(loader);
+    const soldier = { scene: cloneSkinned(src.scene), animations: src.animations };
+    const weapon = { scene: weaponSrc.scene.clone(true) };
 
     const model = soldier.scene;
     model.traverse(o => {

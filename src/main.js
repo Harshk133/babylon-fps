@@ -77,6 +77,7 @@ import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
 import { STANCES, setCapsuleStance } from "./player/Stance.js";
 import { PerfOverlay, PERF_ENABLED, BENCH_ENABLED } from "./debug/PerfOverlay.js";
 import { StaticGridBroadphase } from "./physics/StaticGridBroadphase.js";
+import { Bots, isBotId } from "./br/Bots.js";
 
 // The caves' heavy lifting (rock field, mesh, torches, baked light) runs on a
 // worker from the very start, in parallel with every download; if workers
@@ -945,7 +946,7 @@ const SCOPE_AIM_FOV = 32;        // a scoped gun's shoulder-aim FOV on the way i
 // your head). Touched only when it flips.
 const scopeEl = document.createElement("div");
 scopeEl.id = "scope-overlay";
-scopeEl.innerHTML = '<div class="scope-lens"><i class="scope-h"></i><i class="scope-v"></i><i class="scope-dot"></i></div>';
+scopeEl.innerHTML = '<div class="scope-lens"></div><i class="scope-h"></i><i class="scope-v"></i><i class="scope-dot"></i>';
 document.body.append(scopeEl);
 let scopeShown = false;
 function updateScopeView() {
@@ -1948,8 +1949,8 @@ function fireShot(def) {
   characterBody.collisionFilterGroup = ownGroup;
   // One damage message per player hit (a shotgun blast is one hit, not nine)
   for (const [id, dmg] of pvpDamage) {
-    net.send({
-      t: "pvp", to: id, d: +dmg.toFixed(1), hs: pvpHead.has(id) ? 1 : 0, w: inventory.current,
+    sendPvp(id, {
+      d: +dmg.toFixed(1), hs: pvpHead.has(id) ? 1 : 0, w: inventory.current,
       sx: +characterBody.position.x.toFixed(1), sz: +characterBody.position.z.toFixed(1),
     });
   }
@@ -2130,6 +2131,7 @@ function onGrenadeExplode(pos, owner = null) {
     const k = pd > 1e-3 ? 8 * f / pd : 0;
     dealDamageToPlayer(GRENADE.playerMaxDamage * f, px * k, pz * k, 0.6, null, null, "blast");
   }
+  if (isBR() && net.isHost) bots.blast(pos, by, GRENADE.playerRadius, GRENADE.playerMaxDamage);
   cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - pd / 35, 0, 1) * 0.8);
   sfx.explosion(pos);
   if (!net.isClient) zombieManager?.noise(pos.x, pos.z, GRENADE.alertRadius, "explosion");
@@ -2159,6 +2161,7 @@ function onFireTick(x, z, r, dt, owner = null, hostile = false) {
     if (!hostile && by !== localTarget.id) brNoteAttacker(by, "molotov", false);
     dealDamageToPlayer(MOLOTOV.playerDps * dt, 0, 0, 0.08);
   }
+  if (!hostile && isBR() && net.isHost) bots.burn(x, z, r, MOLOTOV.playerDps, dt, by);
 }
 
 // ─── Healing: medkits and Parle-G ─────────────────────────────────────────────
@@ -3879,6 +3882,7 @@ function onConnected(welcome) {
 
 function becomeHost() {
   if (isBR()) {
+    bots.adopt(); // the old host's bots carry on, run from here
     // The match clock, zone and alive list are already here: just carry on
     inventoryUI.feed("You're hosting the match now", "info");
     brCheckWinner();
@@ -3941,19 +3945,20 @@ net.on("pin", msg => {
   if (!msg.c && fresh) inventoryUI.feed(`${net.players.get(msg.from)?.name ?? "A teammate"} marked a spot`, "info");
 });
 net.on("shot", msg => {
-  remotePlayers.shot(msg.from, msg);
-  noteShot(msg.from, msg.f[0], msg.f[2]);
+  const who = msg.b ?? msg.from;
+  remotePlayers.shot(who, msg);
+  noteShot(who, msg.f[0], msg.f[2]);
 });
 // A teammate reloading, eating, opening a door, flinching, vaulting
 net.on("anim", msg => {
-  const s = remotePlayers.players.get(msg.from)?.soldier;
+  const s = remotePlayers.players.get(msg.b ?? msg.from)?.soldier;
   if (!s) return;
   if (msg.g) s.playGesture(msg.g, msg.d);
   else if (msg.c) s.playClip(msg.c, msg.d, msg.w ?? 1);
 });
 net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz, "monster"));
 net.on("throw", msg => {
-  throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.from, msg.c ?? 0, msg.f);
+  throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.b ?? msg.from, msg.c ?? 0, msg.f);
 });
 net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
 net.on("gate", msg => collegeGate?.setState(msg.p, msg.o));
@@ -4369,7 +4374,7 @@ function vehicleRunOver(car) {
     if ((t.pos.x - cx) ** 2 + (t.pos.z - cz) ** 2 > (hit + 0.35) ** 2) continue;
     if (now - (_runOver.get(t.id) ?? 0) < 700) continue;
     _runOver.set(t.id, now);
-    net.send({ t: "pvp", to: t.id, d: Math.round(v * car.spec.runOver), hs: 0, w: "rickshaw", sx: +car.x.toFixed(1), sz: +car.z.toFixed(1) });
+    sendPvp(t.id, { d: Math.round(v * car.spec.runOver), hs: 0, w: "rickshaw", sx: +car.x.toFixed(1), sz: +car.z.toFixed(1) });
     showHitMarker(false, false);
     sfx.thud(t.pos, false);
   }
@@ -4551,6 +4556,84 @@ const br = {
 };
 const _planePos = { x: 0, y: 0, z: 0 };
 const _spawn = { x: 0, z: 0 };
+
+// ── Bots: seven AI players in every match (br/Bots.js), simulated by the host ──
+const _botMe = { id: 0, x: 0, y: 0, z: 0, speed: 0 };
+const bots = new Bots({
+  get world() { return world; },
+  get net() { return net; },
+  get remotePlayers() { return remotePlayers; },
+  get pickups() { return pickups; },
+  get vehicles() { return vehicles; },
+  get br() { return br; },
+  feetOffset: FEET_OFFSET,
+  groundHeight,
+  surfaceAt: (x, z, y, ground) => (houses ? houses.surfaceAt(x, z, y, ground) : ground),
+  navigate: (x, z, tx, tz, out, y, ty) => (zombieManager?.navigate ? zombieManager.navigate(x, z, tx, tz, out, false, y, ty) : 0),
+  solidAt: (x, z, r, self) => solidAt(x, z, r, self),
+  concealed: (a, b) => smokeFX.blocks(a, b),
+  shielded: (pos, x, y, z) => blastShielded(pos, x, y, z),
+  now: () => clock.elapsedTime,
+  dropSpots: () => pickups.active,
+  /** You, as something a bot can shoot at (null when you can't be). */
+  localTarget() {
+    if (playerHealth <= 0 || br.ghost || br.flight !== PHASE_GROUND || (br.state === "match" && !br.inMatch)) return null;
+    const p = characterBody.position;
+    _botMe.id = localTarget.id; _botMe.x = p.x; _botMe.y = p.y; _botMe.z = p.z;
+    _botMe.speed = Math.hypot(moveVelocity.x, moveVelocity.z);
+    return _botMe;
+  },
+  /** Host takes a shared pickup for a bot (everyone else is told it's gone). */
+  takeLoot(entry, id) {
+    if (!entry.active || entry.pending) return false;
+    if (entry.id !== null) {
+      if (takenLoot.has(entry.id)) { pickups.release(entry); return false; }
+      takenLoot.add(entry.id);
+      net.send({ t: "take", i: entry.id, by: id });
+    }
+    pickups.release(entry);
+    return true;
+  },
+  spill: (items, x, y, z) => spillLoot(items, x, y, z),
+  openDoorAt(x, z, y) {
+    const door = houses?.interaction(x, z, y)?.door;
+    if (!door || door.doorOpen || !houses.setDoor(door, true)) return;
+    net.send({ t: "door", h: houses.houses.indexOf(door), o: true });
+  },
+  gesture(id, name, dur) {
+    const s = remotePlayers.players.get(id)?.soldier;
+    if (name) s?.playGesture(name, dur); else s?.playClip("interact", dur, 0.9);
+    net.send(name ? { t: "anim", b: id, g: name, d: +dur.toFixed(2) } : { t: "anim", b: id, c: "interact", d: +dur.toFixed(2), w: 0.9 });
+  },
+  flinch(id, dmg) {
+    const clip = dmg > 18 ? "hit2" : "hit";
+    remotePlayers.players.get(id)?.soldier?.playClip(clip, 0.5, 0.4);
+    net.send({ t: "anim", b: id, c: clip, d: 0.5, w: 0.4 });
+  },
+  impact: (p, n, kind) => effects.impact(p, n.x, n.y, n.z, kind, kind === "blood" ? 9 : 5),
+  /** A bot hit player `id`: you, a bot, or someone else (who applies it themselves). */
+  hitPlayer(id, dmg, hs, by, w, sx, sz) {
+    if (isBotId(id)) bots.damage(id, dmg, hs, by, w, sx, sz);
+    else if (id === localTarget.id) pvpHitMe(by, dmg, hs, w, sx, sz);
+    else net.send({ t: "pvp", to: id, b: by, d: +dmg.toFixed(1), hs: hs ? 1 : 0, w, sx: +sx.toFixed(1), sz: +sz.toFixed(1) });
+  },
+  botShot(id, def, from, hits) {
+    const msg = { t: "shot", b: id, w: def.sound, f: [from.x, from.y, from.z].map(v => +v.toFixed(2)), h: hits };
+    remotePlayers.shot(id, msg);
+    noteShot(id, from.x, from.z);
+    net.send(msg);
+  },
+  botThrow(id, kind, from, vel) {
+    const c = kind === "smoke" ? Math.floor(Math.random() * SMOKE_COLORS.length) : 0;
+    throwables.throw(kind, from, vel, id, c);
+    net.send({ t: "throw", b: id, k: kind, c, o: [from.x, from.y, from.z].map(v => +v.toFixed(3)), v: [vel.x, vel.y, vel.z].map(v => +v.toFixed(3)) });
+  },
+  botEliminated(id, by, w, hs) {
+    const msg = { t: "elim", v: id, k: by ?? null, w: w ?? "self", hs: hs ? 1 : 0 };
+    net.send(msg);
+    brHandleElim(msg);
+  },
+});
 const _lootSpot = new THREE.Vector3();
 const _specIds = [];
 const ELIM_VERB = { zone: "ZONE", self: "SELF", grenade: "FRAG", molotov: "BURNED", rickshaw: "RUN OVER" };
@@ -4575,7 +4658,7 @@ function brName(id) {
   if (id === net.id) return myName;
   return remotePlayers.players.get(id)?.name ?? net.players.get(id)?.name ?? "Player";
 }
-function brColor(id) { return net.players.get(id)?.color ?? "#e2a42b"; }
+function brColor(id) { return net.players.get(id)?.color ?? remotePlayers.players.get(id)?.color ?? "#e2a42b"; }
 
 function brPickSpectate(dir) {
   _specIds.length = 0;
@@ -4602,9 +4685,10 @@ function enterBattleRoyale(welcome) {
   zombieManager.clearAll();
   enemyFire.clear();
   brHud.setVisible(true);
+  if (net.isHost) bots.spawnAll();
   brEnterWarmup();
   inventoryUI.feed(net.isHost
-    ? `You're the host. ${IS_TOUCH ? "Tap START MATCH" : "Press ENTER"} to start (alone is a practice drop)`
+    ? `You're the host. The match starts by itself, or ${IS_TOUCH ? "tap START MATCH" : "press ENTER"} to drop now`
     : `Joined "${welcome.room.slice(3)}" · waiting for the host to start`, "info");
 }
 
@@ -4661,6 +4745,7 @@ function brEnterWarmup() {
   resetVehicles();
   killsThisLife = 0;
   progress.resetRun();
+  if (net.isHost) bots.onWarmup();
 }
 
 function brHostStart() {
@@ -4704,6 +4789,7 @@ function brStartMatch(seed, ids, t) {
   // Look along the route, a little down, so you can pick your spot
   aimYaw = Math.atan2(br.route.dx, br.route.dz);
   aimPitch = -0.35;
+  if (net.isHost) bots.onMatch();
   if (br.inMatch) {
     setMapOpen(true);
     gameHud.showBanner({ title: "DROP ZONE", sub: "Pick your spot", text: `${IS_TOUCH ? "JUMP" : "SPACE"} jumps. Land, loot, and stay inside the blue zone.`, color: "#4da3ff", duration: 5 });
@@ -4776,14 +4862,19 @@ function brDropLoot() {
   if (inventory.fuelCans) items.push(["fuel", { count: inventory.fuelCans }]);
   for (const [k, n] of Object.entries(inventory.bag)) if (n > 0) items.push([k, { count: n }]);
   for (const piece of Object.values(inventory.gear)) if (piece) items.push([piece.id, { dur: piece.dur }]);
+  spillLoot(items, p.x, p.y - FEET_OFFSET, p.z);
+  inventory.reset(true);
+  onWeaponChanged(false);
+}
+
+/** items: [[kind, data]] laid out in a ring round (x, feetY, z), shared with everyone. */
+function spillLoot(items, x, feetY, z) {
   if (items.length) items.push(["ammo", null]);
   items.forEach(([k, data], i) => {
     const a = (i / items.length) * Math.PI * 2;
-    const x = p.x + Math.cos(a) * 1.5, z = p.z + Math.sin(a) * 1.5;
-    spawnShared(k, x, z, data, floorY(x, z, p.y - FEET_OFFSET));
+    const lx = x + Math.cos(a) * 1.5, lz = z + Math.sin(a) * 1.5;
+    spawnShared(k, lx, lz, data, floorY(lx, lz, feetY));
   });
-  inventory.reset(true);
-  onWeaponChanged(false);
 }
 
 // ── The drop ─────────────────────────────────────────────────────────────────
@@ -5009,6 +5100,7 @@ function brOnPlayerLeft(id) {
 
 // ── Per frame ────────────────────────────────────────────────────────────────
 function brUpdate(delta) {
+  if (net.isHost) bots.update(delta);
   if (net.isHost) {
     // Someone else is here: count down to the drop
     if (br.state === "warm" && remotePlayers.count > 0) { br.state = "count"; br.countdown = BR_AUTO_START; br.netTimer = 0; }
@@ -5049,6 +5141,7 @@ function brUpdate(delta) {
 
 /** Host: match state for everyone (and late joiners) twice a second. */
 function brNetTick(delta) {
+  if (remotePlayers.count > bots.count) bots.netTick(delta); // someone besides the bots is here
   br.netTimer -= delta;
   if (br.netTimer > 0 || remotePlayers.count === 0) return;
   br.netTimer = 0.5;
@@ -5142,12 +5235,29 @@ net.on("brstart", msg => { if (isBR()) brStartMatch(msg.seed, msg.ids, 0); });
 net.on("brend", msg => { if (isBR()) brShowEnd(msg.w ?? null); });
 net.on("brwarm", () => { if (isBR()) brEnterWarmup(); });
 net.on("elim", msg => { if (isBR()) brHandleElim(msg); });
-// Someone shot you: you apply it (you own your health) and remember who for the kill credit
+// Someone shot you: you apply it (you own your health) and remember who for the kill credit.
+// v: a bot was hit (the host owns bots' health); b: a bot did the shooting.
 net.on("pvp", msg => {
-  if (!isBR() || playerHealth <= 0 || br.ghost || br.flight === PHASE_PLANE) return;
-  brNoteAttacker(msg.from, msg.w, !!msg.hs);
-  dealDamageToPlayer(msg.d, 0, 0, msg.hs ? 0.5 : 0.25, msg.sx, msg.sz, msg.w === "rickshaw" ? "raw" : msg.hs ? "head" : "body");
+  if (msg.v) { if (net.isHost && isBR()) bots.damage(msg.v, msg.d, !!msg.hs, msg.from, msg.w, msg.sx, msg.sz); return; }
+  pvpHitMe(msg.b ?? msg.from, msg.d, msg.hs, msg.w, msg.sx, msg.sz);
 });
+net.on("bots", msg => { if (isBR() && !net.isHost) bots.applyNet(msg); });
+
+function pvpHitMe(from, d, hs, w, sx, sz) {
+  if (!isBR() || playerHealth <= 0 || br.ghost || br.flight === PHASE_PLANE) return;
+  brNoteAttacker(from, w, !!hs);
+  dealDamageToPlayer(d, 0, 0, hs ? 0.5 : 0.25, sx, sz, w === "rickshaw" ? "raw" : hs ? "head" : "body");
+}
+
+/** A hit on player `id` by you (m: { d, hs, w, sx, sz }): to them, or to the host when it's a bot. */
+function sendPvp(id, m) {
+  if (isBotId(id)) {
+    if (net.isHost) bots.damage(id, m.d, !!m.hs, localTarget.id, m.w, m.sx, m.sz);
+    else net.send({ t: "pvp", to: "host", v: id, ...m });
+    return;
+  }
+  net.send({ t: "pvp", to: id, ...m });
+}
 
 
 // ─── Lobby ────────────────────────────────────────────────────────────────────

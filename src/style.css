@@ -2174,18 +2174,22 @@ body.touch #streak .streak-sub { font-size: 16px; }
 body.touch #xp-toasts { top: 22%; zoom: 0.85; }
 
 /* ── Sniper scope ─────────────────────────────────────────────────────────── */
+/* The zoomed view fills the whole screen (as in PUBG / Free Fire): a fine
+   reticle over it, a faint lens ring and a soft vignette at the edges, never
+   a black mask. */
 #scope-overlay {
-  --lens: min(42vw, 42vh);
+  --lens: min(46vw, 46vh);
   position: fixed;
   inset: 0;
   z-index: 115;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.08s linear;
-  /* Black all round a round lens */
-  background: radial-gradient(circle at 50% 50%, transparent calc(var(--lens) - 2px), #000 var(--lens));
+  transition: opacity 0.1s linear;
+  background:
+    radial-gradient(ellipse at 50% 50%, transparent 58%, rgba(0, 6, 10, 0.32) 88%, rgba(0, 6, 10, 0.5) 100%);
 }
 #scope-overlay.on { opacity: 1; }
+/* Lens ring: a thin glassy edge with a hint of chromatic tint, nothing outside it is hidden */
 #scope-overlay .scope-lens {
   position: absolute;
   left: 50%;
@@ -2194,32 +2198,38 @@ body.touch #xp-toasts { top: 22%; zoom: 0.85; }
   height: calc(var(--lens) * 2);
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  overflow: hidden;
-  box-shadow: inset 0 0 calc(var(--lens) * 0.35) rgba(0, 0, 0, 0.85), 0 0 0 3px #0a0a0a;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 0 0 3px rgba(0, 0, 0, 0.18),
+    inset 0 0 calc(var(--lens) * 0.12) rgba(120, 200, 255, 0.10);
 }
-/* Thick posts toward the rim, fine wires across the middle */
+/* Reticle: fine wires through the centre with mil-dot ticks, heavier posts toward the screen edges */
 #scope-overlay .scope-h,
 #scope-overlay .scope-v { position: absolute; }
 #scope-overlay .scope-h {
-  left: 0; right: 0; top: 50%; height: 6px; margin-top: -3px;
-  background: linear-gradient(90deg, #0a0a0a 0 32%, transparent 32% 68%, #0a0a0a 68%),
-              linear-gradient(180deg, transparent 2px, rgba(10, 10, 10, 0.95) 2px 4px, transparent 4px);
+  left: 0; right: 0; top: 50%; height: 9px; margin-top: -4.5px;
+  background:
+    linear-gradient(90deg, rgba(8, 8, 8, 0.92) 0 calc(50% - var(--lens) * 0.55), transparent calc(50% - var(--lens) * 0.55) calc(50% + var(--lens) * 0.55), rgba(8, 8, 8, 0.92) calc(50% + var(--lens) * 0.55)) center / 100% 4px no-repeat,
+    linear-gradient(90deg, rgba(10, 10, 10, 0.9), rgba(10, 10, 10, 0.9)) center / 100% 1.4px no-repeat,
+    repeating-linear-gradient(90deg, transparent 0 calc(var(--lens) * 0.1 - 1.4px), rgba(10, 10, 10, 0.85) calc(var(--lens) * 0.1 - 1.4px) calc(var(--lens) * 0.1)) center / calc(var(--lens) * 1.1) 9px no-repeat;
 }
 #scope-overlay .scope-v {
-  top: 0; bottom: 0; left: 50%; width: 6px; margin-left: -3px;
-  background: linear-gradient(180deg, #0a0a0a 0 32%, transparent 32% 68%, #0a0a0a 68%),
-              linear-gradient(90deg, transparent 2px, rgba(10, 10, 10, 0.95) 2px 4px, transparent 4px);
+  top: 0; bottom: 0; left: 50%; width: 9px; margin-left: -4.5px;
+  background:
+    linear-gradient(180deg, transparent 0 calc(50% + var(--lens) * 0.55), rgba(8, 8, 8, 0.92) calc(50% + var(--lens) * 0.55)) center / 4px 100% no-repeat,
+    linear-gradient(180deg, rgba(10, 10, 10, 0.9), rgba(10, 10, 10, 0.9)) center / 1.4px 100% no-repeat,
+    repeating-linear-gradient(180deg, transparent 0 calc(var(--lens) * 0.1 - 1.4px), rgba(10, 10, 10, 0.85) calc(var(--lens) * 0.1 - 1.4px) calc(var(--lens) * 0.1)) center / 9px calc(var(--lens) * 1.1) no-repeat;
 }
 #scope-overlay .scope-dot {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 4px;
-  height: 4px;
-  margin: -2px 0 0 -2px;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
   border-radius: 50%;
   background: #ff2a2a;
-  box-shadow: 0 0 4px #ff2a2a;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 6px #ff2a2a;
 }
 
 /* ── Grenade cook countdown ───────────────────────────────────────────────── */
