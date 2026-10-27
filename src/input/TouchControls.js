@@ -379,7 +379,7 @@ export class TouchControls {
     this._tapKey(this.swapBtn, "KeyQ");
     this._tapKey(this.healBtn, "KeyH");
     this._tapKey(this.bagBtn, "KeyI");
-    this._tapKey(this.torchBtn, "KeyF");
+    this._tapKey(this.torchBtn, "KeyN");
     this._tapKey(this.mapBtn, "KeyM");
     this._tapKey(this.startBtn, "Enter");
     this._tapKey(this.specMap, "KeyM");

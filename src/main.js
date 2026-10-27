@@ -790,8 +790,11 @@ flashlight.castShadow = false;
 scene.add(flashlight, flashlight.target);
 const torch = { on: false, manual: false, level: 0, hinted: false };
 
-const env = new Environment({ scene, renderer, lights: { hemi: hemiLight, ambient: ambientLight, sun } });
-const weather = new Weather(scene, "overcast", QUALITY.rain);
+// Always a clear, sunny midday: no day/night cycle and no rain
+const env = new Environment({ scene, renderer, lights: { hemi: hemiLight, ambient: ambientLight, sun }, startHour: 12 });
+env.paused = true;
+const weather = new Weather(scene, "clear", QUALITY.rain);
+weather.locked = true;
 const atmosphere = new Atmosphere(scene, QUALITY.mist);
 const grass = new Grass(scene, QUALITY.grass);
 const backdrop = new Backdrop({ segments: QUALITY.mountainSegments });
@@ -872,6 +875,7 @@ const cameraRig = {
   plane:  { distance: 24,   shoulder: 0,    height: 5.0,  fov: 66 }, // riding in the drop plane
   drive:  { distance: 5.6,  shoulder: 0,    height: 0.75, fov: 68 }, // behind the auto-rickshaw
   scope:  { distance: -0.15, shoulder: 0,   height: 0.04, fov: 7 },  // down a scope: at the eye (fov = the gun's)
+  fp:     { distance: 0,    shoulder: 0,    height: 0,    fov: 74 }, // first person indoors (eye from the head bone)
   followXZ: 16, followY: 9,
   pitchMin: -1.2, pitchMax: 1.0,
   sensitivity: 0.0022, aimSensitivity: 0.0012,
@@ -879,6 +883,11 @@ const cameraRig = {
 let aimYaw = 0, aimPitch = -0.12;
 let aimBlend = 0, sprintBlend = 0, airBlend = 0, planeBlend = 0, driveBlend = 0;
 let scopeBlend = 0;              // 0..1: looking down a scoped gun (sniper, 4x ACOG)
+let fpBlend = 0;                 // 0..1: first-person view, inside a house
+const FP_EYE_UP  = 0.1;          // eyes above the head joint (m)
+const FP_EYE_FWD = 0.14;         // ...and in front of it, along the aim
+const FP_NEAR    = 0.05;         // near plane in first person, so the gun in your hands isn't clipped
+const TP_NEAR    = 0.5;
 const SCOPE_AIM_FOV = 32;        // a scoped gun's shoulder-aim FOV on the way into the scope
 
 // Scope view: the lens overlay, and your own body hidden (the camera sits in
@@ -982,11 +991,11 @@ function setKey(code, pressed, repeat) {
       case "KeyQ": cycleThrowable(); break;
       case "KeyH": useHeal(); break;
       case "KeyB": if (nearShop) setShopOpen(!shopUI.open); break;
-      case "KeyO": if (nearDoor) useDoor(!nearDoor.doorOpen); break;
+      case "KeyF": if (nearDoor) useDoor(!nearDoor.doorOpen); break;
       case "KeyC": toggleStance("crouch"); break;
       case "KeyZ": toggleStance("prone"); break;
       case "KeyL": useLightSwitch(); break;
-      case "KeyF": toggleTorch(); break;
+      case "KeyN": toggleTorch(); break;
       case "KeyV": toggleVehicle(); break;
       case "KeyT": refuelVehicle(); break;
     }
@@ -1359,7 +1368,8 @@ function updateSoldier(delta) {
     localForward: onGround ? vx * sy + vz * cy : 0,
     localRight:   onGround ? -vx * cy + vz * sy : 0,
     // Prone always holds the gun up (the arms are what you lie on)
-    aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone"),
+    // First person holds it up too, so the gun is in front of you
+    aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone" || fpBlend > 0.5),
     firing: timeSinceShot < 0.12,
     aimYawOffset: angleDiff(aimYaw + recoilYaw, bodyYaw),
     aimPitch: aimPitch + recoilPitch,
@@ -1439,7 +1449,7 @@ function updateTorch(delta) {
   if (!torch.manual) torch.on = env.darkness > 0.55;
   if (env.darkness > 0.55 && !torch.hinted) {
     torch.hinted = true;
-    inventoryUI.feed(`Night falls. ${IS_TOUCH ? "The torch button" : "F"} toggles your flashlight (they can see it)`, "info");
+    inventoryUI.feed(`Night falls. ${IS_TOUCH ? "The torch button" : "N"} toggles your flashlight (they can see it)`, "info");
   }
   const want = torch.on && playerHealth > 0 && !brWatching() ? 1 : 0;
   torch.level += (want - torch.level) * (1 - Math.exp(-14 * delta));
@@ -1545,7 +1555,10 @@ function rigValue(key) {
   const { hip, aim, sprint, air, plane, drive: car } = cameraRig;
   const v = THREE.MathUtils.lerp(THREE.MathUtils.lerp(hip[key], aim[key], aimBlend), sprint[key], sprintBlend);
   const w = THREE.MathUtils.lerp(THREE.MathUtils.lerp(v, air[key], airBlend), plane[key], planeBlend);
-  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(w, car[key], driveBlend), cameraRig.scope[key], scopeBlend);
+  const d = THREE.MathUtils.lerp(w, car[key], driveBlend);
+  // First person zooms like the shoulder aim does
+  const fp = key === "fov" ? THREE.MathUtils.lerp(cameraRig.fp.fov, aim.fov, aimBlend) : cameraRig.fp[key];
+  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(d, fp, fpBlend), cameraRig.scope[key], scopeBlend);
 }
 
 /** Eases the freefall / plane / driving camera presets in and out. phase: a PHASE_* drop phase. */
@@ -1567,6 +1580,12 @@ function updateThirdPersonCamera(delta) {
   if (!scoped && scopeBlend < 0.01) scopeBlend = 0;
   updateScopeView();
   blendAirRig(isBR() ? br.flight : PHASE_GROUND, delta, drive.on);
+  // Inside a house the camera moves into your head; outside it's the shoulder camera again
+  const inside = alive && !drive.on && !climb.active && !brAirborne()
+    && !!houses?.houseAt(characterBody.position.x, characterBody.position.z);
+  fpBlend += ((inside ? 1 : 0) - fpBlend) * (1 - Math.exp(-8 * delta));
+  if (!inside && fpBlend < 0.01) fpBlend = 0;
+  soldier.setFirstPerson(fpBlend > 0.5);
 
   // Critically-damped style follow: tight on XZ, softer on Y so jumps/steps don't jolt
   const kxz = 1 - Math.exp(-cameraRig.followXZ * delta);
@@ -1586,6 +1605,8 @@ function updateSpectatorCamera(delta, p) {
   aimBlend    += (0 - aimBlend) * (1 - Math.exp(-12 * delta));
   scopeBlend = 0;
   updateScopeView();
+  fpBlend = 0;
+  soldier.setFirstPerson(false);
   sprintBlend += (0 - sprintBlend) * (1 - Math.exp(-4 * delta));
   blendAirRig(p.phase, delta, p.driving);
   const k = 1 - Math.exp(-10 * delta);
@@ -1613,7 +1634,7 @@ function placeCamera(yaw, rawPitch, delta) {
   camRayFrom.set(camPivot.x, camPivot.y, camPivot.z);
   camRayTo.set(camPivot.x + camOffset.x, camPivot.y + camOffset.y, camPivot.z + camOffset.z);
   let targetFrac = 1;
-  if (world.raycastClosest(camRayFrom, camRayTo, camRayOpts, camRayResult)) {
+  if (boom > 0.01 && world.raycastClosest(camRayFrom, camRayTo, camRayOpts, camRayResult)) {
     targetFrac = Math.max(0.1, (camRayResult.distance - 0.25) / boom);
   }
   if (targetFrac < camFrac) camFrac = targetFrac;
@@ -1633,10 +1654,28 @@ function placeCamera(yaw, rawPitch, delta) {
   }
 
   const fov = rigValue("fov");
-  if (Math.abs(camera.fov - fov) > 0.01) {
+  const near = fpBlend > 0.3 ? FP_NEAR : TP_NEAR;
+  if (Math.abs(camera.fov - fov) > 0.01 || camera.near !== near) {
     camera.fov = fov;
+    camera.near = near;
     camera.updateProjectionMatrix();
   }
+  camera.updateMatrixWorld();
+}
+
+/**
+ * First person: once the soldier is posed this frame, put the camera at its
+ * eyes (the head joint follows the stance, the walk and the aim lean).
+ */
+const _fpEye = new THREE.Vector3();
+function applyFirstPersonCamera() {
+  const w = fpBlend * (1 - scopeBlend);
+  if (w <= 0.001 || !soldier.root) return;
+  soldier.getHeadWorldPosition(_fpEye);
+  _fpEye.x += Math.sin(aimYaw) * FP_EYE_FWD;
+  _fpEye.y += FP_EYE_UP;
+  _fpEye.z += Math.cos(aimYaw) * FP_EYE_FWD;
+  camera.position.lerp(_fpEye, w);
   camera.updateMatrixWorld();
 }
 
@@ -2109,7 +2148,7 @@ function updatePickups(delta) {
     nearDoor = near?.door ?? null;
     nearSwitch = near?.sw ?? null;
     if (nearDoor) {
-      promptRows[n++] = "O";
+      promptRows[n++] = "F";
       promptRows[n++] = nearDoor.doorOpen ? "Close door" : "Open door";
     }
     if (nearSwitch) {
@@ -3187,15 +3226,6 @@ function setupGui() {
 
   }
 
-  const wFolder = gui.addFolder("🌗 Time & Weather");
-  wFolder.close();
-  wFolder.add(env, "hour", 0, 23.99, 0.01).name("Hour").listen();
-  wFolder.add(env, "timeScale", 0, 20, 0.1).name("Time speed");
-  wFolder.add(env, "bloodMoon").name("Blood moon").listen();
-  const wx = { state: weather.state };
-  wFolder.add(wx, "state", ["clear", "overcast", "drizzle", "rain", "storm"]).name("Weather").onChange(s => weather.set(s));
-  wFolder.add(weather, "locked").name("Hold weather");
-
   if (zombieManager) {
     const zFolder = gui.addFolder("👹 Monsters & Levels");
     zFolder.close();
@@ -3703,7 +3733,6 @@ function onConnected(welcome) {
     // The host owns the monsters; ours become puppets of its snapshots
     zombieManager.clearAll();
     zombieManager.pool.setPuppetMode(true);
-    weather.locked = true; // the host's sky
     inventoryUI.feed(`Joined room "${net.room}" · host: ${net.players.get(net.hostId)?.name ?? "?"}`, "info");
   } else {
     inventoryUI.feed(`Hosting room "${net.room}". Friends join with the same code.`, "info");
@@ -3712,7 +3741,6 @@ function onConnected(welcome) {
 }
 
 function becomeHost() {
-  weather.locked = false;
   if (isBR()) {
     // The match clock, zone and alive list are already here: just carry on
     inventoryUI.feed("You're hosting the match now", "info");
@@ -4415,14 +4443,8 @@ function brNoteAttacker(id, w, hs) {
   br.atkId = id; br.atkW = w; br.atkHs = hs; br.atkAt = clock.elapsedTime;
 }
 
-/** Co-op and battle royale clients follow the host's clock and weather. */
-function applyWorldClock(hr, wx) {
-  if (typeof hr === "number") {
-    const d = Math.abs(env.hour - hr);
-    if (Math.min(d, 24 - d) > 0.05) env.hour = hr;
-  }
-  if (wx && weather.state !== wx) weather.set(wx);
-}
+/** The sky is always a clear midday now, so there's no host clock or weather to follow. */
+function applyWorldClock() {}
 
 function enterBattleRoyale(welcome) {
   gameMode = "br";
@@ -4432,7 +4454,6 @@ function enterBattleRoyale(welcome) {
   for (const p of welcome.players) if (p.id !== net.id) remotePlayers.add(p);
   zombieManager.clearAll();
   enemyFire.clear();
-  if (net.isClient) weather.locked = true; // the host's sky
   brHud.setVisible(true);
   brEnterWarmup();
   inventoryUI.feed(net.isHost
@@ -5185,6 +5206,7 @@ function animate() {
   else updateThirdPersonCamera(realDelta);
   updateFocus(watched);
   updateSoldier(delta);
+  if (!watched) applyFirstPersonCamera();
   updateWeapon(delta);
   updateThrowAim(delta);
   throwables.update(delta);
@@ -5306,7 +5328,7 @@ function benchStep(now) {
   input.fire = false;
   bench.results.combat = perfOverlay.report().data;
   bench.on = false;
-  env.paused = false;
+  env.paused = true;
   const summary = {
     userAgent: navigator.userAgent, quality: QUALITY_NAME, pixelRatio: +perf.ratio.toFixed(2),
     screen: `${innerWidth}×${innerHeight} @ dpr ${devicePixelRatio}`,

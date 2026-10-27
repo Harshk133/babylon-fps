@@ -112,6 +112,7 @@ export class Soldier {
     this._spineDelta = new THREE.Quaternion();
     this.gearMeshes = { helmet: [], vest: [], backpack: [] }; // [level − 1] → mesh
     this.gear = { helmet: 0, vest: 0, backpack: 0 };
+    this.firstPerson = false;    // the camera sits in the head: head and helmet hidden
   }
 
   async load(loader = new GLTFLoader()) {
@@ -137,6 +138,8 @@ export class Soldier {
     this.abdomen = bone("Abdomen");
     this.chest   = bone("Chest");
     this.neck    = bone("Neck");
+    this.headBone = bone("Head");
+    this.headMesh = model.getObjectByName("Soldier_Head");
     this.hand    = bone("WristR");
     this.palm    = bone("Middle1R");
     this.legs = ["UpperLeg.L", "UpperLeg.R", "LowerLeg.L", "LowerLeg.R"].map(bone);
@@ -301,8 +304,24 @@ export class Soldier {
       const lv = levels?.[slot] ?? 0;
       if (this.gear[slot] === lv) continue;
       this.gear[slot] = lv;
-      this.gearMeshes[slot].forEach((m, i) => showPart(m, i === lv - 1));
+      this.gearMeshes[slot].forEach((m, i) => showPart(m, i === lv - 1 && !(slot === "helmet" && this.firstPerson)));
     }
+  }
+
+  /** First-person view (indoors): hides the head and helmet the camera sits in. */
+  setFirstPerson(on) {
+    if (this.firstPerson === on) return;
+    this.firstPerson = on;
+    if (this.headMesh) this.headMesh.visible = !on;
+    const lv = this.gear.helmet;
+    this.gearMeshes.helmet.forEach((m, i) => showPart(m, i === lv - 1 && !on));
+  }
+
+  /** World position of the head joint (base of the skull), as posed this frame. */
+  getHeadWorldPosition(out) {
+    const b = this.headBone ?? this.root;
+    b.updateWorldMatrix(true, false);
+    return out.setFromMatrixPosition(b.matrixWorld);
   }
 
   _makeAction(clip) {

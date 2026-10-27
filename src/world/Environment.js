@@ -9,7 +9,8 @@ import * as THREE from "three";
 
 const SKY_RADIUS = 190; // inside the camera's far plane (220)
 
-// Palette by hour. Days stay grey and overcast; it's a horror game.
+// Palette by hour. The game holds at a clear, sunny midday (main.js pauses
+// the clock at 12:00); the other keys are kept for the benchmark and tuning.
 // top/hor: sky gradient · fog: colour/near/far · light: sun or moon colour +
 // intensity · hemi: sky/ground/intensity · amb: ambient · exp: tone-map
 // exposure · stars 0..1 · dark: gameplay darkness 0..1
@@ -18,8 +19,8 @@ const KEYS = [
   { h: 4.6,  top: 0x060912, hor: 0x161b2a, fog: 0x0e121b, near: 3,  far: 66,  light: 0x8ea4d8, li: 0.46, hs: 0x2c3a58, hg: 0x0b0a09, hi: 0.48, amb: 0x26304a, ai: 0.14, exp: 0.95, stars: 0.9, dark: 1 },
   { h: 5.9,  top: 0x1a2036, hor: 0x5b4655, fog: 0x332b36, near: 5,  far: 80,  light: 0xff9a74, li: 0.7,  hs: 0x55597a, hg: 0x1c1714, hi: 0.5,  amb: 0x3a3a50, ai: 0.16, exp: 0.98, stars: 0.3, dark: 0.7 },
   { h: 7.2,  top: 0x48566f, hor: 0xb89a8c, fog: 0x7c7478, near: 10, far: 115, light: 0xffc8a8, li: 1.5,  hs: 0x8090b0, hg: 0x3a3028, hi: 0.72, amb: 0x5a5a68, ai: 0.2,  exp: 1.0,  stars: 0,   dark: 0.25 },
-  { h: 10,   top: 0x5a6a80, hor: 0xa2a8ac, fog: 0x8f9599, near: 16, far: 140, light: 0xfff0dc, li: 1.9,  hs: 0xa6b4c6, hg: 0x463d34, hi: 0.85, amb: 0x6a6a72, ai: 0.22, exp: 1.0,  stars: 0,   dark: 0 },
-  { h: 14.5, top: 0x56667e, hor: 0xa6a6a4, fog: 0x939390, near: 16, far: 140, light: 0xfff0dc, li: 1.9,  hs: 0xa6b4c6, hg: 0x463d34, hi: 0.85, amb: 0x6a6a72, ai: 0.22, exp: 1.0,  stars: 0,   dark: 0 },
+  { h: 10,   top: 0x2f6fc8, hor: 0xa9cbe8, fog: 0xb4cde2, near: 30, far: 190, light: 0xfff4e2, li: 2.5,  hs: 0xbcd6f2, hg: 0x5a4b38, hi: 0.95, amb: 0x7c828c, ai: 0.26, exp: 1.05, stars: 0,   dark: 0 },
+  { h: 14.5, top: 0x2f6fc8, hor: 0xa9cbe8, fog: 0xb4cde2, near: 30, far: 190, light: 0xfff4e2, li: 2.5,  hs: 0xbcd6f2, hg: 0x5a4b38, hi: 0.95, amb: 0x7c828c, ai: 0.26, exp: 1.05, stars: 0,   dark: 0 },
   { h: 17,   top: 0x48557a, hor: 0xd69a6a, fog: 0xa88066, near: 22, far: 160, light: 0xffc48a, li: 2.2,  hs: 0x9fb4d8, hg: 0x4a3a2c, hi: 0.85, amb: 0x7a6658, ai: 0.22, exp: 1.04, stars: 0,   dark: 0.05 },
   { h: 18.6, top: 0x2a2340, hor: 0xa8462f, fog: 0x56302a, near: 12, far: 110, light: 0xff6a3a, li: 1.3,  hs: 0x6a5a7a, hg: 0x2a1e18, hi: 0.6,  amb: 0x553a38, ai: 0.18, exp: 1.02, stars: 0,   dark: 0.35 },
   { h: 19.8, top: 0x0d0f20, hor: 0x3a2030, fog: 0x1d1520, near: 5,  far: 78,  light: 0x9a7090, li: 0.45, hs: 0x38385a, hg: 0x13100e, hi: 0.42, amb: 0x302a40, ai: 0.15, exp: 0.97, stars: 0.6, dark: 0.75 },
