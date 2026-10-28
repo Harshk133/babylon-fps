@@ -81,7 +81,7 @@ const BACKPEDAL_SPEED     = 3.6;
 const STRAFE_SPEED        = 4.6;
 const SPRINT_SPEED        = 8.0;   // Shift + W, can't shoot while sprinting
 const AIM_MOVE_MULTIPLIER = 0.62;  // slower while aiming down sights
-const JUMP_VELOCITY       = 5.5;
+const JUMP_VELOCITY       = 6.5;   // ≈1.05 m (gravity is 20); still short of a 1.44 m parapet
 const CHARACTER_HEIGHT    = 1.8;
 const CHARACTER_RADIUS    = 0.35;
 const CAPSULE_HEIGHT      = CHARACTER_HEIGHT - CHARACTER_RADIUS * 2;
@@ -1350,7 +1350,7 @@ function updateMood(delta) {
   // Underground: how far from daylight the camera is (0 outside … 1 deep in a cave), eased
   const deep = caves ? caves.depthAt(camera.position.x, camera.position.y, camera.position.z) : 0;
   caveDepth += (deep - caveDepth) * (1 - Math.exp(-3 * delta));
-  indoor = !!houses?.houseAt(camera.position.x, camera.position.z) || deep > 0.05;
+  indoor = !!houses?.indoorAt(camera.position.x, camera.position.y, camera.position.z) || deep > 0.05;
   env.update(delta, camera, weather);
   if (caveDepth > 0.001) dimUnderground(caveDepth);
   caves?.update(delta, camera.position, renderer.domElement.height);
@@ -2281,9 +2281,10 @@ const _earUp = new THREE.Vector3();
 const _fireAt = { x: 0, y: 0, z: 0 };
 let _wasOnGround = true, _fallSpeed = 0;
 
-/** What feet hit at (x, feetY, z): house floors are wood, caves stone, the rest grass. */
+/** What feet hit at (x, feetY, z): house floors are wood, roof terraces and caves stone, the rest grass. */
 function footSurface(x, feetY, z) {
   if (houses?.floorAt(x, feetY, z)) return "wood";
+  if (houses?.onRoof(x, feetY, z)) return "concrete";
   if (caves?.inside(x, z, feetY)) return "concrete";
   return "grass";
 }
@@ -3190,8 +3191,6 @@ const remotePlayers = new RemotePlayers({
   capsule: { radius: CHARACTER_RADIUS, height: CAPSULE_HEIGHT },
   addCapsule: addCapsuleToBody,
 });
-// Smoke hides enemy name tags in the battle royale
-remotePlayers.concealed = (from, to) => smokeFX.blocks(from, to);
 // Teammates' and enemies' footsteps, from where they are
 const _stepAt = { x: 0, y: 0, z: 0 };
 remotePlayers.onStep = (p, x, feetY, z, vol) => {

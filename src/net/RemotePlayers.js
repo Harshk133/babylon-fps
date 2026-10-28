@@ -7,13 +7,11 @@ import { STANCES, STANCE_NAMES, setCapsuleStance } from "../player/Stance.js";
 
 // Teammates in co-op: an animated Soldier per remote player, driven by the
 // state packets they send (~20 Hz) and smoothed between packets. Each one gets
-// a floating name tag (name in their colour + health bar) and a kinematic
-// capsule so monsters can collide with, see and shoot them.
+// a kinematic capsule so monsters can collide with, see and shoot them. No
+// name tag or health bar floats over their heads.
 
 const POS_SMOOTH  = 14;    // exp rate toward the latest (extrapolated) position
 const MAX_EXTRAP  = 0.25;  // seconds of dead reckoning between packets
-const TAG_HEIGHT  = 2.25;  // metres above the feet
-const PVP_TAG_RANGE = 45;  // battle royale: enemy names only show up close (and not through walls)
 
 // Drop phase from the state packet (battle royale)
 export const PHASE_GROUND = 0, PHASE_PLANE = 1, PHASE_FALL = 2, PHASE_CHUTE = 3;
@@ -23,31 +21,6 @@ function angleDiff(a, b) {
   if (d > Math.PI) d -= Math.PI * 2;
   else if (d < -Math.PI) d += Math.PI * 2;
   return d;
-}
-
-function drawTag(ctx, name, color, hpFrac, dead) {
-  const W = ctx.canvas.width, H = ctx.canvas.height;
-  ctx.clearRect(0, 0, W, H);
-  ctx.font = "800 40px 'Segoe UI', system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.lineWidth = 8;
-  ctx.strokeStyle = "rgba(0, 0, 0, 0.85)";
-  ctx.strokeText(name, W / 2, 34);
-  ctx.fillStyle = dead ? "#8a8a8a" : color;
-  ctx.fillText(name, W / 2, 34);
-  // Health bar
-  const bw = 220, bh = 12, bx = (W - bw) / 2, by = 70;
-  ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-  ctx.fillRect(bx - 3, by - 3, bw + 6, bh + 6);
-  ctx.fillStyle = hpFrac > 0.35 ? color : "#ff4b3a";
-  ctx.fillRect(bx, by, bw * Math.max(0, hpFrac), bh);
-  if (dead) {
-    ctx.font = "900 22px 'Segoe UI', system-ui, sans-serif";
-    ctx.fillStyle = "#ff4b3a";
-    ctx.strokeText("DOWN", W / 2, 106);
-    ctx.fillText("DOWN", W / 2, 106);
-  }
 }
 
 export class RemotePlayers {
@@ -68,8 +41,6 @@ export class RemotePlayers {
     this._pvp = false;
     /** (player, x, feetY, z, vol 0..1) → plays a footfall there (set by main.js). */
     this.onStep = null;
-    /** (from, to) → true if a smoke cloud hides the line between them (set by main.js). */
-    this.concealed = null;
     this._targets = [];
     this._v = new THREE.Vector3();
     this._muzzle = new THREE.Vector3();
@@ -81,15 +52,6 @@ export class RemotePlayers {
     const root = new THREE.Group();
     root.position.set(0, -500, 0);
     this.scene.add(root);
-
-    const canvas = document.createElement("canvas");
-    canvas.width = 320; canvas.height = 128;
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: this._pvp, transparent: true }));
-    tag.renderOrder = 10;
-    tag.visible = false;
-    this.scene.add(tag);
 
     const body = new CANNON.Body({
       mass: 0, type: CANNON.Body.KINEMATIC, material: this.material,
@@ -103,13 +65,13 @@ export class RemotePlayers {
     root.add(chute);
 
     const p = {
-      id, name, color, root, tag, tex, ctx: canvas.getContext("2d"), body,
+      id, name, color, root, body,
       soldier: null, ready: false, hasState: false,
       // latest packet + smoothed values
       tx: 0, ty: 0, tz: 0, vx: 0, vz: 0, extrap: 0,
       bodyYaw: 0, aimYaw: 0, aimPitch: 0, aim: false, fire: false, weapon: "smg",
       hp: 100, dead: false, vis: 1, kills: 0, phase: PHASE_GROUND, chute, skydive: 0,
-      tagKey: "", stance: "stand",
+      stance: "stand",
       target: {
         id, pos: body.position, vel: { x: 0, z: 0 }, alive: false, vis: 1, local: false, name,
         aimOff: STANCES.stand.aimOff, eyeOff: STANCES.stand.eyeOff,
@@ -135,9 +97,6 @@ export class RemotePlayers {
     const p = this.players.get(id);
     if (!p) return;
     this.scene.remove(p.root);
-    this.scene.remove(p.tag);
-    p.tag.material.map.dispose();
-    p.tag.material.dispose();
     this.world.removeBody(p.body);
     this.players.delete(id);
   }
@@ -148,14 +107,8 @@ export class RemotePlayers {
 
   get count() { return this.players.size; }
 
-  /** Battle royale: everyone is an enemy, so name tags stop showing through walls. */
-  set pvp(on) {
-    this._pvp = on;
-    for (const p of this.players.values()) {
-      p.tag.material.depthTest = on;
-      p.tag.material.needsUpdate = true;
-    }
-  }
+  /** Battle royale: everyone is an enemy. */
+  set pvp(on) { this._pvp = on; }
   get pvp() { return this._pvp; }
 
   /** Latest state packet from a teammate. */
@@ -297,20 +250,6 @@ export class RemotePlayers {
           aimPitch: p.aimPitch,
         });
       }
-
-      // Name tag: readable size at any distance, redrawn only when it changes
-      const key = `${Math.round(p.hp / 5)}|${p.dead}`;
-      if (key !== p.tagKey) {
-        p.tagKey = key;
-        drawTag(p.ctx, p.name, p.color, p.hp / 100, p.dead);
-        p.tex.needsUpdate = true;
-      }
-      p.tag.position.set(b.x, b.y - feetOffset + TAG_HEIGHT, b.z);
-      const dist = camera.position.distanceTo(p.tag.position);
-      // In PvP smoke hides enemies' names too (concealed: camera → tag passes through a cloud)
-      p.tag.visible = !inPlane && (!this._pvp || (dist < PVP_TAG_RANGE && !this.concealed?.(camera.position, p.tag.position)));
-      const s = THREE.MathUtils.clamp(dist * 0.055, 0.9, 5);
-      p.tag.scale.set(s * 2.5, s, 1);
     }
   }
 }

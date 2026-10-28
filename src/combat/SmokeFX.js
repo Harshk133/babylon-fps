@@ -7,7 +7,7 @@ import { SMOKE, SMOKE_COLORS } from "./weapons.js";
 // and stay in the scene (hidden when idle), so nothing compiles mid-match.
 //
 // Gameplay reads the same shape on the CPU: blocks() says whether a sight
-// line passes through a cloud (enemy name tags hide behind smoke) and
+// line passes through a cloud and
 // density() how deep a point is inside one (the screen tint when you're in it).
 
 const MAX_CLOUDS = 4;
