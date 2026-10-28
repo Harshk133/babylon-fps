@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { SpatialGrid } from "./SpatialGrid.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { fbm, groundHeight, shoreRadius } from "./Terrain.js";
 import { QUALITY, QUALITY_NAME } from "../quality.js";
@@ -224,10 +225,13 @@ export class Farmland {
       f.r = Math.hypot(f.hw, f.hd);
     }
     this.cane = fields.filter(f => f.kind === "sugarcane");
+    // Fields by grid cell (pads up to 8 m), for the per-sample questions while the terrain builds
+    this.grid = new SpatialGrid(24, 8);
+    for (const f of fields) this.grid.insertCircle(f, f.x, f.z, f.r);
   }
 
   _inField(x, z, pad = 0) {
-    for (const f of this.fields) {
+    for (const f of pad <= 8 ? this.grid.near(x, z) : this.fields) {
       if (Math.abs(x - f.x) > f.r + pad || Math.abs(z - f.z) > f.r + pad) continue;
       toLocal(f, x, z, _l);
       if (Math.abs(_l.x) < f.hw + pad && Math.abs(_l.z) < f.hd + pad) return f;
@@ -237,7 +241,8 @@ export class Farmland {
 
   /** True in a sugarcane field's crop (not on its lanes or border). */
   inCane(x, z) {
-    for (const f of this.cane) {
+    for (const f of this.grid.near(x, z)) {
+      if (f.kind !== "sugarcane") continue;
       if (Math.abs(x - f.x) > f.r || Math.abs(z - f.z) > f.r) continue;
       toLocal(f, x, z, _l);
       if (Math.abs(_l.x) > f.hw - EDGE || Math.abs(_l.z) > f.hd - EDGE) continue;

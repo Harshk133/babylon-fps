@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { lightPool } from "../render/LightPool.js";
+import { SpatialGrid } from "./SpatialGrid.js";
 import * as CANNON from "cannon-es";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { GROUP_WORLD, GROUP_GLASS, GROUP_ZOMBIE } from "../physicsGroups.js";
@@ -49,6 +51,7 @@ const SHELL_RANGE = 235;                // m: past the camera's far plane anyway
 const NEAR_ALWAYS = 55;                 // m: drawn even behind you (their shadows reach into view)
 const INTERIOR_RANGE = 50;              // m: furniture, lamps and switches only up close
 const R90 = Math.PI / 2;
+const GRID_REACH = 10;                  // m: blocks() / inYard() pads up to this use the spatial grid
 
 // Compound walls (world metres)
 const YARD_WALL_H = 1.8;
@@ -302,6 +305,7 @@ export class Houses {
     this.obstacles = obstacles;
     this.houses = [];
     this.compounds = [];
+    this._grid = null;      // SpatialGrid over houses and yards (built on first query, dropped on add)
 
     const kit = gltf.scene;
     kit.updateMatrixWorld(true);
@@ -331,7 +335,7 @@ export class Houses {
     for (let i = 0; i < HOUSE_LIGHTS; i++) {
       const l = new THREE.PointLight(0xffd29a, 0, 11, 1.4);
       l.position.set(0, -500, 0);
-      scene.add(l);
+      lightPool.adopt(l, 1);
       this.lights.push(l);
     }
     this._finalized = false;
@@ -627,6 +631,7 @@ export class Houses {
     });
     this._syncDoorBody(h);
     this.houses.push(h);
+    this._grid = null;
     return h;
   }
 
@@ -716,6 +721,7 @@ export class Houses {
     this._yardWorld(c, gateX, hd + 1.6, c.gateOut);
     this._yardWorld(c, gateX, hd - 1.6, c.gateIn);
     this.compounds.push(c);
+    this._grid = null;
     return c;
   }
 
@@ -1001,26 +1007,48 @@ export class Houses {
     return h ? h.floors[this.level(h, y)] : null;
   }
 
+  /** Houses and yards that may be within GRID_REACH of (x, z) (all of them for a bigger pad). */
+  _nearby(x, z, pad) {
+    if (pad > GRID_REACH) return null;
+    if (!this._grid) {
+      this._grid = new SpatialGrid(16, GRID_REACH);
+      for (const h of this.houses) this._grid.insertCircle(h, h.x, h.z, h.radius);
+      for (const c of this.compounds) this._grid.insertCircle(c, c.x, c.z, Math.hypot(c.hw, c.hd));
+    }
+    return this._grid.near(x, z);
+  }
+
   /** True if (x, z) is inside or right against any house or compound wall (keeps spawns and props out). */
   blocks(x, z, pad = 1.5) {
-    for (const h of this.houses) {
-      if (Math.abs(x - h.x) > h.radius + pad || Math.abs(z - h.z) > h.radius + pad) continue;
-      const l = this._toLocal(h, x, z, _a);
-      if (Math.abs(l.x) < h.hw + pad / HOUSE_SCALE && Math.abs(l.z) < h.hd + pad / HOUSE_SCALE) return true;
+    const near = this._nearby(x, z, pad);
+    if (near) {
+      for (const o of near) if (o.floors ? this._blocksHouse(o, x, z, pad) : this._blocksYard(o, x, z, pad)) return true;
+      return false;
     }
-    for (const c of this.compounds) {
-      const l = this._yardLocal(c, x, z, _a);
-      const ax = Math.abs(l.x), az = Math.abs(l.z);
-      if (ax > c.hw + pad || az > c.hd + pad) continue;
-      // On (or near) a wall line, not anywhere in the yard
-      if (ax > c.hw - pad || az > c.hd - pad) return true;
-    }
+    for (const h of this.houses) if (this._blocksHouse(h, x, z, pad)) return true;
+    for (const c of this.compounds) if (this._blocksYard(c, x, z, pad)) return true;
     return false;
+  }
+
+  _blocksHouse(h, x, z, pad) {
+    if (Math.abs(x - h.x) > h.radius + pad || Math.abs(z - h.z) > h.radius + pad) return false;
+    const l = this._toLocal(h, x, z, _a);
+    return Math.abs(l.x) < h.hw + pad / HOUSE_SCALE && Math.abs(l.z) < h.hd + pad / HOUSE_SCALE;
+  }
+
+  _blocksYard(c, x, z, pad) {
+    const l = this._yardLocal(c, x, z, _a);
+    const ax = Math.abs(l.x), az = Math.abs(l.z);
+    if (ax > c.hw + pad || az > c.hd + pad) return false;
+    // On (or near) a wall line, not anywhere in the yard
+    return ax > c.hw - pad || az > c.hd - pad;
   }
 
   /** True if (x, z) is inside a compound's yard. */
   inYard(x, z, margin = 0) {
-    for (const c of this.compounds) {
+    const near = this._nearby(x, z, Math.max(0, -margin));
+    for (const c of near ?? this.compounds) {
+      if (near && c.floors) continue;   // a house, not a yard
       const l = this._yardLocal(c, x, z, _a);
       if (Math.abs(l.x) < c.hw - margin && Math.abs(l.z) < c.hd - margin) return true;
     }

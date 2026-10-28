@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { lightPool } from "../render/LightPool.js";
 import * as CANNON from "cannon-es";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { rawHeight, fbm, groundHeight } from "./Terrain.js";
@@ -725,7 +726,7 @@ export class Caves {
       const l = new THREE.PointLight(0xff9a48, 0, 12, 1.5);
       l.userData.torch = null;
       l.userData.fade = 0;
-      scene.add(l);
+      lightPool.adopt(l, 1.5);
       this.lights.push(l);
     }
     for (const net of NETS) this._buildNav(net);

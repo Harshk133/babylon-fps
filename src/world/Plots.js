@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { SpatialGrid } from "./SpatialGrid.js";
 import * as CANNON from "cannon-es";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { GROUP_WORLD, GROUP_ZOMBIE } from "../physicsGroups.js";
@@ -271,7 +272,11 @@ export class Plots {
   }
 
   _at(x, z, pad = 0) {
-    for (const p of this.plots) {
+    if (!this.grid) {
+      this.grid = new SpatialGrid(24, 6);
+      for (const p of this.plots) this.grid.insertCircle(p, p.x, p.z, Math.hypot(p.hw, p.hd));
+    }
+    for (const p of pad <= 6 ? this.grid.near(x, z) : this.plots) {
       if (Math.abs(x - p.x) > p.hw + p.hd + pad || Math.abs(z - p.z) > p.hw + p.hd + pad) continue;
       const dx = x - p.x, dz = z - p.z, c = Math.cos(p.rot), s = Math.sin(p.rot);
       const lx = dx * c - dz * s, lz = dx * s + dz * c;

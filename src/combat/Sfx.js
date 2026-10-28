@@ -55,15 +55,29 @@ export class Sfx {
   preload() {
     if (this._raw) return;
     this._raw = {};
-    this._manifest = fetch(`${SOUND_DIR}manifest.json`)
+    // One request for every sample: pack.bin (the .ogg files back to back) +
+    // pack.json (offsets), made by scripts/pack-sounds.mjs. Without it, one
+    // request per file from manifest.json.
+    const packed = Promise.all([
+      fetch(`${SOUND_DIR}pack.json`).then(r => (r.ok ? r.json() : null)),
+      fetch(`${SOUND_DIR}pack.bin`).then(r => (r.ok ? r.arrayBuffer() : null)),
+    ]).then(([index, bin]) => {
+      if (!index || !bin) return false;
+      // slice() copies: decodeAudioData detaches the buffer it gets
+      for (const [group, list] of Object.entries(index)) {
+        this._raw[group] = list.map(([off, len]) => Promise.resolve(bin.slice(off, off + len)));
+      }
+      return true;
+    }).catch(() => false);
+    this._manifest = packed.then(ok => ok || fetch(`${SOUND_DIR}manifest.json`)
       .then(r => (r.ok ? r.json() : {}))
       .then(man => {
         for (const [group, n] of Object.entries(man)) {
           this._raw[group] = Array.from({ length: n }, (_, i) =>
             fetch(`${SOUND_DIR}${group}_${i}.ogg`).then(r => (r.ok ? r.arrayBuffer() : null)).catch(() => null));
         }
-        if (this.ctx) this._decodeAll();
-      })
+      }))
+      .then(() => { if (this.ctx) this._decodeAll(); })
       .catch(() => { /* offline: the synth fallbacks cover everything */ });
   }
 

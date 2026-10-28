@@ -18,6 +18,7 @@ import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null },
+    uScale: { value: new THREE.Vector2(1, 1) },  // the part of the target the scene filled (dynamic resolution)
     toneMappingExposure: { value: 1 },
     uRes: { value: new THREE.Vector2(1, 1) },
     uTime: { value: 0 },
@@ -48,6 +49,7 @@ const GradeShader = {
   fragmentShader: /* glsl */ `
     precision highp float;
     uniform sampler2D tDiffuse;
+    uniform vec2 uScale;
     uniform vec2 uRes;
     uniform float uTime;
     uniform float uSat;
@@ -69,11 +71,13 @@ const GradeShader = {
       vec2 c = vUv - 0.5;
       vec3 col;
       // Chromatic aberration: red and blue pulled apart toward the edges
+      // (the scene only filled the bottom-left uScale of the target)
+      vec2 suv = vUv * uScale;
       if (uChroma > 0.01) {
-        vec2 off = c * uChroma / uRes.y * 2.0;
-        col = vec3(texture2D(tDiffuse, vUv + off).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv - off).b);
+        vec2 off = c * uChroma / uRes.y * 2.0 * uScale;
+        col = vec3(texture2D(tDiffuse, suv + off).r, texture2D(tDiffuse, suv).g, texture2D(tDiffuse, suv - off).b);
       } else {
-        col = texture2D(tDiffuse, vUv).rgb;
+        col = texture2D(tDiffuse, suv).rgb;
       }
 
       col = ACESFilmicToneMapping(col);
@@ -160,6 +164,27 @@ export class PostFX {
     this.target.setSize(width, height);
     this.bloom?.setSize(width, height);
     this.uniforms.uRes.value.set(width, height);
+    this.setScale(this.scale ?? 1);
+  }
+
+  /** True when setScale() can change the render scale (no bloom: it reads the whole target). */
+  get canScale() { return this.enabled && !this.bloom; }
+
+  /**
+   * Dynamic resolution without reallocating anything: the scene draws into
+   * the bottom-left `s` of the target (viewport + scissor) and the grade pass
+   * stretches that part over the screen. Changing it is free (no canvas or
+   * target resize, so no hitch), unlike changing the pixel ratio.
+   */
+  setScale(s) {
+    if (!this.enabled) return;
+    this.scale = s;
+    const t = this.target;
+    const w = Math.max(1, Math.round(t.width * s)), h = Math.max(1, Math.round(t.height * s));
+    t.viewport.set(0, 0, w, h);
+    t.scissor.set(0, 0, w, h);
+    t.scissorTest = s < 1;
+    this.uniforms.uScale.value.set(w / t.width, h / t.height);
   }
 
   /** The scene draws into this (set it before compiling materials, so they match). */

@@ -10,7 +10,8 @@ const AUTO_RADIUS     = 1.4;   // ammo / throwables / medkits: walk over to coll
 const BLINK_TIME      = 5;     // timed drops blink for their last few seconds
 const FAR_SKIP        = 90;    // timed drops still count down this far away
 const MODEL_RANGE     = 55;    // loot further away isn't drawn
-const MODELS_PER_KIND = 96;    // instances per item kind within MODEL_RANGE
+const MODELS_PER_KIND = 96;    // glass parts: instances per item kind within MODEL_RANGE
+const SLOTS           = 256;   // loot drawn at once (within MODEL_RANGE), per batch
 const OUTLINE_WIDTH   = 0.012; // m of white rim up close; it widens with distance so it stays readable
 
 const _m = new THREE.Matrix4();
@@ -30,7 +31,11 @@ function makeOutlineMaterial() {
     shader.vertexShader = "uniform float uOutline;\n" + shader.vertexShader.replace(
       "#include <begin_vertex>",
       `#include <begin_vertex>
-      vec4 olWorld = modelMatrix * instanceMatrix * vec4(position, 1.0);
+      #ifdef USE_BATCHING
+        vec4 olWorld = modelMatrix * batchingMatrix * vec4(position, 1.0);
+      #else
+        vec4 olWorld = modelMatrix * instanceMatrix * vec4(position, 1.0);
+      #endif
       float olDist = distance(olWorld.xyz, cameraPosition);
       transformed += normalize(normal) * uOutline * clamp(olDist * 0.18, 1.0, 6.0);`,
     );
@@ -81,10 +86,13 @@ function bakedPart(mesh, matrix) {
 }
 
 /**
- * World pickups. Entries are plain records (pooled per kind); everything is
- * drawn through instanced meshes: per item kind one each for its metal, matte
- * and glass parts (part colours baked into vertex colours) plus one for its
- * white outline. Loot lies on the ground at a fixed random heading.
+ * World pickups. Entries are plain records (pooled per kind). Drawing: every
+ * kind's matte parts, metal parts and white outline live in three
+ * BatchedMeshes (one each for all kinds: a multi-draw call draws a different
+ * model per instance), so all the loot on screen costs three draw calls
+ * instead of one per kind per material. Part colours are baked into vertex
+ * colours. Glass parts (rare) keep an InstancedMesh per kind. Loot lies on
+ * the ground at a fixed random heading.
  */
 export class Pickups {
   constructor(scene) {
@@ -101,11 +109,54 @@ export class Pickups {
     this.matteMat = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.05, roughness: 0.72 });
     this.metalMat = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.7, roughness: 0.4 });
     this.outlineMat = makeOutlineMaterial();
-    this.kindMeshes = {};     // kind → [InstancedMesh]
+    // Every kind's geometry first (the batches are sized to fit them all)
+    const geos = {};
     for (const kind of Object.keys(PICKUP_KINDS)) {
       this.pools[kind] = [];
-      this._kindMeshes(kind);
+      geos[kind] = this._kindGeometry(kind);
     }
+    this.batches = {
+      matte: this._batch(Object.values(geos).map(g => g.matte), this.matteMat),
+      metal: this._batch(Object.values(geos).map(g => g.metal), this.metalMat),
+      outline: this._batch(Object.values(geos).map(g => g.outline), this.outlineMat),
+    };
+    // kind → { matte, metal, outline: geometry ids (−1 = none), glass: InstancedMesh | null }
+    this.kindDraw = {};
+    for (const [kind, g] of Object.entries(geos)) {
+      const draw = { glass: null };
+      for (const cls of ["matte", "metal", "outline"]) {
+        draw[cls] = g[cls] ? this.batches[cls].mesh.addGeometry(g[cls]) : -1;
+        if (draw[cls] >= 0 && this.batches[cls].first < 0) this.batches[cls].first = draw[cls];
+      }
+      if (g.glass) {
+        draw.glass = new THREE.InstancedMesh(g.glass.geo, g.glass.mat, MODELS_PER_KIND);
+        this._prepare(draw.glass, 2);
+      }
+      this.kindDraw[kind] = draw;
+    }
+    // A fixed pool of instance slots per batch; each frame they're handed to whatever is in range
+    for (const b of Object.values(this.batches)) {
+      if (b.first < 0) continue;   // no kind has parts of this class
+      for (let i = 0; i < SLOTS; i++) {
+        const id = b.mesh.addInstance(b.first);
+        b.mesh.setVisibleAt(id, false);
+        b.slots.push(id);
+        b.geo.push(-1);
+      }
+    }
+  }
+
+  /** A BatchedMesh big enough for these geometries (nulls skipped). */
+  _batch(list, material) {
+    let verts = 0, idx = 0;
+    for (const g of list) if (g) { verts += g.attributes.position.count; idx += g.index.count; }
+    const mesh = new THREE.BatchedMesh(SLOTS, Math.max(1, verts), Math.max(1, idx), material);
+    mesh.frustumCulled = false;          // instances spread over the map; each one is culled on its own
+    mesh.perObjectFrustumCulled = true;
+    mesh.sortObjects = false;            // opaque: no need to sort
+    mesh.castShadow = false;             // small loot doesn't need a shadow pass
+    this.scene.add(mesh);
+    return { mesh, slots: [], geo: [], used: 0, prevUsed: 0, first: -1 };
   }
 
   _prepare(im, renderOrder) {
@@ -118,11 +169,12 @@ export class Pickups {
   }
 
   /**
-   * Bakes a kind's model into instanced meshes, one per material class, in
-   * ground space: guns, attachments, vests and backpacks laid on their side,
-   * scaled, centred on x / z and resting on y = 0.
+   * Bakes a kind's model, one geometry per material class, in ground space:
+   * guns, attachments, vests and backpacks laid on their side, scaled,
+   * centred on x / z and resting on y = 0. Returns { matte, metal, outline,
+   * glass: { geo, mat } }, each null when the kind has none.
    */
-  _kindMeshes(kind) {
+  _kindGeometry(kind) {
     const def = PICKUP_KINDS[kind];
     const template = getItemTemplate(kind);
     template.updateMatrixWorld(true);
@@ -149,19 +201,23 @@ export class Pickups {
       else if (o.material.metalness >= 0.5) groups.metal.push(part);
       else groups.matte.push(part);
     });
-    const meshes = [];
-    for (const [cls, parts] of Object.entries(groups)) {
-      if (!parts.length) continue;
-      const geo = parts.length === 1 ? parts[0] : mergeParts(parts);
-      const mat = cls === "glass" ? glassMat : cls === "metal" ? this.metalMat : this.matteMat;
-      const im = new THREE.InstancedMesh(geo, mat, MODELS_PER_KIND);
-      this._prepare(im, cls === "glass" ? 2 : 0);
-      meshes.push(im);
-    }
-    const outline = new THREE.InstancedMesh(outlineGeometry(all), this.outlineMat, MODELS_PER_KIND);
-    this._prepare(outline, 0);
-    meshes.push(outline);
-    return (this.kindMeshes[kind] = meshes);
+    const merged = parts => (!parts.length ? null : parts.length === 1 ? parts[0] : mergeParts(parts));
+    return {
+      matte: merged(groups.matte),
+      metal: merged(groups.metal),
+      outline: outlineGeometry(all),
+      glass: groups.glass.length ? { geo: merged(groups.glass), mat: glassMat } : null,
+    };
+  }
+
+  /** Puts the next free slot of batch `cls` at matrix _m showing geometry `geoId`. */
+  _place(cls, geoId) {
+    const b = this.batches[cls];
+    if (geoId < 0 || b.used >= b.slots.length) return;
+    const k = b.used++, id = b.slots[k];
+    if (b.geo[k] !== geoId) { b.mesh.setGeometryIdAt(id, geoId); b.geo[k] = geoId; }
+    b.mesh.setMatrixAt(id, _m);
+    if (k >= b.prevUsed) b.mesh.setVisibleAt(id, true);
   }
 
   /**
@@ -245,7 +301,8 @@ export class Pickups {
     this.nearestWeapon = null;
     this.touching.length = 0;
     let best = INTERACT_RADIUS * INTERACT_RADIUS;
-    for (const kind in this.kindMeshes) for (const im of this.kindMeshes[kind]) im.count = 0;
+    for (const cls in this.batches) this.batches[cls].used = 0;
+    for (const kind in this.kindDraw) { const g = this.kindDraw[kind].glass; if (g) g.count = 0; }
 
     for (let i = this.active.length - 1; i >= 0; i--) {
       const e = this.active[i];
@@ -263,9 +320,11 @@ export class Pickups {
       if (shown) {
         _p.set(e.x, e.y, e.z);
         _m.compose(_p, _q.setFromAxisAngle(_yAxis, e.spin), _s);
-        for (const im of this.kindMeshes[e.kind]) {
-          if (im.count < MODELS_PER_KIND) im.setMatrixAt(im.count++, _m);
-        }
+        const draw = this.kindDraw[e.kind];
+        this._place("matte", draw.matte);
+        this._place("metal", draw.metal);
+        this._place("outline", draw.outline);
+        if (draw.glass && draw.glass.count < MODELS_PER_KIND) draw.glass.setMatrixAt(draw.glass.count++, _m);
       }
       if (py !== null && Math.abs(e.y - py) > 1.4) continue; // the other floor of a house
       if (e.pending) continue;
@@ -278,12 +337,19 @@ export class Pickups {
       }
     }
 
-    // An empty InstancedMesh still costs a draw call (and a shadow one): hide the kinds with nothing in range
-    for (const kind in this.kindMeshes) {
-      for (const im of this.kindMeshes[kind]) {
-        im.visible = im.count > 0;
-        if (im.count) im.instanceMatrix.needsUpdate = true;
-      }
+    // Slots used last frame but not this one go out of sight; an empty batch isn't drawn at all
+    for (const cls in this.batches) {
+      const b = this.batches[cls];
+      for (let k = b.used; k < b.prevUsed; k++) b.mesh.setVisibleAt(b.slots[k], false);
+      b.prevUsed = b.used;
+      b.mesh.visible = b.used > 0;
+    }
+    // An empty InstancedMesh still costs a draw call (and a shadow one): hide glass with nothing in range
+    for (const kind in this.kindDraw) {
+      const g = this.kindDraw[kind].glass;
+      if (!g) continue;
+      g.visible = g.count > 0;
+      if (g.count) g.instanceMatrix.needsUpdate = true;
     }
   }
 }

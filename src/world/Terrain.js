@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { GROUP_WORLD, GROUP_PLAYER, GROUP_PROJECTILE } from "../physicsGroups.js";
+import { SpatialGrid } from "./SpatialGrid.js";
 
 // Rolling ground: a seeded heightmap over the whole map, flattened under the
 // houses and props, falling away into the sea round the edge: the map is an
@@ -63,11 +64,19 @@ const smooth = (a, b, x) => {
  * wobbly coast (~430 … 505 m; the roads end ~25 m inland) with two bays.
  */
 export function shoreRadius(x, z) {
-  const a = Math.atan2(z, x);
+  // It depends on the angle only: read from a table (asked a few hundred thousand times while the world builds)
+  const t = ((Math.atan2(z, x) / (Math.PI * 2)) + 1) % 1 * SHORE_TABLE_N;
+  const i = t | 0, f = t - i;
+  return SHORE_TABLE[i] + (SHORE_TABLE[i + 1] - SHORE_TABLE[i]) * f;
+}
+function shoreAt(a) {
   const wob = fbm(Math.cos(a) * 2.6 + 9, Math.sin(a) * 2.6 + 9, 3, 41) - 0.5;
   const bay = Math.max(0, Math.cos(a - 2.4)) ** 14 * 26 + Math.max(0, Math.cos(a + 0.7)) ** 18 * 22;
   return SHORE_R + wob * 62 - bay;
 }
+const SHORE_TABLE_N = 4096;
+const SHORE_TABLE = new Float32Array(SHORE_TABLE_N + 1);
+for (let i = 0; i <= SHORE_TABLE_N; i++) SHORE_TABLE[i] = shoreAt((i / SHORE_TABLE_N) * Math.PI * 2);
 
 /** Natural height before flattening: soft hills and small bumps (taller out in the new country), sloping into the sea past the shore. */
 export function rawHeight(x, z) {
@@ -130,9 +139,9 @@ export const TERRAIN_GLSL = /* glsl */ `
  * (default 0) and blends back into the hills over `fade` metres. Where pads
  * overlap, the one holding the ground flattest wins.
  */
-export function flatHeight(x, z, pads) {
+export function flatHeight(x, z, pads, index = null) {
   let flat = 1, py = 0;
-  for (const p of pads) {
+  for (const p of index ? index.near(x, z) : pads) {
     const dx = x - p.x, dz = z - p.z;
     const reach = p.r + p.fade;
     if (dx * dx + dz * dz >= reach * reach) continue;
@@ -154,11 +163,14 @@ export function flatHeight(x, z, pads) {
 export function buildTerrain({ scene, world, material, physicsMaterial, pads, grassMask, renderStep = 1, modify = null, tint = null }) {
   const N = TERRAIN_N, H = TERRAIN_HALF, S = TERRAIN_STEP;
   heights = new Float32Array(N * N);
+  // Pads by grid cell: each sample only looks at the pads that can reach it
+  const padIndex = new SpatialGrid(32, 0);
+  for (const p of pads) padIndex.insertCircle(p, p.x, p.z, p.r + p.fade);
   for (let iz = 0; iz < N; iz++) {
     const z = -H + iz * S;
     for (let ix = 0; ix < N; ix++) {
       const x = -H + ix * S;
-      const h = flatHeight(x, z, pads);
+      const h = flatHeight(x, z, pads, padIndex);
       heights[iz * N + ix] = modify ? modify(x, z, h) : h;
     }
   }

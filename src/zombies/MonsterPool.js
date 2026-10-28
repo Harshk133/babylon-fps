@@ -123,6 +123,7 @@ export class MonsterPools {
     }
     for (const def of Object.values(MONSTER_TYPES)) {
       if (def.glb) {
+        if (def.lazy) continue;   // loadLazy(), after the game has started
         if (!(def.glb in glbs) && this.loadGLB) {
           glbs[def.glb] = null;
           // A missing model only removes that monster type, not the whole game
@@ -148,6 +149,7 @@ export class MonsterPools {
     const prepared = {};
     for (const [type, def] of Object.entries(MONSTER_TYPES)) {
       if (def.glb) {
+        if (def.lazy) continue;
         const gltf = glbs[def.glb];
         if (!gltf) continue;
         prepared[def.glb] ??= this._prepareGlb(gltf, GLB_MODELS[def.glb]);
@@ -186,6 +188,27 @@ export class MonsterPools {
       };
       this._fillPool(type);
     }
+  }
+
+  /**
+   * The types marked `lazy` (the dragon): downloaded and pooled once the game
+   * is running, so they don't hold up loading. Until then the type simply
+   * doesn't exist (no dragons in a level that starts before it arrives).
+   * Returns the types it added.
+   */
+  async loadLazy() {
+    const added = [];
+    const prepared = {};
+    for (const [type, def] of Object.entries(MONSTER_TYPES)) {
+      if (!def.lazy || !def.glb || this.types[type] || !this.loadGLB) continue;
+      try {
+        prepared[def.glb] ??= this._prepareGlb(await this.loadGLB(GLB_MODELS[def.glb].url), GLB_MODELS[def.glb]);
+      } catch (err) { console.warn(err); continue; }
+      this.types[type] = this._glbType(type, def, prepared[def.glb]);
+      this._fillPool(type);
+      added.push(type);
+    }
+    return added;
   }
 
   _fillPool(type) {

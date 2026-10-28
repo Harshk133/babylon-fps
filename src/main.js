@@ -33,6 +33,8 @@ import { DustFX, DUST } from "./vehicles/DustFX.js";
 import { City } from "./world/City.js";
 import { Plots } from "./world/Plots.js";
 import { WorldChunks, splitInstanced } from "./world/Chunks.js";
+import { lightPool } from "./render/LightPool.js";
+import { SpatialGrid } from "./world/SpatialGrid.js";
 import { Roads, ROAD_HALF } from "./world/Roads.js";
 import { ROAD_DEFS, CITY, layoutTowns } from "./world/Towns.js";
 import { Backdrop } from "./world/Backdrop.js";
@@ -596,9 +598,11 @@ renderer.setPixelRatio(perf.ratio);
  * integrated GPUs with many draw calls) and a lower resolution would only blur
  * the picture without making it any faster, so it stays sharp.
  *
- * Every change reallocates the canvas and the post-processing targets (a
- * hitch), so it backs off: a raise that gets taken back within 8 s doubles
- * the wait before the next try (up to a minute).
+ * With the grade pass (PostFX.canScale) a change only moves the viewport the
+ * scene draws into, which is free. Without it (post "off", or bloom) every
+ * change reallocates the canvas and the post-processing targets (a hitch), so
+ * it backs off: a raise that gets taken back within 8 s doubles the wait
+ * before the next try (up to a minute).
  */
 function updateDynamicResolution(frameMs, cpuMs) {
   perf.avg += (Math.min(frameMs, 100) - perf.avg) * 0.05;
@@ -624,8 +628,9 @@ function updateDynamicResolution(frameMs, cpuMs) {
     perf.ratio = next;
     perf.slow = 0;
     perf.fast = 0;
-    renderer.setPixelRatio(next);
-    syncPostSize();
+    // With the grade pass, the scale changes inside its target for free; otherwise the canvas is resized
+    if (postFx.canScale) postFx.setScale(next / MAX_PIXEL_RATIO);
+    else { renderer.setPixelRatio(next); syncPostSize(); }
   }
 }
 // Low: no shadow map at all. Medium: redrawn every other frame. High: every frame.
@@ -862,6 +867,8 @@ scene.add(sun);
 // scene (intensity 0 when off) so toggling never recompiles shaders. At night
 // it's the difference between seeing and not, but monsters see it too.
 const FLASHLIGHT_INTENSITY = 160;
+// The few real point lights every light-maker shares (render/LightPool.js)
+lightPool.attach(scene, QUALITY.pointLights ?? 3);
 const flashlight = new THREE.SpotLight(0xfff1d6, 0, 46, 0.42, 0.55, 1.6);
 flashlight.castShadow = false;
 scene.add(flashlight, flashlight.target);
@@ -3460,29 +3467,20 @@ async function loadWorld() {
     settle(vrmlLoader.loadAsync("/models/house.wrl")),
     // ?v=: bump when the kit changes (/models is cached for a day, a stale kit would miss pieces)
     gltfLoader.loadAsync("/models/house/house-kit.glb?v=2"),
-    loadGLB("/trees/old_tree_with_vine_3d_model_free.glb"),
-    loadGLB("/trees/dreftwood tree.glb"),
-    // Far-away versions (~20% of the triangles), made by `npm run optimize-assets`
-    settle(gltfLoader.loadAsync("/trees/old_tree_with_vine_3d_model_free.lod1.glb")),
-    settle(gltfLoader.loadAsync("/trees/dreftwood tree.lod1.glb")),
+    // (the two big tree models arrive after the game starts: plantTrees())
     settle(loadGLB("/models/msbecl_gate_final.glb")),
     indiaDownload,
   ]);
   // The caves' rock: from the worker (started at boot), or here if it couldn't run
   await cavesPrecomputed;
   precomputeCaves();
-  const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf, treeALod, treeBLod, gateGltf, india] = await downloads;
+  const [autoGltf, wrlScene, houseKit, gateGltf, india] = await downloads;
   loadMark("world downloaded");
   sfx.preload();
   indiaModels = india;
   // The real Parle-G pack and ₹2000 notes replace the procedural ones (before any pickup is built)
   if (india.biscuit) setItemModel("biscuit", india.biscuit, 0.22);
   if (india.rupees) setItemModel("cash", india.rupees, 0.18);
-  // Every tree clone shares these: one mesh per material instead of dozens of parts
-  mergeStaticMeshes(treeAGltf.scene);
-  mergeStaticMeshes(treeBGltf.scene);
-  const lodA = treeLodTemplate(treeALod, treeAGltf.scene);
-  const lodB = treeLodTemplate(treeBLod, treeBGltf.scene);
 
 
   if (wrlScene) {
@@ -3503,55 +3501,19 @@ async function loadWorld() {
   // Enterable houses (Kenney kits): per-wall colliders, animated doors, light switches
   houses = new Houses({ scene, world, gltf: houseKit, sfx, material: staticMaterial, obstacles: navObstacles });
 
-  // Scale that makes a model `mul` player heights tall
-  const heightScale = (root, mul) => {
-    root.updateWorldMatrix(true, true);
-    const b = new THREE.Box3().setFromObject(root);
-    return (CHARACTER_HEIGHT * mul) / ((b.max.y - b.min.y) || 1);
-  };
 
-  createEditableModel({
-    id: "treeA",
-    name: "🌳 Old Tree (Vine)",
-    object3D: treeAGltf.scene.clone(true),
-    initialParams: { posX: -12, posY: 0, posZ: -30, rotY: 0, scale: heightScale(treeAGltf.scene, 7) },
-    trunkCollider: true,
-  });
+  // The two hand-placed trees: their footprints hold their spots now (towns,
+  // pads, rocks keep clear); plantTrees() swaps in the real ones
+  for (const t of HAND_TREES) {
+    t.placeholder = { type: "circle", x: t.x, z: t.z, r: t.r, hit: t.r * 0.24 + 0.1 };
+    mapObstacles.push(t.placeholder);
+  }
 
-  createEditableModel({
-    id: "treeB",
-    name: "🪵 Driftwood Tree",
-    object3D: treeBGltf.scene.clone(true),
-    initialParams: { posX: 14, posY: 0, posZ: -32, rotY: 90, scale: heightScale(treeBGltf.scene, 5) },
-    trunkCollider: true,
-  });
-
-  // Enable shadows on templates
-  [treeAGltf.scene, treeBGltf.scene].forEach(root => {
-    root.traverse(child => {
-      if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }
-    });
-  });
-
-  const treeATemplate = treeAGltf.scene;
-  const treeBTemplate = treeBGltf.scene;
-
-  treeATemplate.scale.setScalar(1);
-  treeATemplate.updateWorldMatrix(true, false);
-  const treeABounds = new THREE.Box3().setFromObject(treeATemplate);
-  const treeARawH   = treeABounds.max.y - treeABounds.min.y || 1;
-  const treeASnapAtOne = -treeABounds.min.y;
-
-  treeBTemplate.scale.setScalar(1);
-  treeBTemplate.updateWorldMatrix(true, false);
-  const treeBBounds = new THREE.Box3().setFromObject(treeBTemplate);
-  const treeBRawH   = treeBBounds.max.y - treeBBounds.min.y || 1;
-  const treeBSnapAtOne = -treeBBounds.min.y;
-
-  const treeAScaleMin = CHARACTER_HEIGHT * TREE_A_HEIGHT_MUL[0] / treeARawH;
-  const treeAScaleMax = CHARACTER_HEIGHT * TREE_A_HEIGHT_MUL[1] / treeARawH;
-  const treeBScaleMin = CHARACTER_HEIGHT * TREE_B_HEIGHT_MUL[0] / treeBRawH;
-  const treeBScaleMax = CHARACTER_HEIGHT * TREE_B_HEIGHT_MUL[1] / treeBRawH;
+  const { a: TA, b: TB } = TREE_MODELS;
+  const treeAScaleMin = CHARACTER_HEIGHT * TREE_A_HEIGHT_MUL[0] / TA.rawH;
+  const treeAScaleMax = CHARACTER_HEIGHT * TREE_A_HEIGHT_MUL[1] / TA.rawH;
+  const treeBScaleMin = CHARACTER_HEIGHT * TREE_B_HEIGHT_MUL[0] / TB.rawH;
+  const treeBScaleMax = CHARACTER_HEIGHT * TREE_B_HEIGHT_MUL[1] / TB.rawH;
 
   // ── Towns and roads (world/Towns.js, world/Roads.js): the same map for every player
   roads = new Roads(ROAD_DEFS);
@@ -3600,6 +3562,7 @@ async function loadWorld() {
     ],
     heightAt: rawHeight,
   });
+  loadMark("· towns laid out");
   const plateaus = town.plateaus;
   townLabels = town.labels;
   for (const h of town.houses) houses.add(h.x, h.z, h.rot, { type: h.kind, base: flatHeight(h.x, h.z, plateaus), tint: h.tint });
@@ -3646,6 +3609,7 @@ async function loadWorld() {
     blocked: (x, z, pad) => landClear(x, z, pad) || farmland.blocks(x, z, pad + 1) || Math.hypot(x, z) < 40
       || shedPads.some(p => Math.hypot(p.x - x, p.z - z) < p.r + pad),
   });
+  loadMark("· city, fields, plots laid out");
   houses.finalize();
   mapObstacles.push(...houses.mapObstacles());
 
@@ -3672,6 +3636,7 @@ async function loadWorld() {
   river.findCrossings(roads);
   roadLines = roads.mapLines();
   const propBoxes = mapObstacles.filter(o => o.type === "box" && !o.house && !o.wall);
+  loadMark("· houses finalized, pads");
   const terrain = buildTerrain({
     scene, world, material: planeMaterial, physicsMaterial: groundMaterial, pads,
     renderStep: QUALITY.terrainStep,
@@ -3690,6 +3655,7 @@ async function loadWorld() {
       return (0.55 + fbmGrass(x, z) * 0.45) * caveGrass(x, z) * (houses.inYard(x, z) ? 0.3 : 1) * farmland.grass(x, z) * plots.grass(x, z) * beach;
     },
   });
+  loadMark("· terrain built");
   roads.buildMesh(scene);
   for (const t of terrain.tiles) chunks.addMesh(t);
   roads.buildPotholes(scene, makeLCG(0x907401e5), (x, z) => !!river.waterAt(x, z, 6));
@@ -3725,10 +3691,12 @@ async function loadWorld() {
     models: { truck: indiaModels.truck, panchayat: indiaModels.panchayat, townBuilding: indiaModels.townBuilding },
   });
 
+  loadMark("· water, fields, city, plots built");
   // Underground cave networks under rock massifs (world/Caves.js): needs the final terrain
   caves = new Caves({ scene, world, physicsMaterial: staticMaterial, lights: QUALITY.caveLights });
   caveMapShapes = caves.mapInfo();
 
+  loadMark("· caves built");
   // Power poles along the roads (after the terrain: they stand on it)
   roads.buildPoles({
     scene, world, material: staticMaterial, mapObstacles, groundAt: groundHeight,
@@ -3747,27 +3715,17 @@ async function loadWorld() {
   for (const { x, z } of treeAPositions) {
     const scale = rngRange(rng, treeAScaleMin, treeAScaleMax);
     const rotY  = rng() * Math.PI * 2;
-    const snapY = treeASnapAtOne * scale + groundHeight(x, z) - 0.2;
-    const clone = treeWithLod(treeATemplate, lodA);
-    clone.position.set(x, snapY, z);
-    clone.rotation.y = rotY;
-    clone.scale.setScalar(scale);
-    scene.add(clone);
-    freezeStatic(clone);
+    const snapY = TA.snap * scale + groundHeight(x, z) - 0.2;
     addTreeCollider(x, snapY, z, rotY, scale, 0.18, 5.0, 2.8, 6.0);
+    deferredTrees.push({ kind: "a", x, y: snapY, z, rotY, scale });
   }
 
   for (const { x, z } of treeBPositions) {
     const scale = rngRange(rng, treeBScaleMin, treeBScaleMax);
     const rotY  = rng() * Math.PI * 2;
-    const snapY = treeBSnapAtOne * scale + groundHeight(x, z) - 0.2;
-    const clone = treeWithLod(treeBTemplate, lodB);
-    clone.position.set(x, snapY, z);
-    clone.rotation.y = rotY;
-    clone.scale.setScalar(scale);
-    scene.add(clone);
-    freezeStatic(clone);
+    const snapY = TB.snap * scale + groundHeight(x, z) - 0.2;
     addTreeCollider(x, snapY, z, rotY, scale, 0.22, 4.0, 2.2, 5.0);
+    deferredTrees.push({ kind: "b", x, y: snapY, z, rotY, scale });
   }
 
   // Burning wrecks: a few charred debris piles, each pouring smoke (listed
@@ -3822,6 +3780,7 @@ async function loadWorld() {
       || fireSpots.some(s => Math.hypot(s.x - x, s.z - z) < 5),
   });
 
+  loadMark("· trees, rocks, forest");
   // Rocks, dead trees and power poles were one instanced mesh each for the
   // whole island: split them per map cell so far ones aren't drawn
   const wide = [];
@@ -3892,6 +3851,82 @@ function treeLodTemplate(gltf, full) {
   return gltf.scene;
 }
 
+// ─── Trees after the start ────────────────────────────────────────────────────
+// The two tree models are 2.4 MB of the download for 14 trees, so they come
+// after the game has started. Their spots, sizes and colliders are decided
+// while the world builds (from the models' measured sizes below, so the
+// layout never waits for them); plantTrees() then drops the models in.
+// rawH / snap: the full model's height and how far its origin sits above its
+// base, at scale 1 (measured from the .opt.glb; re-measure if a model changes).
+const TREE_MODELS = {
+  a: { url: "/trees/old_tree_with_vine_3d_model_free.glb", lod: "/trees/old_tree_with_vine_3d_model_free.lod1.glb", rawH: 1.6546, snap: 0.8236 },
+  b: { url: "/trees/dreftwood tree.glb", lod: "/trees/dreftwood tree.lod1.glb", rawH: 0.9691, snap: 0.0002 },
+};
+/** The two hand-placed (editable) trees; r: their footprint, held until they arrive. */
+const HAND_TREES = [
+  { id: "treeA", kind: "a", name: "🌳 Old Tree (Vine)", x: -12, z: -30, rotY: 0, mul: 7, r: 3.6 },
+  { id: "treeB", kind: "b", name: "🪵 Driftwood Tree", x: 14, z: -32, rotY: 90, mul: 5, r: 2.1 },
+];
+const deferredTrees = [];   // { kind, x, y, z, rotY, scale } decided in loadWorld()
+
+/**
+ * Downloads the tree models, compiles their programs off the frame (into the
+ * game's render target), then adds every scattered tree and the two editable
+ * ones. Their colliders have been there since the world was built.
+ */
+async function plantTrees() {
+  const settle = p => p.then(v => v, () => null);
+  const [fullA, fullB, lodGltfA, lodGltfB] = await Promise.all([
+    settle(loadGLB(TREE_MODELS.a.url)), settle(loadGLB(TREE_MODELS.b.url)),
+    settle(gltfLoader.loadAsync(TREE_MODELS.a.lod)), settle(gltfLoader.loadAsync(TREE_MODELS.b.lod)),
+  ]);
+  const templates = {};
+  for (const [kind, full, lodGltf] of [["a", fullA, lodGltfA], ["b", fullB, lodGltfB]]) {
+    if (!full) continue;
+    // Every clone shares these: one mesh per material instead of dozens of parts
+    mergeStaticMeshes(full.scene);
+    full.scene.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+    templates[kind] = { full: full.scene, lod: treeLodTemplate(lodGltf, full.scene) };
+  }
+  const group = new THREE.Group();
+  for (const t of deferredTrees) {
+    const tpl = templates[t.kind];
+    if (!tpl) continue;
+    const clone = treeWithLod(tpl.full, tpl.lod);
+    clone.position.set(t.x, t.y, t.z);
+    clone.rotation.y = t.rotY;
+    clone.scale.setScalar(t.scale);
+    group.add(clone);
+  }
+  // Both LOD levels compile now, off the frame, before anything is shown
+  const lods = [];
+  group.traverse(o => { if (o.isLOD) { lods.push(o); for (const l of o.levels) l.object.visible = true; } });
+  postFx.begin();
+  const compiling = renderer.compileAsync ? renderer.compileAsync(group, camera, scene) : (renderer.compile(group, camera, scene), null);
+  renderer.setRenderTarget(null);
+  await compiling;
+  for (const lod of lods) lod.levels.forEach((l, i) => { l.object.visible = i === 0; });
+  for (const clone of [...group.children]) {
+    scene.add(clone);
+    freezeStatic(clone);
+  }
+  // The editable ones replace their placeholders
+  for (const t of HAND_TREES) {
+    const tpl = templates[t.kind];
+    if (!tpl) continue;
+    const i = mapObstacles.indexOf(t.placeholder);
+    if (i >= 0) mapObstacles.splice(i, 1);
+    const root = tpl.full;
+    root.updateWorldMatrix(true, true);
+    const b = new THREE.Box3().setFromObject(root);
+    createEditableModel({
+      id: t.id, name: t.name, object3D: root.clone(true),
+      initialParams: { posX: t.x, posY: 0, posZ: t.z, rotY: t.rotY, scale: (CHARACTER_HEIGHT * t.mul) / ((b.max.y - b.min.y) || 1) },
+      trunkCollider: true,
+    });
+  }
+}
+
 function treeWithLod(template, lodTemplate) {
   if (!lodTemplate) return template.clone(true);
   const lod = new THREE.LOD();
@@ -3906,8 +3941,16 @@ function fbmGrass(x, z) {
 }
 
 /** Rough clearance test against everything already on the minimap. */
+// While the world builds, obstacles are filed in a grid as they're added
+// (mapObstacles only grows then), so this doesn't scan the whole list
+const _obstacleGrid = new SpatialGrid(16, 8);
+let _obstaclesFiled = 0;
 function nearObstacle(x, z, pad) {
-  for (const o of mapObstacles) {
+  for (; _obstaclesFiled < mapObstacles.length; _obstaclesFiled++) {
+    const o = mapObstacles[_obstaclesFiled];
+    _obstacleGrid.insertCircle(o, o.x, o.z, o.type === "circle" ? o.r : Math.hypot(o.w, o.d) / 2);
+  }
+  for (const o of pad <= 8 ? _obstacleGrid.near(x, z) : mapObstacles) {
     const r = o.type === "circle" ? o.r : Math.hypot(o.w, o.d) / 2;
     if (Math.hypot(o.x - x, o.z - z) < r + pad) return true;
   }
@@ -5519,6 +5562,8 @@ let shadowFrame = 0;
 
 /** Mountains + sky with a far camera, then the game scene on a fresh depth buffer. */
 function renderFrame() {
+  // The shared point lights go to whatever matters most this frame (render/LightPool.js)
+  lightPool.update(camera.position.x, camera.position.y, camera.position.z);
   backdrop.update(camera, { fogColor: scene.fog.color, lightDir: env.lightDir, sun, hemi: hemiLight, darkness: env.darkness });
   postFx.begin();
   renderer.clear();
@@ -5860,6 +5905,24 @@ THREE.DefaultLoadingManager.onProgress = (_url, loaded, total) => {
  * loading screen is still up, so the first muzzle flash, hit flash, burning
  * zombie or molotov doesn't stall a frame mid-fight.
  */
+/** Compiles a late-loaded monster type's materials (base, hit, burn) without blocking a frame. */
+async function warmLazyMonsters(types) {
+  for (const type of types) {
+    const t = zombieManager.pool.types[type];
+    const m = zombieManager.pool.all.find(x => x.type === type);
+    if (!t || !m) continue;
+    for (const mat of [t.skinMats[0].base, t.skinMats[0].hit, t.skinMats[0].burn]) {
+      m.mesh.material = mat;
+      // Into the game's render target (tone mapping and colour space are part of the program)
+      postFx.begin();
+      const done = renderer.compileAsync ? renderer.compileAsync(m.root, camera, scene) : (renderer.compile(m.root, camera, scene), null);
+      renderer.setRenderTarget(null);
+      await done;
+    }
+    m.mesh.material = t.skinMats[0].base;
+  }
+}
+
 async function warmUpGpu() {
   const hidden = [];
   scene.traverse(o => {
@@ -6050,6 +6113,10 @@ async function boot() {
     clock.getDelta();
     _animRunning = true;
     animate();
+    // The dragon downloads now the game is running (MonsterPool.loadLazy);
+    // its programs compile in the background before it can ever appear
+    zombieManager.pool.loadLazy().then(warmLazyMonsters).catch(err => console.warn(err));
+    plantTrees().catch(err => console.warn(err));
 
     setupGui();
 

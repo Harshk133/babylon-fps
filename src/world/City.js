@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { SpatialGrid } from "./SpatialGrid.js";
 import * as CANNON from "cannon-es";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { GROUP_WORLD, GROUP_ZOMBIE } from "../physicsGroups.js";
@@ -369,7 +370,11 @@ export class City {
 
   /** The building whose footprint (+ stairs, + pad) holds (x, z), or null. */
   buildingAt(x, z, pad = 0) {
-    for (const b of this.buildings) {
+    if (!this.grid) {
+      this.grid = new SpatialGrid(24, 6);
+      for (const b of this.buildings) this.grid.insertCircle(b, b.x, b.z, Math.hypot(b.w, b.d) / 2 + b.back);
+    }
+    for (const b of pad <= 6 ? this.grid.near(x, z) : this.buildings) {
       if (Math.abs(x - b.x) > b.w + b.d + pad || Math.abs(z - b.z) > b.w + b.d + pad) continue;
       this._local(b, x, z, _l);
       if (Math.abs(_l.x) < b.w / 2 + pad && _l.z < b.d / 2 + pad && _l.z > -b.d / 2 - b.back - pad) return b;

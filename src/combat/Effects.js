@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { lightPool } from "../render/LightPool.js";
 
 const TRACER_POOL     = 32;
 const ENEMY_FLASHES   = 8;
@@ -104,8 +105,7 @@ export class Effects {
     }));
     this.flash.visible = false;
     scene.add(this.flash);
-    this.flashLight = new THREE.PointLight(0xffb060, 0, 7, 2);
-    scene.add(this.flashLight);
+    this.flashLight = lightPool.adopt(new THREE.PointLight(0xffb060, 0, 7, 2), 2);
     this.flashTimer = 0;
 
     // ── Tracers: unit-length boxes along +Z, scaled to the shot length
@@ -225,8 +225,7 @@ export class Effects {
     }
     this.enemyFlashIndex = 0;
 
-    this.blastLight = new THREE.PointLight(0xff9a40, 0, 28, 1.6);
-    scene.add(this.blastLight);
+    this.blastLight = lightPool.adopt(new THREE.PointLight(0xff9a40, 0, 28, 1.6), 3);
     this.blastTimer = 0;
   }
 

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { lightPool } from "../render/LightPool.js";
 import { groundHeight } from "../world/Terrain.js";
 import * as CANNON from "cannon-es";
 import { cloneItem } from "../items/ItemModels.js";
@@ -90,7 +91,7 @@ export class Throwables {
     for (let i = 0; i < FIRE_LIGHTS; i++) {
       const light = new THREE.PointLight(0xff7a2a, 0, 16, 1.6);
       light.position.set(0, HIDE_Y, 0);
-      scene.add(light);
+      lightPool.adopt(light, 2);
       this.lights.push(light);
     }
     this.fires = [];

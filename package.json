@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/pack-sounds.mjs",
     "build": "vite build",
+    "pack-sounds": "node scripts/pack-sounds.mjs",
     "preview": "vite preview",
     "optimize-assets": "node scripts/optimize-assets.mjs",
     "build-house-kit": "node scripts/build-house-kit.mjs",

@@ -131,7 +131,9 @@ export const MONSTER_TYPES = {
     blurb: "Hunts in packs by scent, so the dark won't hide you. Watch for the leap.",
   },
   dragon: {
-    label: "Gold Dragon", glb: "dragon",
+    // lazy: downloaded after the game has started (MonsterPool.loadLazy): it
+    // only appears in later levels, and its model is the biggest download
+    label: "Gold Dragon", glb: "dragon", lazy: true,
     height: 3.6, mass: 600, hp: 1500, speed: 6.5,
     hitbox: [[1.15, 1.2, -0.2], [0.7, 1.0, 1.35, true]], bodyY: 1.2, sepRadius: 1.6,
     runRef: 6, rates: { attack: 1.5, stand: 1 },

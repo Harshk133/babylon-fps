@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { lightPool } from "../render/LightPool.js";
 import { terrainUniforms, TERRAIN_GLSL } from "./Terrain.js";
 import { QUALITY } from "../quality.js";
 
@@ -187,7 +188,7 @@ export class Atmosphere {
     if (QUALITY.wreckLight) {
       this.light = new THREE.PointLight(0xff7a30, 0, 18, 1.5);
       this.light.position.set(0, -500, 0);
-      scene.add(this.light);
+      lightPool.adopt(this.light, 1);
     }
   }
 

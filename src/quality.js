@@ -28,6 +28,7 @@ export const QUALITY_PRESETS = {
     terrainStep: 2,       // render every 2nd heightmap point (physics always uses all of them)
     mountainSegments: 96,
     anisotropy: 1,
+    pointLights: 2,       // real point lights (render/LightPool.js) every light-maker shares
     fireLights: 1,        // point lights shared by molotov fires
     houseLights: 1,       // point lights shared by lit houses
     wreckLight: false,    // the flickering light on the nearest burning wreck
@@ -48,6 +49,7 @@ export const QUALITY_PRESETS = {
     terrainStep: 1,
     mountainSegments: 160,
     anisotropy: 4,
+    pointLights: 3,
     fireLights: 2,
     houseLights: 2,
     wreckLight: true,
@@ -68,6 +70,7 @@ export const QUALITY_PRESETS = {
     terrainStep: 1,
     mountainSegments: 224,
     anisotropy: 8,
+    pointLights: 4,
     fireLights: 2,
     houseLights: 2,
     wreckLight: true,
@@ -104,6 +107,7 @@ const TOUCH_TUNING = {
     wreckLight: false,
     post: "off",          // a full-screen pass is real fill-rate on a phone
     caveLights: 1,
+    pointLights: 2,
   },
   high: {
     antialias: true,
@@ -118,6 +122,7 @@ const TOUCH_TUNING = {
     houseLights: 1,
     post: "grade",
     caveLights: 2,
+    pointLights: 2,
   },
 };
 if (IS_TOUCH) for (const [name, tuning] of Object.entries(TOUCH_TUNING)) Object.assign(QUALITY_PRESETS[name], tuning);
@@ -128,7 +133,19 @@ if (IS_TOUCH) {
   QUALITY_PRESETS.high.label = "High";
 }
 
+// Creating (and losing) a throwaway WebGL context costs a noticeable slice of
+// the load, so the answer is remembered: the GPU doesn't change between visits
+const GPU_KEY = "babylon-fps:gpu";
 function gpuName() {
+  try {
+    const cached = localStorage.getItem(GPU_KEY);
+    if (cached !== null) return cached;
+  } catch { /* storage blocked: ask the GPU */ }
+  const name = queryGpuName();
+  try { localStorage.setItem(GPU_KEY, name); } catch { /* fine */ }
+  return name;
+}
+function queryGpuName() {
   try {
     const gl = document.createElement("canvas").getContext("webgl2") || document.createElement("canvas").getContext("webgl");
     if (!gl) return "";
