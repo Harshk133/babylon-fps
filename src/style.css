@@ -206,74 +206,9 @@ body {
   #kill-feed { top: 220px; }
 }
 
-/* ── Loading Screen ───────────────────────────────────────────────────────── */
-#loading-screen {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: radial-gradient(ellipse at center, #1a0b0a, #050303 75%);
-  opacity: 1;
-  transition: opacity 0.6s ease;
-}
-
-.loading-title {
-  font-family: var(--font-title);
-  font-size: clamp(30px, 5vw, 56px);
-  font-weight: 400;
-  letter-spacing: 0.08em;
-  color: var(--blood);
-  text-shadow: 0 0 24px rgba(196, 22, 28, 0.55), 0 3px 0 #2a0505;
-}
-
-#loading-screen.hidden {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.loading-content {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 20px;
-}
-
-.loading-spinner {
-  width: 52px;
-  height: 52px;
-  border: 4px solid rgba(255, 255, 255, 0.08);
-  border-top-color: var(--blood);
-  border-radius: 50%;
-  animation: spin 0.9s linear infinite;
-}
-
+/* ── Loading Screen: styled inline in index.html (it paints before this file loads) ── */
 @keyframes spin {
   to { transform: rotate(360deg); }
-}
-
-.loading-track {
-  width: 220px;
-  height: 3px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 2px;
-}
-
-#loading-bar {
-  height: 100%;
-  background: linear-gradient(90deg, #6a0a0d, var(--blood-hi));
-  border-radius: 2px;
-  transform: scaleX(0);
-  transform-origin: left;
-  transition: transform 0.2s ease;
-}
-
-#loading-message {
-  color: var(--bone-dim);
-  font-family: var(--font-flavour);
-  font-size: 15px;
-  letter-spacing: 0.04em;
 }
 
 /* ── Screen Overlays ──────────────────────────────────────────────────────── */
@@ -2152,6 +2087,16 @@ body.touch #streak .streak-title { font-size: 44px; }
 body.touch #streak .streak-sub { font-size: 16px; }
 
 /* ── Celebration confetti (src/ui/Confetti.js) ───────────────────────────── */
+/* Aqua blood drops on the screen (ui/ScreenBlood.js): over the world, under the HUD panels */
+#screen-blood {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 940;
+}
+
 #confetti {
   position: fixed;
   inset: 0;
@@ -2227,3 +2172,261 @@ body.touch #streak .streak-sub { font-size: 16px; }
   to   { opacity: 1; transform: none; }
 }
 body.touch #xp-toasts { top: 22%; zoom: 0.85; }
+
+/* ── Sniper scope ─────────────────────────────────────────────────────────── */
+/* The zoomed view fills the whole screen (as in PUBG / Free Fire): a fine
+   reticle over it, a faint lens ring and a soft vignette at the edges, never
+   a black mask. */
+#scope-overlay {
+  --lens: min(46vw, 46vh);
+  position: fixed;
+  inset: 0;
+  z-index: 115;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s linear;
+  background:
+    radial-gradient(ellipse at 50% 50%, transparent 58%, rgba(0, 6, 10, 0.32) 88%, rgba(0, 6, 10, 0.5) 100%);
+}
+#scope-overlay.on { opacity: 1; }
+/* Lens ring: a thin glassy edge with a hint of chromatic tint, nothing outside it is hidden */
+#scope-overlay .scope-lens {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(var(--lens) * 2);
+  height: calc(var(--lens) * 2);
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 0 0 3px rgba(0, 0, 0, 0.18),
+    inset 0 0 calc(var(--lens) * 0.12) rgba(120, 200, 255, 0.10);
+}
+/* Reticle: fine wires through the centre with mil-dot ticks, heavier posts toward the screen edges */
+#scope-overlay .scope-h,
+#scope-overlay .scope-v { position: absolute; }
+#scope-overlay .scope-h {
+  left: 0; right: 0; top: 50%; height: 9px; margin-top: -4.5px;
+  background:
+    linear-gradient(90deg, rgba(8, 8, 8, 0.92) 0 calc(50% - var(--lens) * 0.55), transparent calc(50% - var(--lens) * 0.55) calc(50% + var(--lens) * 0.55), rgba(8, 8, 8, 0.92) calc(50% + var(--lens) * 0.55)) center / 100% 4px no-repeat,
+    linear-gradient(90deg, rgba(10, 10, 10, 0.9), rgba(10, 10, 10, 0.9)) center / 100% 1.4px no-repeat,
+    repeating-linear-gradient(90deg, transparent 0 calc(var(--lens) * 0.1 - 1.4px), rgba(10, 10, 10, 0.85) calc(var(--lens) * 0.1 - 1.4px) calc(var(--lens) * 0.1)) center / calc(var(--lens) * 1.1) 9px no-repeat;
+}
+#scope-overlay .scope-v {
+  top: 0; bottom: 0; left: 50%; width: 9px; margin-left: -4.5px;
+  background:
+    linear-gradient(180deg, transparent 0 calc(50% + var(--lens) * 0.55), rgba(8, 8, 8, 0.92) calc(50% + var(--lens) * 0.55)) center / 4px 100% no-repeat,
+    linear-gradient(180deg, rgba(10, 10, 10, 0.9), rgba(10, 10, 10, 0.9)) center / 1.4px 100% no-repeat,
+    repeating-linear-gradient(180deg, transparent 0 calc(var(--lens) * 0.1 - 1.4px), rgba(10, 10, 10, 0.85) calc(var(--lens) * 0.1 - 1.4px) calc(var(--lens) * 0.1)) center / 9px calc(var(--lens) * 1.1) no-repeat;
+}
+#scope-overlay .scope-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: #ff2a2a;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 6px #ff2a2a;
+}
+
+/* ── Grenade cook countdown ───────────────────────────────────────────────── */
+#grenade-cook {
+  position: fixed;
+  left: 50%;
+  top: calc(50% + 46px);
+  z-index: 121;
+  transform: translateX(-50%);
+  font-family: "Teko", "Arial Narrow", sans-serif;
+  font-size: 64px;
+  line-height: 1;
+  color: #ffd27a;
+  text-shadow: 0 0 10px rgba(0, 0, 0, 0.9), 0 2px 0 #000;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+#grenade-cook.show { opacity: 1; animation: cook-tick 1s ease-out infinite; }
+#grenade-cook.hot { color: #ff3b2a; }
+@keyframes cook-tick {
+  0%   { transform: translateX(-50%) scale(1.3); }
+  30%  { transform: translateX(-50%) scale(1); }
+  100% { transform: translateX(-50%) scale(1); }
+}
+
+/* ── Red zone alert (players fighting) ────────────────────────────────────── */
+#redzone-alert {
+  position: fixed;
+  left: 50%;
+  top: 17%;
+  z-index: 122;
+  transform: translate(-50%, -12px);
+  padding: 8px 18px 6px;
+  border: 1px solid rgba(255, 70, 50, 0.7);
+  border-left: 4px solid #ff3b2a;
+  background: linear-gradient(90deg, rgba(90, 8, 4, 0.92), rgba(40, 4, 2, 0.75));
+  color: #ffd9d2;
+  font-family: "Teko", "Arial Narrow", sans-serif;
+  font-size: 24px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+#redzone-alert b { color: #ff5a44; font-weight: 600; }
+#redzone-alert.show { opacity: 1; transform: translate(-50%, 0); }
+body.touch #redzone-alert { top: 12%; font-size: 19px; }
+
+/* ── Wallet (hotbar) ──────────────────────────────────────────────────────── */
+.hb-wallet {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 3px 10px 3px 6px;
+  background: linear-gradient(90deg, rgba(120, 30, 90, 0.55), rgba(20, 12, 10, 0.55));
+  border: 1px solid rgba(255, 95, 210, 0.35);
+  border-radius: 4px;
+}
+.hb-wallet b {
+  font-size: 15px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #ffd6f2;
+}
+.feed-cash      { border-right-color: #ff5fd2; }
+body.touch .hb-biscuit.empty { display: none; }
+
+/* ── Dukaan (shop) ────────────────────────────────────────────────────────── */
+#shop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(6, 4, 3, 0.55);
+  font-family: "Teko", "Segoe UI", system-ui, sans-serif;
+  color: #f6ecd8;
+}
+#shop.open { display: flex; }
+.shop-panel {
+  width: min(760px, 100%);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, rgba(36, 26, 18, 0.97), rgba(20, 14, 10, 0.97));
+  border: 1px solid rgba(242, 201, 76, 0.35);
+  border-top: 4px solid #f2c94c;
+  border-radius: 8px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.shop-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.shop-head h2 { margin: 0; font-size: 34px; line-height: 1; letter-spacing: 0.08em; color: #f2c94c; }
+.shop-sub { font-family: "Special Elite", "Segoe UI", sans-serif; font-size: 12px; opacity: 0.7; }
+.shop-wallet { margin-left: auto; text-align: right; line-height: 1; }
+.shop-wallet-label { display: block; font-size: 13px; letter-spacing: 0.1em; opacity: 0.7; text-transform: uppercase; }
+.shop-wallet b { font-size: 30px; color: #ffd6f2; font-variant-numeric: tabular-nums; }
+.shop-close {
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  font-size: 18px;
+  cursor: pointer;
+}
+.shop-close:hover { background: rgba(255, 255, 255, 0.14); }
+.shop-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+  padding: 12px 16px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.shop-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-height: 118px;
+  padding: 8px 6px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+}
+.shop-card:hover { background: rgba(242, 201, 76, 0.1); border-color: rgba(242, 201, 76, 0.5); }
+.shop-card:active { transform: scale(0.97); }
+.shop-card img { width: 64px; height: 40px; object-fit: contain; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8)); }
+.shop-name { font-size: 18px; line-height: 1.05; text-align: center; }
+.shop-note { font-family: "Segoe UI", sans-serif; font-size: 11px; opacity: 0.6; text-align: center; }
+.shop-price { margin-top: auto; font-size: 20px; color: #f2c94c; font-variant-numeric: tabular-nums; }
+.shop-why { font-family: "Segoe UI", sans-serif; font-size: 11px; color: #ff8a7a; min-height: 13px; }
+.shop-card.off { opacity: 0.5; }
+.shop-card.off .shop-price { color: #b9a77a; }
+.shop-msg {
+  margin: 0;
+  padding: 0 16px 10px;
+  min-height: 26px;
+  font-size: 20px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.shop-msg.show { opacity: 1; }
+.shop-msg.ok { color: #7dff9a; }
+.shop-msg.bad { color: #ff8a7a; }
+body.touch .shop-grid { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); }
+body.touch .shop-card { min-height: 104px; }
+@media (max-height: 460px) {
+  .shop-head { padding: 6px 12px 4px; }
+  .shop-head h2 { font-size: 26px; }
+  .shop-grid { padding: 8px 12px; }
+}
+
+/* ── game-icons.net set (src/ui/gameIcons.js) ─────────────────────────────── */
+svg.gi { fill: currentColor; stroke: none; }
+.threat-eye.gi { width: 22px; height: 22px; }
+.kills-icon,
+.env-torch-icon,
+.veh-icon,
+.noise-icon {
+  width: 1.05em;
+  height: 1.05em;
+  margin-right: 4px;
+  vertical-align: -0.16em;
+}
+#env-icon svg { width: 1em; height: 1em; vertical-align: -0.12em; }
+.hb-medicon-img { width: 26px; height: 26px; object-fit: contain; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8)); }
+.hb-slot .hb-icon { height: 30px; }
+
+#start-screen .credits {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  width: min(900px, 92vw);
+  margin: 0;
+  transform: translateX(-50%);
+  font: 10px/1.4 "Segoe UI", system-ui, sans-serif;
+  text-align: center;
+  color: rgba(255, 240, 220, 0.4);
+}

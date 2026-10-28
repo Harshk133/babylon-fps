@@ -93,6 +93,9 @@ export class PerfOverlay {
     this.i = (this.i + 1) % RING;
     this.n = Math.min(RING, this.n + 1);
     this.counts = counts;
+    // The frame's totals (read later, after the next frame's reset, they'd be 0)
+    this.calls = this.renderer.info.render.calls;
+    this.triangles = this.renderer.info.render.triangles;
     if (now >= this._next) {
       this._next = now + 1000 / PANEL_HZ;
       this.el.textContent = this.report().text;
@@ -138,7 +141,7 @@ export class PerfOverlay {
     const spikes = (() => { let c = 0; for (let k = 0; k < this.n; k++) if (this.frame[k] > 50) c++; return c; })();
     const data = {
       fps: f.avg ? 1000 / f.avg : 0, frame: f, logic: l, submit: s, gpu, spikesOver50ms: spikes,
-      calls: r.render.calls, triangles: r.render.triangles, geometries: r.memory.geometries, textures: r.memory.textures,
+      calls: this.calls ?? r.render.calls, triangles: this.triangles ?? r.render.triangles, geometries: r.memory.geometries, textures: r.memory.textures,
       programs: r.programs?.length ?? 0, heapMB: heap,
       ...this.counts, ...this.extra,
     };

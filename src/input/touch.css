@@ -71,8 +71,8 @@ body.touch .lil-gui { display: none !important; }
   transition: transform 0.06s ease, background 0.1s ease;
 }
 .tc-btn svg {
-  width: 50%;
-  height: 50%;
+  width: 56%;
+  height: 56%;
   fill: #fff;
   stroke: #fff;
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));
@@ -483,3 +483,23 @@ body.touch .touch-controls {
 body.touch .touch-controls div { display: flex; gap: 10px; }
 body.touch .touch-controls b { min-width: 110px; color: #e2a42b; }
 body.touch #death-screen { zoom: 0.8; }
+
+/* ── Heal button, bigger hotbar, icon prompts ─────────────────────────────── */
+.tc-heal { right: calc(var(--r) + 270px); bottom: calc(var(--b) + 108px); width: calc(46 * var(--s)); height: calc(46 * var(--s)); }
+.tc-heal svg { fill: #6dff9a; }
+.tc-heal.empty { opacity: calc(var(--tc-opacity, 0.8) * 0.35); }
+#touch-ui.driving .tc-heal,
+#touch-ui.airborne .tc-heal { display: none; }
+body.touch #hotbar { zoom: 0.8; }
+body.touch .hb-slot { min-height: 50px; }
+body.touch .hb-tslot { height: 42px; padding: 3px 10px 3px 6px; }
+body.touch .hb-wallet { height: 42px; }
+body.touch #pickup-prompt { zoom: 1; gap: 10px; }
+body.touch .prompt-row {
+  min-height: 46px;
+  padding: 6px 20px 6px 12px;
+  font-size: 15px;
+}
+body.touch .prompt-row::before { content: none; }
+.prompt-icon { width: 20px; height: 20px; flex-shrink: 0; fill: #ffa630; }
+body.touch .prompt-icon { width: 26px; height: 26px; }

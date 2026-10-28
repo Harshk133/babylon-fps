@@ -39,10 +39,8 @@ const DOOR_HALF  = 0.45;
 const DOOR_H     = 2.1;
 const WIN_Y0     = 0.7;                 // window hole
 const WIN_Y1     = 1.9;
-const UP_Y       = WALL_H + 0.1;        // first floor surface (floor tiles sit on the ground-floor walls)
-const LEVEL_DROP = 0.9;                 // feet this far below a level's surface still count as on it
-const PARAPET_H  = 1.2;                 // roof parapets and stairwell railings (the kit's low wall)
-const STAIR_H    = 2.5;                 // the kit's stair piece: 4 long, this tall
+const UP_Y       = WALL_H + 0.1;        // upper floor surface (floor tiles sit on the ground-floor walls)
+const UP_LEVEL   = 1.6;                 // local feet height above which you count as upstairs
 const DOOR_RANGE   = 2.3;
 const SWITCH_RANGE = 1.7;
 const HOUSE_LIGHTS = QUALITY.houseLights; // shared point lights, given to the nearest lit houses
@@ -52,37 +50,23 @@ const NEAR_ALWAYS = 55;                 // m: drawn even behind you (their shado
 const INTERIOR_RANGE = 50;              // m: furniture, lamps and switches only up close
 const R90 = Math.PI / 2;
 
-/** Surface height of level L, kit units above the house's floor (0 is the ground floor, `floors` the roof). */
-const levelY = L => (L ? L * WALL_H + 0.1 : 0);
-
 // Compound walls (world metres)
 const YARD_WALL_H = 1.8;
 const YARD_WALL_T = 0.24;
 const YARD_GATE = 4.2;                  // gate gap width
 const YARD_PIER = 3.6;                  // a pier every this many metres
+const CLIMB_REACH = 0.95;               // m from a yard wall's centreline that counts as "at the wall"
+const VAULT_REACH = 1.1;                // kit units from a window pane
 
 // ── House kinds ───────────────────────────────────────────────────────────────
 // Walls: [piece, x, z, rotY]. Walls spanning X are rotated 90°; the doorway is
-// turned −90° so the kit's door swings in. wallsUp: every upper storey's walls.
-// Furniture: [piece, x, z, rotY, { y, floor, collide }], "front" facing +Z at
-// rotY 0. Props: plain boxes (crates, shelves, counters) as [x, z, w, d, h,
-// colour, { y, floor, rot, collide, cyl }]. Lamps / loot: [x, z, floor].
-//
-// Levels: 0 is the ground floor, 1 … floors − 1 the upper storeys and, with
-// `roof`, level `floors` is the roof terrace (parapet all round). flights[L]
-// climbs from level L to L + 1: bottom (x0, z0) to top (x1, z1), 4 units along
-// X or Z (the kit piece), with the opening it rises through on level L + 1
-// (hole, on the 2-unit tile grid) and the waist-high railing round it.
+// turned −90° so the kit's door swings in. Furniture: [piece, x, z, rotY, { y,
+// floor, collide }], "front" facing +Z at rotY 0. Lamps / loot: [x, z, floor].
 
-// Railing round a back-wall stairwell (hole x −2…2, z −3…−1 in an 8 × 6 house) and a front-wall one
-const BACK_FLIGHT = { x0: 2, z0: -3 + 0.7, x1: -2, z1: -3 + 0.7, hw: 0.65, hole: { x0: -2, x1: 2, z0: -3, z1: -1 }, railing: [[-1, -1, R90], [1, -1, R90], [2, -2, 0]] };
-const FRONT_FLIGHT = { x0: 2, z0: 3 - 0.7, x1: -2, z1: 3 - 0.7, hw: 0.65, hole: { x0: -2, x1: 2, z0: 1, z1: 3 }, railing: [[-1, 1, R90], [1, 1, R90], [2, 2, 0]] };
-
-// Two storeys and a roof terrace: living room + kitchen downstairs, stairs along
-// the back wall rising toward −X; a bedroom-lounge upstairs with windows on
-// nearly every side; a second flight along the front wall up to the roof.
+// Two storeys: living room + kitchen downstairs, stairs along the back wall
+// rising toward −X; upstairs windows on nearly every side to camp and shoot out.
 const HOUSE = {
-  halfW: 4, halfD: 3, floors: 2, doorX: 1, roof: true,
+  halfW: 4, halfD: 3, floors: 2, doorX: 1,
   walls: [
     ["wall-window-square", -3, 3, R90], ["wall", -1, 3, R90],
     ["wall-doorway-square", 1, 3, -R90], ["wall-window-square", 3, 3, R90],
@@ -92,14 +76,18 @@ const HOUSE = {
     ["wall-window-square", 4, -2, 0], ["wall", 4, 0, 0], ["wall", 4, 2, 0],
   ],
   wallsUp: [
-    ["wall-window-square-detailed", -3, 3, R90], ["wall", -1, 3, R90],
-    ["wall", 1, 3, R90], ["wall-window-square-detailed", 3, 3, R90],
+    ["wall-window-square-detailed", -3, 3, R90], ["wall-window-square-detailed", -1, 3, R90],
+    ["wall-window-square-detailed", 1, 3, R90], ["wall-window-square-detailed", 3, 3, R90],
     ["wall-window-square-detailed", -3, -3, R90], ["wall", -1, -3, R90],
     ["wall", 1, -3, R90], ["wall-window-square-detailed", 3, -3, R90],
     ["wall", -4, -2, 0], ["wall-window-square-detailed", -4, 0, 0], ["wall-window-square-detailed", -4, 2, 0],
     ["wall-window-square-detailed", 4, -2, 0], ["wall-window-square-detailed", 4, 0, 0], ["wall", 4, 2, 0],
   ],
-  flights: [BACK_FLIGHT, FRONT_FLIGHT],
+  // Stairs centre line against the back wall, bottom step at x0, top at x1; the
+  // stairwell opening upstairs, and the waist-high railing round it
+  stairs: { z: -3 + 0.7, x0: 2, x1: -2, hw: 0.65 },
+  hole: { x0: -2, x1: 2, z0: -3, z1: -1 },
+  railing: [[-1, -1, R90], [1, -1, R90], [2, -2, 0]],
   furniture: [
     ["loungeSofa", -3.5, 1.3, R90],
     ["rugRectangle", -2.3, 1.3, R90, { collide: false }],
@@ -116,27 +104,23 @@ const HOUSE = {
     ["kitchenFridge", 3.5, 1.15, -R90],
     ["cardboardBoxClosed", 3.45, 2.55, 0], ["cardboardBoxClosed", 3.0, 2.6, -0.2],
     ["bedSingle", -3.3, 1.85, Math.PI, { floor: 1 }],
-    ["rugRectangle", 0.2, 0.2, 0, { floor: 1, collide: false }],
-    ["loungeSofa", 0.2, -0.5, 0, { floor: 1 }],
-    ["tableCoffee", 0.2, 0.55, 0, { floor: 1 }],
-    ["bookcaseOpen", 3.62, 0.0, -R90, { floor: 1 }],
-    ["pottedPlant", -1.4, 1.2, 0, { floor: 1 }],
+    ["sideTable", -2.1, 2.62, Math.PI, { floor: 1 }],
+    ["rugRectangle", 0.6, 1.3, 0, { floor: 1, collide: false }],
+    ["loungeSofa", 0.6, 2.5, Math.PI, { floor: 1 }],
+    ["tableCoffee", 0.6, 1.35, 0, { floor: 1 }],
+    ["bookcaseOpen", 3.62, 1.6, -R90, { floor: 1 }],
+    ["pottedPlant", 2.5, 2.6, 0, { floor: 1 }],
     ["lampRoundFloor", -3.5, -0.4, 0, { floor: 1, collide: false }],
     ["cardboardBoxClosed", 3.45, -2.55, 0, { floor: 1 }], ["cardboardBoxClosed", 3.45, -2.05, 0.3, { floor: 1 }],
   ],
-  props: [
-    // Rooftop: a water tank on its stand, an old chair
-    [-3.0, -2.0, 1.3, 1.3, 1.5, 0x3c4a5c, { floor: 2, cyl: true }],
-    [3.2, 0.2, 0.6, 0.6, 0.9, 0x7a6248, { floor: 2 }],
-  ],
-  lamps: [[-0.5, 0.3, 0], [-2.6, 1.3, 0], [2.3, 0.3, 0], [-2.6, 0.2, 1], [1.2, 0.4, 1], [2.9, -1.9, 1]],
-  loot: [[-1.5, -0.4, 0], [2.4, 2.3, 0], [-2.8, -0.5, 0], [-1.6, 0.3, 1], [2.7, -1.2, 1], [3.0, 1.0, 1], [-2.8, 0.4, 2], [2.4, -1.8, 2]],
+  lamps: [[-0.5, 0.3, 0], [-2.6, 1.3, 0], [2.3, 0.3, 0], [-2.4, 1.2, 1], [1.2, 0.9, 1], [2.9, -1.9, 1]],
+  loot: [[-1.5, -0.4, 0], [2.4, 2.3, 0], [-2.8, -0.5, 0], [-1.6, 0.3, 1], [2.7, -1.2, 1], [-2.0, 2.0, 1]],
   // Per floor: light switch (position + facing) and the shared point light's spot
   switches: [
     { pos: new THREE.Vector3(0.27, 1.3, 3 - 0.11), rotY: Math.PI },
     { pos: new THREE.Vector3(-4 + 0.11, UP_Y + 1.3, -1.45), rotY: R90 },
   ],
-  lightPos: [new THREE.Vector3(-0.5, 2.0, 0.3), new THREE.Vector3(0.2, UP_Y + 1.9, 0.4)],
+  lightPos: [new THREE.Vector3(-0.5, 2.0, 0.3), new THREE.Vector3(0.2, UP_Y + 1.9, 0.9)],
 };
 
 // One storey, door on the left of the front, bedroom on the left, kitchen-diner on the right
@@ -198,156 +182,11 @@ const CABIN = {
   lightPos: [new THREE.Vector3(0, 2.0, 0)],
 };
 
-// A corner shop: shelves, a counter by the door, drinks coolers, a stockroom
-// corner; stairs along the back wall up to a roof terrace
-const SHOP = {
-  halfW: 5, halfD: 3, floors: 1, doorX: 0, roof: true,
-  walls: [
-    ["wall-window-square", -4, 3, R90], ["wall-window-square-detailed", -2, 3, R90],
-    ["wall-doorway-square", 0, 3, -R90], ["wall-window-square-detailed", 2, 3, R90], ["wall-window-square", 4, 3, R90],
-    ["wall", -4, -3, R90], ["wall", -2, -3, R90], ["wall", 0, -3, R90], ["wall", 2, -3, R90], ["wall-window-square", 4, -3, R90],
-    ["wall", -5, -2, 0], ["wall", -5, 0, 0], ["wall-window-square", -5, 2, 0],
-    ["wall", 5, -2, 0], ["wall-window-square", 5, 0, 0], ["wall", 5, 2, 0],
-  ],
-  flights: [{ x0: 3, z0: -3 + 0.7, x1: -1, z1: -3 + 0.7, hw: 0.65, hole: { x0: -1, x1: 3, z0: -3, z1: -1 }, railing: [[0, -1, R90], [2, -1, R90], [3, -2, 0]] }],
-  furniture: [
-    ["kitchenFridge", -4.55, -0.9, R90], ["kitchenFridge", -4.55, -1.75, R90],
-    ["cardboardBoxClosed", -2.7, -2.6, 0], ["cardboardBoxClosed", -2.25, -2.6, 0.3],
-    ["cardboardBoxClosed", -2.5, -2.6, 0.1, { y: 0.52 }], ["cardboardBoxClosed", -3.4, -2.55, -0.2],
-    ["pottedPlant", -1.0, 2.55, 0],
-  ],
-  props: [
-    // Counter and till by the door
-    [-3.4, 1.0, 2.4, 0.7, 1.0, 0x7a5236],
-    [-3.9, 1.0, 0.45, 0.35, 0.28, 0x2b2b2e, { y: 1.0, collide: false }],
-    // Shelving units (and the goods on them)
-    [2.2, 1.0, 0.6, 2.0, 1.7, 0x6f6c66],
-    [2.2, 1.0, 0.5, 1.8, 0.3, 0xb4583a, { y: 0.55, collide: false }],
-    [2.2, 1.0, 0.5, 1.8, 0.3, 0x3f7a4c, { y: 1.15, collide: false }],
-    [4.55, 1.0, 0.6, 2.6, 1.7, 0x6f6c66],
-    [4.5, 1.0, 0.5, 2.4, 0.3, 0xd2b04a, { y: 0.85, collide: false }],
-    [-1.4, -0.6, 1.6, 0.6, 1.1, 0x6f6c66],
-  ],
-  lamps: [[-2.6, 0.6, 0], [0.6, 1.2, 0], [3.4, -0.4, 0]],
-  loot: [[-3.2, -1.3, 0], [0.4, 0.6, 0], [3.4, 0.6, 0], [-1.8, 1.9, 0], [-3.4, -1.6, 1], [3.6, 1.6, 1]],
-  switches: [{ pos: new THREE.Vector3(-0.73, 1.3, 3 - 0.11), rotY: Math.PI }],
-  lightPos: [new THREE.Vector3(0, 2.0, 0.4)],
-};
-
-// Three storeys of flats and a roof terrace; the stairs switch back from the
-// back wall to the front wall and back again
-const APARTMENT = {
-  halfW: 4, halfD: 3, floors: 3, doorX: 1, roof: true,
-  walls: [
-    ["wall-window-square-detailed", -3, 3, R90], ["wall", -1, 3, R90],
-    ["wall-doorway-square", 1, 3, -R90], ["wall-window-square-detailed", 3, 3, R90],
-    ["wall", -3, -3, R90], ["wall", -1, -3, R90],
-    ["wall", 1, -3, R90], ["wall-window-square", 3, -3, R90],
-    ["wall-window-square", -4, -2, 0], ["wall", -4, 0, 0], ["wall-window-square", -4, 2, 0],
-    ["wall-window-square", 4, -2, 0], ["wall", 4, 0, 0], ["wall-window-square", 4, 2, 0],
-  ],
-  wallsUp: [
-    ["wall-window-square", -3, 3, R90], ["wall", -1, 3, R90],
-    ["wall", 1, 3, R90], ["wall-window-square", 3, 3, R90],
-    ["wall-window-square", -3, -3, R90], ["wall", -1, -3, R90],
-    ["wall", 1, -3, R90], ["wall-window-square", 3, -3, R90],
-    ["wall-window-square", -4, -2, 0], ["wall-window-square", -4, 0, 0], ["wall-window-square", -4, 2, 0],
-    ["wall-window-square", 4, -2, 0], ["wall", 4, 0, 0], ["wall-window-square", 4, 2, 0],
-  ],
-  flights: [BACK_FLIGHT, FRONT_FLIGHT, BACK_FLIGHT],
-  furniture: [
-    // Ground: a lobby with a sofa, post boxes and a plant
-    ["loungeSofa", -3.5, 1.2, R90],
-    ["tableCoffee", -2.4, 1.2, R90],
-    ["pottedPlant", -3.5, 2.6, 0], ["pottedPlant", 3.5, 2.6, 0],
-    ["cardboardBoxClosed", 3.45, -0.4, 0], ["cardboardBoxClosed", 3.45, 0.1, 0.2],
-    // First floor: a bedsit
-    ["bedSingle", -3.3, 1.85, Math.PI, { floor: 1 }],
-    ["loungeSofa", 0.2, -0.5, 0, { floor: 1 }],
-    ["tableCoffee", 0.2, 0.55, 0, { floor: 1 }],
-    ["rugRectangle", 0.2, 0.2, 0, { floor: 1, collide: false }],
-    ["bookcaseOpen", 3.62, 0.0, -R90, { floor: 1 }],
-    ["cardboardBoxClosed", 3.45, -2.55, 0, { floor: 1 }],
-    // Second floor: a kitchen-diner
-    ["kitchenCabinet", -3.55, -2.4, R90, { floor: 2 }],
-    ["kitchenStove", -3.55, -1.58, R90, { floor: 2 }],
-    ["kitchenFridge", -3.5, -0.6, R90, { floor: 2 }],
-    ["table", 0.4, 0.1, 0, { floor: 2 }],
-    ["chair", 0.0, 0.85, Math.PI, { floor: 2 }], ["chair", 0.8, 0.85, Math.PI, { floor: 2 }],
-    ["chair", 0.0, -0.65, 0, { floor: 2 }], ["chair", 0.8, -0.65, 0, { floor: 2 }],
-    ["cabinetTelevision", 3.6, -0.6, -R90, { floor: 2 }],
-    ["cardboardBoxClosed", 3.45, 2.55, 0, { floor: 2 }],
-  ],
-  props: [
-    [-1.0, -0.6, 0.9, 0.35, 1.1, 0x5d6b78],                          // post boxes
-    [2.6, 2.0, 1.3, 1.3, 1.5, 0x3c4a5c, { floor: 3, cyl: true }],    // rooftop water tank
-    [-3.0, 1.8, 1.4, 0.9, 0.9, 0x8d9096, { floor: 3 }],               // AC unit
-  ],
-  lamps: [[-0.5, 0.3, 0], [-2.6, 1.3, 0], [2.3, 0.3, 0], [-2.9, 1.6, 1], [1.2, 0.2, 1], [2.9, -1.9, 1], [-2.9, -1.9, 2], [0.4, 0.3, 2], [2.9, 1.9, 2]],
-  loot: [[-1.8, 0.4, 0], [2.4, 1.6, 0], [-1.6, 0.3, 1], [2.7, -1.2, 1], [-2.8, -2.2, 2], [2.6, -0.2, 2], [-2.6, -0.4, 3], [3.0, -2.0, 3]],
-  switches: [
-    { pos: new THREE.Vector3(0.27, 1.3, 3 - 0.11), rotY: Math.PI },
-    { pos: new THREE.Vector3(-4 + 0.11, UP_Y + 1.3, -1.45), rotY: R90 },
-    { pos: new THREE.Vector3(4 - 0.11, UP_Y + WALL_H + 1.3, 0.6), rotY: -R90 },
-  ],
-  lightPos: [new THREE.Vector3(-0.5, 2.0, 0.3), new THREE.Vector3(0.2, UP_Y + 1.9, 0.2), new THREE.Vector3(0.4, UP_Y + WALL_H + 1.9, 0.2)],
-};
-
-// A big storage shed: stacked crates, racks, pallets and barrels; stairs along
-// the back wall up to the roof
-const WAREHOUSE = {
-  halfW: 6, halfD: 4, floors: 1, doorX: -1, roof: true,
-  walls: [
-    ["wall", -5, 4, R90], ["wall-window-square", -3, 4, R90], ["wall-doorway-square", -1, 4, -R90],
-    ["wall", 1, 4, R90], ["wall-window-square", 3, 4, R90], ["wall", 5, 4, R90],
-    ["wall", -5, -4, R90], ["wall-window-square", -3, -4, R90], ["wall", -1, -4, R90],
-    ["wall", 1, -4, R90], ["wall", 3, -4, R90], ["wall", 5, -4, R90],
-    ["wall", -6, -3, 0], ["wall-window-square", -6, -1, 0], ["wall", -6, 1, 0], ["wall-window-square", -6, 3, 0],
-    ["wall-window-square", 6, -3, 0], ["wall", 6, -1, 0], ["wall-window-square", 6, 1, 0], ["wall", 6, 3, 0],
-  ],
-  flights: [{ x0: 4, z0: -4 + 0.7, x1: 0, z1: -4 + 0.7, hw: 0.65, hole: { x0: 0, x1: 4, z0: -4, z1: -2 }, railing: [[1, -2, R90], [3, -2, R90], [4, -3, 0]] }],
-  furniture: [
-    ["cardboardBoxClosed", 4.6, -1.2, 0], ["cardboardBoxClosed", 5.1, -1.3, 0.4], ["cardboardBoxClosed", 4.85, -1.25, 0.2, { y: 0.52 }],
-  ],
-  props: [
-    // Crate stacks
-    [-4.6, -2.9, 1.4, 1.4, 1.3, 0x8a6a42],
-    [-4.6, -2.9, 1.1, 1.1, 1.0, 0x7d5f3a, { y: 1.3, rot: 0.3 }],
-    [-3.1, -3.0, 1.3, 1.3, 1.2, 0x94744a],
-    [-1.5, 0.3, 1.6, 1.2, 0.9, 0x8a6a42],
-    [2.0, 1.2, 1.2, 1.2, 1.2, 0x7d5f3a, { rot: 0.2 }],
-    [3.8, 1.6, 1.0, 1.0, 0.8, 0x94744a, { rot: -0.15 }],
-    // Racks along the left wall (and what's on them)
-    [-5.5, 1.0, 0.7, 3.6, 2.0, 0x55585c],
-    [-5.5, 1.0, 0.6, 3.4, 0.4, 0x6e5a3e, { y: 0.5, collide: false }],
-    [-5.5, 1.0, 0.6, 3.4, 0.4, 0x8c7a5a, { y: 1.3, collide: false }],
-    // Workbench, barrels
-    [1.6, 3.4, 2.0, 0.8, 0.9, 0x6b5034],
-    [5.3, 2.6, 0.8, 0.8, 1.1, 0x7a2a22, { cyl: true }],
-    [4.5, 3.4, 0.8, 0.8, 1.1, 0x2f4f6a, { cyl: true }],
-    [5.3, 3.4, 0.8, 0.8, 1.1, 0x7a2a22, { cyl: true }],
-    // Rooftop vents
-    [-3.5, 1.0, 1.0, 1.0, 0.8, 0x8d9096, { floor: 1 }],
-    [2.0, 2.0, 1.0, 1.0, 0.8, 0x8d9096, { floor: 1 }],
-  ],
-  lamps: [[-3.5, -0.5, 0], [1.5, 0.6, 0], [4.5, -0.8, 0], [-1.0, 2.5, 0]],
-  loot: [[-2.0, -2.8, 0], [0.3, 1.8, 0], [4.6, 0.2, 0], [-4.4, -0.8, 0], [-4.2, -3.0, 1], [4.4, 2.6, 1]],
-  switches: [{ pos: new THREE.Vector3(-1.73, 1.3, 4 - 0.11), rotY: Math.PI }],
-  lightPos: [new THREE.Vector3(0, 2.0, 0)],
-};
-
-export const HOUSE_TYPES = { house: HOUSE, bungalow: BUNGALOW, cabin: CABIN, shop: SHOP, apartment: APARTMENT, warehouse: WAREHOUSE };
-for (const t of Object.values(HOUSE_TYPES)) {
-  t.flights = (t.flights ?? []).map(f => ({
-    ...f, dx: Math.sign(f.x1 - f.x0), dz: Math.sign(f.z1 - f.z0), run: Math.abs(f.x1 - f.x0) + Math.abs(f.z1 - f.z0),
-  }));
-  t.top = t.flights.length;     // highest level you can walk to (the roof when the stairs reach it)
-  t.props ??= [];
-}
-/** World footprint half-sizes of a kind (metres): along the front, and front-to-back; doorX: the door's x along the front. */
+export const HOUSE_TYPES = { house: HOUSE, bungalow: BUNGALOW, cabin: CABIN };
+/** World footprint half-sizes of a kind (metres): along the front, and front-to-back. */
 export function houseHalfSize(kind) {
   const t = HOUSE_TYPES[kind];
-  return { hw: t.halfW * HOUSE_SCALE, hd: t.halfD * HOUSE_SCALE, doorX: t.doorX * HOUSE_SCALE };
+  return { hw: t.halfW * HOUSE_SCALE, hd: t.halfD * HOUSE_SCALE };
 }
 // Kept for callers that iterate the original house's loot spots
 export const HOUSE_LOOT_SPOTS = HOUSE.loot;
@@ -372,10 +211,6 @@ function navConsider(o) {
   const d = Math.hypot(o.x - _nav.zx, o.z - _nav.zz);
   if (d < _nav.best) { _nav.best = d; _nav.bx = _det.x; _nav.bz = _det.z; }
 }
-const _qy = new CANNON.Quaternion();
-const _qz = new CANNON.Quaternion();
-const _yAxis = new CANNON.Vec3(0, 1, 0);
-const _zAxis = new CANNON.Vec3(0, 0, 1);
 const _sphere = new THREE.Sphere();
 const _frustum = new THREE.Frustum();
 const _pv = new THREE.Matrix4();
@@ -549,7 +384,7 @@ export class Houses {
     // Walls of every storey; window holes get a glass collider instead of a solid one
     const H = WALL_H + 0.1;
     const storeys = [[t.walls, 0]];
-    for (let f = 1; f < F; f++) storeys.push([t.wallsUp, f * WALL_H]);
+    if (F > 1) storeys.push([t.wallsUp, WALL_H]);
     for (const [list, y] of storeys) {
       for (const [pname, x, z, rot] of list) {
         piece(pname, x, y, z, rot);
@@ -571,32 +406,28 @@ export class Houses {
     for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
       for (let f = 0; f < F; f++) piece("column", sx * HW, f * WALL_H, sz * HD);
     }
-    // Trim band between the storeys (and under a terrace's parapet), all the way round (faces outward)
-    for (let f = 1; f < F + (t.roof ? 1 : 0); f++) {
-      const y = f * WALL_H - 0.12;
+    // Trim band between the storeys, all the way round (faces outward)
+    if (F > 1) {
       for (let x = -HW + 1; x < HW; x += SEG) {
-        piece("border", x, y, HD, -R90);
-        piece("border", x, y, -HD, R90);
+        piece("border", x, WALL_H - 0.12, HD, -R90);
+        piece("border", x, WALL_H - 0.12, -HD, R90);
       }
       for (let z = -HD + 1; z < HD; z += SEG) {
-        piece("border", -HW, y, z, Math.PI);
-        piece("border", HW, y, z, 0);
+        piece("border", -HW, WALL_H - 0.12, z, Math.PI);
+        piece("border", HW, WALL_H - 0.12, z, 0);
       }
     }
 
-    // Floors and the roof; a level a flight climbs to leaves its stairwell open
-    const holeAt = L => t.flights[L - 1]?.hole ?? null;
-    const inHole = (hole, x, z) => hole && x > hole.x0 && x < hole.x1 && z > hole.z0 && z < hole.z1;
+    // Floors (an upper one leaves the stairwell open) and the roof on top
     const nx = (HW * 2) / SEG, nz = (HD * 2) / SEG;
+    const hole = t.hole;
     for (let i = 0; i < nx; i++) {
       for (let k = 0; k < nz; k++) {
         const x = -HW + SEG / 2 + i * SEG, z = -HD + SEG / 2 + k * SEG;
         piece("floor", x, 0, z);
-        for (let L = 1; L < F; L++) if (!inHole(holeAt(L), x, z)) piece("floor", x, L * WALL_H, z);
-        if (t.roof) {
-          // A terrace: flat all over, the parapet goes round it
-          if (!inHole(holeAt(F), x, z)) piece("roof-flat-center", x, F * WALL_H, z);
-          continue;
+        if (F > 1) {
+          const inHole = hole && x > hole.x0 && x < hole.x1 && z > hole.z0 && z < hole.z1;
+          if (!inHole) piece("floor", x, WALL_H, z);
         }
         // Roof: lipped pieces round the edge, flat ones inside
         const edgeX = i === 0 ? -1 : i === nx - 1 ? 1 : 0;
@@ -612,70 +443,39 @@ export class Houses {
         piece(rname, x, F * WALL_H, z, rot);
       }
     }
-    // Slabs: every upper floor and the roof, as up to four boxes round its stairwell, tops flush with the tiles
-    for (let L = 1; L <= F; L++) {
-      const pad = L === F ? 0.25 : 0;
-      const x0 = -HW - pad, x1 = HW + pad, z0 = -HD - pad, z1 = HD + pad;
-      const slab = (ax, bx, az, bz) => {
-        if (bx - ax > 0.01 && bz - az > 0.01) boxes.push({ x: (ax + bx) / 2, y: L * WALL_H - SINK, z: (az + bz) / 2, hx: (bx - ax) / 2, hy: 0.1, hz: (bz - az) / 2, rot: 0 });
-      };
-      const hole = holeAt(L);
-      if (!hole) { slab(x0, x1, z0, z1); continue; }
-      slab(x0, hole.x0, z0, z1);
-      slab(hole.x1, x1, z0, z1);
-      slab(hole.x0, hole.x1, z0, hole.z0);
-      slab(hole.x0, hole.x1, hole.z1, z1);
-    }
-    // Terrace parapet: the kit's low wall along every roof edge
-    if (t.roof) {
-      const y = levelY(F);
-      for (let x = -HW + 1; x < HW; x += SEG) for (const z of [-HD, HD]) {
-        piece("wall-low", x, y, z, R90);
-        wallBox(x, z, R90, -1, 1, y, y + PARAPET_H);
-      }
-      for (let z = -HD + 1; z < HD; z += SEG) for (const x of [-HW, HW]) {
-        piece("wall-low", x, y, z, 0);
-        wallBox(x, z, 0, -1, 1, y, y + PARAPET_H);
-      }
-    }
+    // Roof slab
+    boxes.push({ x: 0, y: F * WALL_H + 0.08 - SINK, z: 0, hx: HW + 0.25, hy: 0.12, hz: HD + 0.25, rot: 0 });
 
-    // Stairs: the kit piece rises toward its +Z, turned to climb from (x0, z0)
-    // to (x1, z1). Collider: one tilted box whose top face is the slope (the
-    // player's controller walks it like a ramp), plus a block under the high
-    // half. Monsters pass through the ramp (their height follows the steps
-    // through surfaceAt()) but not the block, so they can't wander in under
-    // the stairs. Waist-high railing round the opening it rises through.
-    t.flights.forEach((st, L) => {
-      const { dx, dz, run } = st;
-      const yb = levelY(L), top = levelY(L + 1), rise = top - yb;
-      const mx = (st.x0 + st.x1) / 2, mz = (st.z0 + st.z1) / 2;
-      piece("stairs-closed", mx, top - STAIR_H, mz, Math.atan2(dx, dz));
-      const slope = Math.atan2(rise, run), len = Math.hypot(run, rise);
+    if (t.stairs) {
+      const st = t.stairs;
+      // Upper floor slab in three boxes round the stairwell, top flush with the tiles
+      const slab = (x0, x1, z0, z1) => boxes.push({ x: (x0 + x1) / 2, y: WALL_H - SINK, z: (z0 + z1) / 2, hx: (x1 - x0) / 2, hy: 0.1, hz: (z1 - z0) / 2, rot: 0 });
+      slab(-HW, hole.x0, -HD, HD);
+      slab(hole.x0, hole.x1, hole.z1, HD);
+      slab(hole.x1, HW, -HD, HD);
+      // Stairs: the kit piece rises toward its +Z, turned to climb toward −X.
+      // Collider: one tilted box whose top face is the slope (the player's
+      // controller walks it like a ramp), plus a block under the high half.
+      // Monsters pass through the ramp (their height follows the steps through
+      // surfaceAt()) but not the block, so they can't wander in under the stairs.
+      piece("stairs-closed", (st.x0 + st.x1) / 2, 0, st.z, -R90);
+      const run = st.x0 - st.x1, slope = Math.atan2(UP_Y, run), len = Math.hypot(run, UP_Y);
       boxes.push({
-        x: mx + dx * Math.sin(slope) * 0.1, y: yb + rise / 2 - Math.cos(slope) * 0.1 - SINK, z: mz + dz * Math.sin(slope) * 0.1,
-        hx: len / 2, hy: 0.1, hz: st.hw, rot: Math.atan2(dz, -dx), rz: -slope, stairs: true,
+        x: (st.x0 + st.x1) / 2 - Math.sin(slope) * 0.1, y: UP_Y / 2 - Math.cos(slope) * 0.1 - SINK, z: st.z,
+        hx: len / 2, hy: 0.1, hz: st.hw, rot: 0, rz: -slope, stairs: true,
       });
-      boxes.push({
-        x: (st.x1 + mx) / 2, y: yb + rise / 4 - SINK, z: (st.z1 + mz) / 2,
-        hx: dx ? run / 4 : st.hw, hy: rise / 4, hz: dz ? run / 4 : st.hw, rot: 0,
-      });
-      for (const [x, z, rot] of st.railing) {
-        piece("wall-low", x, top, z, rot);
-        wallBox(x, z, rot, -1, 1, top, top + PARAPET_H);
+      boxes.push({ x: st.x1 / 2, y: UP_Y / 4 - SINK, z: st.z, hx: -st.x1 / 2, hy: UP_Y / 4, hz: st.hw, rot: 0 });
+      for (const [x, z, rot] of t.railing) {
+        piece("wall-low", x, UP_Y, z, rot);
+        wallBox(x, z, rot, -1, 1, UP_Y, UP_Y + 1.2);
       }
-      // The opening's edge beside the top step, either side of the stairs (a banister's spot)
-      const h = st.hole;
-      const [e0, e1, c] = dx ? [h.z0, h.z1, st.z1] : [h.x0, h.x1, st.x1];
-      for (const [a, b] of [[e0, c - st.hw], [c + st.hw, e1]]) {
-        if (b - a < 0.05) continue;
-        if (dx) wallBox(st.x1, 0, 0, a, b, top, top + PARAPET_H);
-        else wallBox(0, st.z1, R90, a, b, top, top + PARAPET_H);
-      }
-    });
+      // The opening beside the top step, between the stairs and the railing (a banister's spot)
+      wallBox(hole.x0, (st.z + st.hw + hole.z1) / 2, 0, -(hole.z1 - st.z - st.hw) / 2, (hole.z1 - st.z - st.hw) / 2, UP_Y, UP_Y + 1.2);
+    }
 
     for (const [fname, x, z, rot, opts = {}] of t.furniture) {
       const { wrap, size } = this._furnitureTemplate(fname);
-      const y = (opts.y ?? 0) + levelY(opts.floor ?? 0);
+      const y = (opts.y ?? 0) + (opts.floor ? UP_Y : 0);
       wrap.position.set(x, y, z);
       wrap.rotation.y = rot;
       interior.add(wrap);
@@ -683,17 +483,6 @@ export class Houses {
         boxes.push({ x, y: y + size.y / 2 - SINK, z, hx: size.x / 2, hy: size.y / 2, hz: size.z / 2, rot });
       }
     }
-    // Props: plain boxes and drums (crates, shelves, counters, water tanks), flat-coloured
-    for (const [x, z, w, d, ph, color, opts = {}] of t.props) {
-      const y = (opts.y ?? 0) + levelY(opts.floor ?? 0);
-      const geo = opts.cyl ? new THREE.CylinderGeometry(w / 2, w / 2, ph, 14) : new THREE.BoxGeometry(w, ph, d);
-      const mesh = new THREE.Mesh(geo.translate(0, ph / 2, 0), new THREE.MeshStandardMaterial({ color, roughness: 1, metalness: 0 }));
-      mesh.position.set(x, y, z);
-      mesh.rotation.y = opts.rot ?? 0;
-      interior.add(mesh);
-      if (opts.collide !== false) boxes.push({ x, y: y + ph / 2 - SINK, z, hx: w / 2, hy: ph / 2, hz: d / 2, rot: opts.rot ?? 0 });
-    }
-
     // Ceiling lamps (the bulbs glow separately, per floor) and the switch plates
     const bulbs = [];
     for (const [lx, lz, lf] of t.lamps) {
@@ -800,12 +589,10 @@ export class Houses {
     for (const [list, b] of [[solid, body], [stairs, stairBody], [T.glassBoxes, glassBody]]) {
       if (!list.length) continue;
       for (const c of list) {
-        _qy.setFromAxisAngle(_yAxis, c.rot);
-        _qz.setFromAxisAngle(_zAxis, c.rz ?? 0);
         b.addShape(
           new CANNON.Box(new CANNON.Vec3(c.hx * S, c.hy * S, c.hz * S)),
           new CANNON.Vec3(c.x * S, c.y * S, c.z * S),
-          _qy.mult(_qz));
+          new CANNON.Quaternion().setFromEuler(0, c.rot, c.rz ?? 0));
       }
       b.position.set(x, base, z);
       b.quaternion.copy(q);
@@ -825,7 +612,6 @@ export class Houses {
       x, z, y0, base, rot: rotY, cos: Math.cos(rotY), sin: Math.sin(rotY),
       type, T, t, hw: t.halfW, hd: t.halfD, matrix, tint: tint ?? new THREE.Color(1, 1, 1),
       radius: Math.hypot(t.halfW, t.halfD) * S + 0.5, cy: y0 + t.floors * WALL_H * S * 0.5,
-      cullR: Math.hypot(t.halfW, t.halfD, t.floors * WALL_H / 2 + PARAPET_H) * S + 0.5,
       doorRoot, door, doorMeshes, panel, mixer, openAction, closeAction, doorBody,
       doorOpen: false, doorAnim: 0,
       floors,
@@ -857,7 +643,7 @@ export class Houses {
   /** World position of a loot spot ([x, z, floor], house-local) in this house. */
   lootSpot(h, [lx, lz, floor], out) {
     this._toWorld(h, lx, lz, out);
-    out.y = h.y0 + (floor ? levelY(floor) : 0.1) * HOUSE_SCALE;
+    out.y = h.y0 + (floor ? UP_Y : 0.1) * HOUSE_SCALE;
     return out;
   }
 
@@ -931,6 +717,72 @@ export class Houses {
     this._yardWorld(c, gateX, hd - 1.6, c.gateIn);
     this.compounds.push(c);
     return c;
+  }
+
+  // ── Climbing and vaulting ──────────────────────────────────────────────────
+
+  /**
+   * The yard wall someone at feet (x, z), facing (fx, fz) (unit), is standing
+   * against: { x, z } on the wall, { nx, nz } the way over, topY. null if none
+   * (gate gaps don't count). out is reused.
+   */
+  wallClimbSpot(x, z, fx, fz, out = this._climbOut ??= {}) {
+    for (const c of this.compounds) {
+      const l = this._yardLocal(c, x, z, _a);
+      if (Math.abs(l.x) > c.hw + CLIMB_REACH || Math.abs(l.z) > c.hd + CLIMB_REACH) continue;
+      const flx = fx * c.cos - fz * c.sin, flz = fx * c.sin + fz * c.cos;
+      const g0 = c.gateX - YARD_GATE / 2 - 0.3, g1 = c.gateX + YARD_GATE / 2 + 0.3;
+      // [walls along X at z = ±hd, walls along Z at x = ±hw]
+      for (const [alongX, at] of [[true, c.hd], [true, -c.hd], [false, -c.hw], [false, c.hw]]) {
+        const perp = (alongX ? l.z : l.x) - at, along = alongX ? l.x : l.z;
+        const half = alongX ? c.hw : c.hd;
+        if (Math.abs(perp) > CLIMB_REACH || Math.abs(along) > half - 0.3) continue;
+        if (alongX && at > 0 && along > g0 && along < g1) continue; // the gate: just walk through
+        const over = perp > 0 ? -1 : 1;                             // toward the wall and past it
+        if ((alongX ? flz : flx) * over < 0.55) continue;
+        const nlx = alongX ? 0 : over, nlz = alongX ? over : 0;
+        this._yardWorld(c, alongX ? along : at, alongX ? at : along, out);
+        out.nx = nlx * c.cos + nlz * c.sin;
+        out.nz = -nlx * c.sin + nlz * c.cos;
+        out.topY = c.base + YARD_WALL_H;
+        return out;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The window someone at (x, feetY, z), facing (fx, fz), can vault through:
+   * { x, z } the pane's centre, { nx, nz } the way through, sillY, topY. The
+   * sill has to be between knee and chest height (upstairs windows work from
+   * the inside: out you go). null if none.
+   */
+  windowVaultSpot(x, feetY, z, fx, fz, out = this._vaultOut ??= {}) {
+    const S = HOUSE_SCALE;
+    for (const h of this.houses) {
+      if (Math.abs(x - h.x) > h.radius + 2 || Math.abs(z - h.z) > h.radius + 2) continue;
+      const l = this._toLocal(h, x, z, _a);
+      const flx = fx * h.cos - fz * h.sin, flz = fx * h.sin + fz * h.cos;
+      for (const g of h.T.glassBoxes) {
+        // Pane frame: span (sin rot, cos rot), normal (cos rot, −sin rot), kit units
+        const sx = Math.sin(g.rot), sz = Math.cos(g.rot);
+        const dx = l.x - g.x, dz = l.z - g.z;
+        const along = dx * sx + dz * sz, perp = dx * sz - dz * sx;
+        if (Math.abs(along) > g.hz + 0.1 || Math.abs(perp) > VAULT_REACH) continue;
+        const over = perp > 0 ? -1 : 1;
+        if ((flx * sz - flz * sx) * over < 0.5) continue;
+        const sill = h.base + (g.y - g.hy) * S;
+        if (sill - feetY < 0.25 || sill - feetY > 1.45) continue;
+        this._toWorld(h, g.x, g.z, out);
+        const nlx = sz * over, nlz = -sx * over;
+        out.nx = nlx * h.cos + nlz * h.sin;
+        out.nz = -nlx * h.sin + nlz * h.cos;
+        out.sillY = sill;
+        out.topY = h.base + (g.y + g.hy) * S;
+        return out;
+      }
+    }
+    return null;
   }
 
   _yardWorld(c, lx, lz, out) {
@@ -1040,7 +892,7 @@ export class Houses {
     for (const h of this.houses) {
       const d = Math.hypot(h.x - cp.x, h.z - cp.z);
       _sphere.center.set(h.x, h.cy, h.z);
-      _sphere.radius = h.cullR;
+      _sphere.radius = h.radius;
       const inView = d < SHELL_RANGE && (d < NEAR_ALWAYS || _frustum.intersectsSphere(_sphere));
       h.shown = inView;
       h.inside = inView && d < INTERIOR_RANGE;
@@ -1094,12 +946,13 @@ export class Houses {
   warmup(on) {
     if (!this._finalized) this.finalize();
     const all = [...Object.values(this.types).flatMap(T => [...T.shellMeshes, ...T.interiorMeshes]), ...this.doorMeshes, this.bulbMesh, this.leverMesh];
-    for (const im of all) im.count = on ? im.instanceMatrix.count : 0;
+    for (const im of all) { im.count = on ? im.instanceMatrix.count : 0; im.visible = on; }
     this._shownSig = 0;
   }
 
   _commit(im, count) {
     im.count = count;
+    im.visible = count > 0;   // three.js issues a draw call even for zero instances
     im.instanceMatrix.needsUpdate = true;
     if (im.instanceColor) im.instanceColor.needsUpdate = true;
   }
@@ -1137,29 +990,15 @@ export class Houses {
     return null;
   }
 
-  /** Level (0 = ground floor, 1, 2 … upstairs, `floors` = the roof terrace) for feet at world height y in house h. */
+  /** 0 = ground floor, 1 = upstairs, for feet at world height y in house h. */
   level(h, y) {
-    const ly = (y - h.y0) / HOUSE_SCALE;
-    for (let L = h.t.top; L > 0; L--) if (ly > levelY(L) - LEVEL_DROP) return L;
-    return 0;
+    return h.t.floors > 1 && (y - h.y0) / HOUSE_SCALE > UP_LEVEL ? 1 : 0;
   }
 
-  /** The floor (lights, switch) you're on at (x, feet y, z), or null outdoors (and on a roof). */
+  /** The floor (lights, switch) you're on at (x, feet y, z), or null outdoors. */
   floorAt(x, y, z) {
     const h = this.houseAt(x, z);
-    return h ? h.floors[this.level(h, y)] ?? null : null;
-  }
-
-  /** True if feet at (x, y, z) stand on a roof terrace. */
-  onRoof(x, y, z) {
-    const h = this.houseAt(x, z);
-    return !!h && h.t.roof && this.level(h, y) === h.t.floors;
-  }
-
-  /** True if (x, y, z) (a camera, say) is under a roof: inside a house and below its roof slab. */
-  indoorAt(x, y, z) {
-    const h = this.houseAt(x, z);
-    return !!h && (y - h.y0) / HOUSE_SCALE < h.t.floors * WALL_H;
+    return h ? h.floors[this.level(h, y)] : null;
   }
 
   /** True if (x, z) is inside or right against any house or compound wall (keeps spawns and props out). */
@@ -1189,29 +1028,20 @@ export class Houses {
   }
 
   /**
-   * House-local surface height of flight L at (lx, lz), or null when not over
-   * it. lead: read the step that far further up (a body reaches ahead of its centre).
+   * House-local stair surface height at (lx, lz), or null when not over the
+   * stairs. lead: read the step that far further up (a body reaches ahead of its centre).
    */
-  _stairHeight(h, L, lx, lz, lead = 0) {
-    const st = h.t.flights[L];
-    const along = (lx - st.x0) * st.dx + (lz - st.z0) * st.dz;      // from the bottom step
-    const across = st.dx ? lz - st.z0 : lx - st.x0;
-    if (Math.abs(across) > st.hw + 0.1 || along < -0.15 || along > st.run + 0.05) return null;
-    const y0 = levelY(L);
-    return y0 + THREE.MathUtils.clamp((along + lead) / st.run, 0, 1) * (levelY(L + 1) - y0);
-  }
-
-  /** True if house-local (lx, lz) is over the opening level L's stairs come up through. */
-  _inHole(h, L, lx, lz) {
-    const hole = h.t.flights[L - 1]?.hole;
-    return !!hole && lx > hole.x0 && lx < hole.x1 && lz > hole.z0 && lz < hole.z1;
+  _stairHeight(h, lx, lz, lead = 0) {
+    const st = h.t.stairs;
+    if (!st) return null;
+    if (Math.abs(lz - st.z) > st.hw + 0.1 || lx < st.x1 - 0.05 || lx > st.x0 + 0.15) return null;
+    return THREE.MathUtils.clamp((st.x0 - lx + lead) / (st.x0 - st.x1), 0, 1) * UP_Y;
   }
 
   /**
-   * Height of the floor something standing at (x, feet y, z) walks on: a
-   * flight of stairs, an upper floor or the roof terrace (when it's already up
-   * there) or the ground floor. `ground` is the terrain height there, returned
-   * outside every house.
+   * Height of the floor something standing at (x, feet y, z) walks on: the
+   * stairs, the upper floor (when it's already up there) or the ground floor.
+   * `ground` is the terrain height there, returned outside every house.
    */
   surfaceAt(x, z, y, ground) {
     for (const h of this.houses) {
@@ -1220,15 +1050,13 @@ export class Houses {
       if (Math.abs(l.x) > h.hw || Math.abs(l.z) > h.hd) continue;
       const S = HOUSE_SCALE;
       const ly = (y - h.y0) / S;
-      const t = h.t;
-      for (let L = 0; L < t.top; L++) {
+      if (h.t.floors > 1) {
         // Half a metre of lead, so a monster's body clears the next step and the landing's edge
-        const stair = this._stairHeight(h, L, l.x, l.z, 0.45);
-        // (stacked flights: only the one on this storey)
-        if (stair !== null && ly > stair - 1.1 && ly < stair + 1.6) return h.y0 + stair * S;
-      }
-      for (let L = t.top; L > 0; L--) {
-        if (ly > levelY(L) - LEVEL_DROP && !this._inHole(h, L, l.x, l.z)) return h.y0 + levelY(L) * S;
+        const stair = this._stairHeight(h, l.x, l.z, 0.45);
+        if (stair !== null && ly > stair - 1.1) return h.y0 + stair * S;
+        const hole = h.t.hole;
+        const inHole = l.x > hole.x0 && l.x < hole.x1 && l.z < hole.z1;
+        if (ly > UP_LEVEL && !inHole) return h.y0 + UP_Y * S;
       }
       return Math.max(ground, h.y0 + 0.1 * S);
     }
@@ -1396,22 +1224,18 @@ export class Houses {
       const zIn = Math.abs(zl.x) < HW - IN_MARGIN && Math.abs(zl.z) < HD - IN_MARGIN;
       const pIn = Math.abs(pl.x) < HW - IN_MARGIN && Math.abs(pl.z) < HD - IN_MARGIN;
 
-      if (zIn && t.top) {
-        const zL = this.level(h, zy);
-        const pL = pIn ? this.level(h, py) : 0;
-        // On a flight: keep going the way the target is
-        const zly = (zy - h.y0) / HOUSE_SCALE;
-        for (let L = 0; L < t.top; L++) {
-          const st = t.flights[L];
-          const sy = this._stairHeight(h, L, zl.x, zl.z);
-          if (sy === null || Math.abs(zly - sy) > 1) continue;
-          const along = (zl.x - st.x0) * st.dx + (zl.z - st.z0) * st.dz;
-          if (pL > L) { this._flightEnd(h, st, true, out); return 1; }
-          if (zL > L || along > 0.3) { this._flightEnd(h, st, false, out); return 1; }
+      if (zIn && t.stairs) {
+        const st = t.stairs;
+        const zUp = this.level(h, zy) === 1;
+        const pUp = pIn && this.level(h, py) === 1;
+        // On the stairs: keep going the way the target is
+        if (this._stairHeight(h, zl.x, zl.z) !== null && (zUp || pUp || zl.x < st.x0 - 0.3)) {
+          this._toWorld(h, pUp ? st.x1 - 0.9 : st.x0 + 0.9, st.z, out);
+          return 1;
         }
-        if (zL < pL) return this._towardFlight(h, zL, true, zl, out);       // go up
-        if (zL > pL) return this._towardFlight(h, zL - 1, false, zl, out);  // come down first
-        if (pIn && this._aroundStairwells(h, zL, zl, pl.x, pl.z, out)) return 1; // not across an opening or a flight
+        if (zUp && !pUp) return this._towardStairsTop(h, zl, out);   // come down first
+        if (!zUp && pUp) return this._towardStairsBottom(h, zl, out); // go up
+        if (zUp && this._aroundStairwell(h, zl, pl, out)) return 1;   // upstairs: not across the opening
       }
       if (zIn && pIn) return 0;                                       // same floor
 
@@ -1462,84 +1286,47 @@ export class Houses {
     return 1;
   }
 
-  /** World point just off the top (or bottom) end of flight st, on the level it reaches (leaves). */
-  _flightEnd(h, st, top, out) {
-    if (top) this._toWorld(h, st.x1 + st.dx * 0.9, st.z1 + st.dz * 0.9, out);
-    else this._toWorld(h, st.x0 - st.dx * 0.9, st.z0 - st.dz * 0.9, out);
-  }
-
-  /**
-   * Toward flight L: up from its foot (on level L), or down from its head (on
-   * level L + 1). Walks round openings and other flights to its end, then onto it.
-   */
-  _towardFlight(h, L, up, zl, out) {
-    const st = h.t.flights[L];
-    const ax = up ? st.x0 - st.dx * 0.9 : st.x1 + st.dx * 0.9;
-    const az = up ? st.z0 - st.dz * 0.9 : st.z1 + st.dz * 0.9;
-    // Lined up in the lane leading onto it (from the approach point to the step):
-    // walk onto it, toward the other end; the on-a-flight rule takes over from there
-    const ex = up ? st.x0 : st.x1, ez = up ? st.z0 : st.z1;
-    const s = up ? 1 : -1;                                                 // the way onto the flight
-    const u = ((zl.x - ex) * st.dx + (zl.z - ez) * st.dz) * s;             // ≤ 0 short of the end
-    const v = st.dx ? zl.z - ez : zl.x - ex;                               // off the centre line
-    if ((u > -1.25 && u < 0.2 && Math.abs(v) < 0.35) || Math.hypot(zl.x - ax, zl.z - az) < 0.3) {
-      this._flightEnd(h, st, up, out);
-      return 1;
-    }
-    if (!this._aroundStairwells(h, up ? L : L + 1, zl, ax, az, out)) this._toWorld(h, ax, az, out);
-    return 1;
-  }
-
-  /**
-   * On level L: if the straight line from zl to the house-local goal (gx, gz)
-   * crosses an opening in the floor or a flight of stairs standing on it, a
-   * corner round the nearest such one. Allocation-free.
-   */
-  _aroundStairwells(h, L, zl, gx, gz, out) {
-    const t = h.t;
-    let best = Infinity, bx = 0, bz = 0, nearest = Infinity;
-    for (let k = 0; k < 2; k++) {
-      // k 0: the opening this level's stairs come up through; k 1: the flight going on up
-      let x0, x1, z0, z1, st = null;
-      if (k === 0) {
-        const hole = t.flights[L - 1]?.hole;
-        if (!hole) continue;
-        x0 = hole.x0; x1 = hole.x1; z0 = hole.z0; z1 = hole.z1;
-      } else {
-        st = t.flights[L];
-        if (!st) continue;
-        // As wide as the band surfaceAt() counts as stairs, or the corner would graze the steps
-        const w = st.hw + 0.15;
-        x0 = Math.min(st.x0, st.x1) - (st.dx ? 0 : w); x1 = Math.max(st.x0, st.x1) + (st.dx ? 0 : w);
-        z0 = Math.min(st.z0, st.z1) - (st.dz ? 0 : w); z1 = Math.max(st.z0, st.z1) + (st.dz ? 0 : w);
-      }
-      const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
-      const ex = (x1 - x0) / 2, ez = (z1 - z0) / 2;
-      if (!segHitsRect(zl.x - cx, zl.z - cz, gx - cx, gz - cz, ex + 0.35, ez + 0.35)) continue;
-      const d = Math.hypot(cx - zl.x, cz - zl.z);
-      if (d > nearest) continue;
-      // Corners just off the rectangle, inside the walls, reachable without crossing it
-      // (standing on its rim, e.g. just off the top step: without crossing the opening itself)
-      const rx = Math.abs(zl.x - cx), rz = Math.abs(zl.z - cz);
-      const pad = rx < ex + 0.3 && rz < ez + 0.3 ? 0 : 0.3;
-      const onIt = rx < ex && rz < ez;
-      let kb = Infinity, kx = 0, kz = 0;
-      for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
-        const px = cx + sx * (ex + 0.6), pz = cz + sz * (ez + 0.6);
-        if (Math.abs(px) > t.halfW - 0.3 || Math.abs(pz) > t.halfD - 0.3) continue;
-        // On the bottom steps of a flight: off at its foot, not back up past its head
-        if (onIt && st && (px - cx) * st.dx + (pz - cz) * st.dz > 0) continue;
-        const d0 = Math.hypot(px - zl.x, pz - zl.z);
-        if (d0 < 0.4) continue; // already at this corner
-        if (!onIt && segHitsRect(zl.x - cx, zl.z - cz, px - cx, pz - cz, ex + pad, ez + pad)) continue;
-        const cost = d0 + Math.hypot(gx - px, gz - pz);
-        if (cost < kb) { kb = cost; kx = px; kz = pz; }
-      }
-      if (kb === Infinity) continue;
-      nearest = d; best = kb; bx = kx; bz = kz;
+  /** Upstairs: if the straight line to the target crosses the stairwell, a corner round it. */
+  _aroundStairwell(h, zl, pl, out) {
+    const hole = h.t.hole;
+    const cx = (hole.x0 + hole.x1) / 2, cz = (hole.z0 + hole.z1) / 2;
+    const ex = (hole.x1 - hole.x0) / 2 + 0.35, ez = (hole.z1 - hole.z0) / 2 + 0.35;
+    if (!segHitsRect(zl.x - cx, zl.z - cz, pl.x - cx, pl.z - cz, ex, ez)) return false;
+    let best = Infinity, bx = 0, bz = 0;
+    for (const x of [hole.x0 - 0.6, hole.x1 + 0.6]) {
+      const z = hole.z1 + 0.6;
+      const d0 = Math.hypot(x - zl.x, z - zl.z);
+      if (d0 < 0.4) continue; // already at this corner
+      const cost = d0 + Math.hypot(pl.x - x, pl.z - z);
+      if (cost < best) { best = cost; bx = x; bz = z; }
     }
     if (best === Infinity) return false;
     this._toWorld(h, bx, bz, out);
     return true;
+  }
+
+  /** Ground floor → the foot of the stairs, then up them. */
+  _towardStairsBottom(h, zl, out) {
+    const st = h.t.stairs;
+    const ax = st.x0 + 0.9;
+    if (Math.hypot(zl.x - ax, zl.z - st.z) < 0.9) this._toWorld(h, st.x1 - 0.9, st.z, out);
+    else this._toWorld(h, ax, st.z, out);
+    return 1;
+  }
+
+  /** Upper floor → round the railing to the top of the stairs, then down them. */
+  _towardStairsTop(h, zl, out) {
+    const st = h.t.stairs, hole = h.t.hole;
+    const ax = st.x1 - 0.9;
+    if (zl.x > ax + 0.5) {
+      // Behind the railing: step out in front of it first, then along to the left wall
+      if (zl.z < hole.z1 + 0.4) this._toWorld(h, zl.x, hole.z1 + 0.7, out);
+      else this._toWorld(h, ax - 0.1, hole.z1 + 0.7, out);
+    } else if (Math.hypot(zl.x - ax, zl.z - st.z) < 0.6) {
+      this._toWorld(h, st.x0 + 0.9, st.z, out);
+    } else {
+      this._toWorld(h, ax, st.z, out);
+    }
+    return 1;
   }
 }

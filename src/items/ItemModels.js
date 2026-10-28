@@ -23,6 +23,10 @@ const MAT = {
   violet:  new THREE.MeshStandardMaterial({ color: 0x9b5cff, metalness: 0.0, roughness: 0.6 }),
   cloth:   new THREE.MeshStandardMaterial({ color: 0xcfc3a3, metalness: 0.0, roughness: 1.0 }),
   liquid:  new THREE.MeshStandardMaterial({ color: 0xb8620f, metalness: 0.0, roughness: 0.3, emissive: 0x2a1000 }),
+  parle:   new THREE.MeshStandardMaterial({ color: 0xf4d34a, metalness: 0.0, roughness: 0.45 }),
+  parleRed: new THREE.MeshStandardMaterial({ color: 0xd8262e, metalness: 0.0, roughness: 0.5 }),
+  note:    new THREE.MeshStandardMaterial({ color: 0xd65aa8, metalness: 0.0, roughness: 0.7 }),
+  noteDk:  new THREE.MeshStandardMaterial({ color: 0x8e2f6e, metalness: 0.0, roughness: 0.7 }),
   glass:   new THREE.MeshStandardMaterial({
     color: 0x6b8f3a, metalness: 0.1, roughness: 0.1, transparent: true, opacity: 0.55, depthWrite: false,
   }),
@@ -228,6 +232,24 @@ const BUILDERS = {
     return g;
   },
 
+  // Parle-G: the yellow wrapper with the red band
+  biscuit: () => {
+    const g = new THREE.Group();
+    box(g, 0.2, 0.055, 0.085,   MAT.parle,    0, 0, 0);
+    box(g, 0.06, 0.057, 0.087,  MAT.parleRed, -0.045, 0, 0);
+    box(g, 0.035, 0.006, 0.04,  MAT.white,    0.04, 0.03, 0);
+    return g;
+  },
+
+  // A bundle of ₹2000 notes with a paper band
+  cash: () => {
+    const g = new THREE.Group();
+    box(g, 0.166, 0.03, 0.066,   MAT.note,   0, 0, 0);
+    box(g, 0.168, 0.004, 0.068,  MAT.noteDk, 0, 0.012, 0);
+    box(g, 0.03, 0.032, 0.068,   MAT.white,  0, 0, 0);
+    return g;
+  },
+
   medkit: () => {
     const g = new THREE.Group();
     box(g, 0.28, 0.18, 0.1,   MAT.white, 0, 0, 0);
@@ -275,6 +297,26 @@ function gearBuilders() {
 }
 
 const _templates = new Map();
+
+/**
+ * Swaps an item's procedural model for a loaded one (the Parle-G and ₹2000
+ * models), scaled to `size` metres along its longest side and centred. Call
+ * before the item is first used (pickups build their meshes on first spawn).
+ */
+export function setItemModel(id, object3D, size) {
+  const g = new THREE.Group();
+  const m = object3D.clone(true);
+  m.updateMatrixWorld(true);
+  const b = new THREE.Box3().setFromObject(m);
+  const dims = b.getSize(new THREE.Vector3());
+  const s = size / (Math.max(dims.x, dims.y, dims.z) || 1);
+  const c = b.getCenter(new THREE.Vector3());
+  m.scale.multiplyScalar(s);
+  m.position.sub(c.multiplyScalar(s));
+  m.traverse(o => { if (o.isMesh) o.castShadow = true; });
+  g.add(m);
+  _templates.set(id, g);
+}
 
 /** Shared template for an item id (pistol, smg, …, grenade, molotov, ammo, medkit). Clone before adding to a scene. */
 export function getItemTemplate(id) {

@@ -15,7 +15,7 @@ const BOLT_SEGS    = 22;
 
 // rain: drop density, cloud: overcast (darkens the world), wind: m/s slant
 const STATES = {
-  clear:    { rain: 0,    cloud: 0.1,  wind: 0.5, label: "Clear" },
+  clear:    { rain: 0,    cloud: 0.05, wind: 0.5, label: "Sunny" },
   overcast: { rain: 0,    cloud: 0.6,  wind: 1.2, label: "Overcast" },
   drizzle:  { rain: 0.3,  cloud: 0.72, wind: 1.4, label: "Drizzle" },
   rain:     { rain: 0.65, cloud: 0.85, wind: 2.2, label: "Rain" },

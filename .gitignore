@@ -53,3 +53,9 @@ dist-ssr
 
 # Android build output
 *.apk
+
+# Indian models (Sketchfab downloads): only the optimized copies are committed
+public/models/india/*.glb
+!public/models/india/*.opt.glb
+public/models/india/*.zip
+public/models/india/*/

@@ -1003,10 +1003,11 @@ export class Sfx {
   }
 
   /**
-   * vol: 0 off … 1 running; rpm: 0 idle … 1 flat out; at: where the rickshaw
-   * is (null = you're driving it). Cheap to call every frame.
+   * vol: 0 off … 1 running; rpm: 0 idle … 1 flat out; at: where the vehicle
+   * is (null = you're driving it). tone: pitch scale (1 the rickshaw's
+   * two-stroke, ~0.7 a jeep's diesel). Cheap to call every frame.
    */
-  setRickshaw(vol, rpm, at = null) {
+  setRickshaw(vol, rpm, at = null, tone = 1) {
     if (!this.ctx) return;
     if (!this.engine) {
       if (vol <= 0) return;
@@ -1023,11 +1024,12 @@ export class Sfx {
     }
     const q = v => Math.round(v * 40) / 40;
     if (q(vol) !== l.vol) { l.vol = q(vol); e.gain.gain.setTargetAtTime(l.vol * 0.22, t, 0.15); }
-    if (q(rpm) !== l.rpm) {
+    if (q(rpm) !== l.rpm || tone !== l.tone) {
       l.rpm = q(rpm);
-      e.osc.frequency.setTargetAtTime(38 + l.rpm * 70, t, 0.12);
-      e.pulse.frequency.setTargetAtTime(19 + l.rpm * 35, t, 0.12);
-      e.lp.frequency.setTargetAtTime(450 + l.rpm * 900, t, 0.12);
+      l.tone = tone;
+      e.osc.frequency.setTargetAtTime((38 + l.rpm * 70) * tone, t, 0.12);
+      e.pulse.frequency.setTargetAtTime((19 + l.rpm * 35) * tone, t, 0.12);
+      e.lp.frequency.setTargetAtTime((450 + l.rpm * 900) * tone, t, 0.12);
     }
   }
 

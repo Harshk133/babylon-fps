@@ -42,8 +42,9 @@ export class WorldMap {
    *   players()   → [{ x, z, yaw, color, dead }]   teammates
    *   obstacles() → [{ type:"box", x, z, w, d, rot } | { type:"circle", x, z, r }]
    *   fires()     → [{ x, z }]                       burning wrecks
-   *   vehicle()   → { x, z } | null
+   *   vehicles()  → [{ x, z, kind }]
    *   br()        → { zone, next, route, plane } | null
+   *   fights()    → [{ x, z, r }]                    red zones: players fighting
    *   height(x,z) → surface height for the relief (default: groundHeight)
    *   caves()     → [{ name, x, z, tunnels: [[ax, az, bx, bz]], mouths: [{ x, z }] }]
    * opts: { touch, onPin(x, z), onClear(), onClose() }
@@ -447,9 +448,9 @@ export class WorldMap {
       ctx.fillText(t.name.toUpperCase(), X(t.x), ly);
     }
 
-    const car = this.sources.vehicle?.();
-    if (car) {
-      ctx.fillStyle = "#ffd23a";
+    // Vehicles: yellow rickshaws, olive Thars
+    for (const car of this.sources.vehicles?.() ?? []) {
+      ctx.fillStyle = car.kind === "thar" ? "#9fbf5a" : "#ffd23a";
       ctx.strokeStyle = "#1a1206";
       ctx.lineWidth = 1.5;
       ctx.beginPath();
@@ -500,6 +501,20 @@ export class WorldMap {
   }
 
   _drawBr(ctx, X, Y, k, S) {
+    // Red zones: wherever players are fighting
+    for (const f of this.sources.fights?.() ?? []) {
+      ctx.fillStyle = "rgba(255, 40, 20, 0.25)";
+      ctx.strokeStyle = "#ff3b2a";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(X(f.x), Y(f.z), Math.max(6, f.r * k), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#ffd9d2";
+      ctx.font = "600 12px Teko, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("RED ZONE", X(f.x), Y(f.z) - Math.max(6, f.r * k) - 4);
+    }
     const s = this.sources.br?.();
     if (!s) return;
     if (s.zone) {

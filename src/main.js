@@ -26,14 +26,17 @@ import { Weather } from "./world/Weather.js";
 import { Atmosphere } from "./world/Atmosphere.js";
 import { plantDeadForest } from "./world/Forest.js";
 import { buildTerrain, groundHeight, flatHeight, rawHeight, PLAY_RADIUS } from "./world/Terrain.js";
-import { Roads } from "./world/Roads.js";
+import { Roads, ROAD_HALF } from "./world/Roads.js";
 import { ROAD_DEFS, layoutTowns } from "./world/Towns.js";
 import { Backdrop } from "./world/Backdrop.js";
 import { Grass, GRASS_FLATTENERS } from "./world/Grass.js";
-import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves } from "./world/Caves.js";
+import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves, adoptCavesData } from "./world/Caves.js";
 import { scatterRocks } from "./world/Rocks.js";
+import { COLLEGE_GATE, placeCollegeGate } from "./world/CollegeGate.js";
+import { loadIndiaModels } from "./world/IndiaAssets.js";
+import { propSpots, placeIndiaProps } from "./world/IndiaProps.js";
 import { mergeStaticMeshes } from "./world/MergeStatic.js";
-import { Rickshaw, RICKSHAW } from "./vehicles/Rickshaw.js";
+import { Vehicle, VEHICLES, standInJeep } from "./vehicles/Vehicle.js";
 import { QUALITY, QUALITY_NAME, QUALITY_SETTING, QUALITY_PRESETS, saveQuality } from "./quality.js";
 import { Net } from "./net/Net.js";
 import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "./net/RemotePlayers.js";
@@ -49,7 +52,7 @@ import {
 } from "./br/BattleRoyale.js";
 import { ENEMY_GUNS, getLevel } from "./zombies/MonsterTypes.js";
 import {
-  WEAPONS, WEAPON_ORDER, HEAD_HEIGHT, GRENADE, MOLOTOV, MEDKIT, THROWABLES, THROWABLE_ORDER,
+  WEAPONS, WEAPON_ORDER, HEAD_HEIGHT, GRENADE, MOLOTOV, MEDKIT, BISCUIT, CASH, THROWABLES, THROWABLE_ORDER,
   SMOKE, SMOKE_COLORS, GEAR, ATTACHMENTS, HELMET_MONSTER_SHARE, VEST_BLAST_SHARE,
 } from "./combat/weapons.js";
 import { weaponStats } from "./items/ItemDefs.js";
@@ -58,16 +61,38 @@ import { LootScreen } from "./ui/LootScreen.js";
 import { Inventory } from "./inventory/Inventory.js";
 import { InventoryUI } from "./inventory/InventoryUI.js";
 import { Pickups } from "./pickups/Pickups.js";
-import { renderItemIcon } from "./items/ItemModels.js";
+import { renderItemIcon, setItemModel, cloneItem } from "./items/ItemModels.js";
+import { applyStaticIcons, gameItemIcon } from "./ui/applyIcons.js";
+import { icon } from "./ui/gameIcons.js";
+import { SHOP_ITEMS, ShopUI, fmtRupees } from "./economy/Shop.js";
+import { shopSpots, buildShops, SHOP_RANGE } from "./world/Shops.js";
 import { WeaponWheel } from "./ui/WeaponWheel.js";
 import { KillStreak } from "./ui/KillStreak.js";
 import { PostFX } from "./render/PostFX.js";
 import { Confetti } from "./ui/Confetti.js";
+import { ScreenBlood } from "./ui/ScreenBlood.js";
 import { Progress } from "./meta/Progress.js";
 import { ProgressUI } from "./ui/ProgressUI.js";
 import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
 import { STANCES, setCapsuleStance } from "./player/Stance.js";
 import { PerfOverlay, PERF_ENABLED, BENCH_ENABLED } from "./debug/PerfOverlay.js";
+import { StaticGridBroadphase } from "./physics/StaticGridBroadphase.js";
+import { Bots, isBotId } from "./br/Bots.js";
+
+// The caves' heavy lifting (rock field, mesh, torches, baked light) runs on a
+// worker from the very start, in parallel with every download; if workers
+// aren't available it's done on this thread in loadWorld() instead.
+const cavesPrecomputed = new Promise(resolve => {
+  let worker;
+  try {
+    worker = new Worker(new URL("./world/cavesWorker.js", import.meta.url), { type: "module" });
+  } catch {
+    resolve();
+    return;
+  }
+  worker.onmessage = e => { adoptCavesData(e.data.nets); worker.terminate(); resolve(); };
+  worker.onerror = () => { worker.terminate(); resolve(); };
+});
 import { GROUP_WORLD, GROUP_PLAYER, GROUP_ZOMBIE } from "./physicsGroups.js";
 
 // ─── Game mode ────────────────────────────────────────────────────────────────
@@ -81,7 +106,7 @@ const BACKPEDAL_SPEED     = 3.6;
 const STRAFE_SPEED        = 4.6;
 const SPRINT_SPEED        = 8.0;   // Shift + W, can't shoot while sprinting
 const AIM_MOVE_MULTIPLIER = 0.62;  // slower while aiming down sights
-const JUMP_VELOCITY       = 6.5;   // ≈1.05 m (gravity is 20); still short of a 1.44 m parapet
+const JUMP_VELOCITY       = 5.5;
 const CHARACTER_HEIGHT    = 1.8;
 const CHARACTER_RADIUS    = 0.35;
 const CAPSULE_HEIGHT      = CHARACTER_HEIGHT - CHARACTER_RADIUS * 2;
@@ -97,6 +122,7 @@ const SHADOW_FRUSTUM_SIZE = 25;
 
 // ─── World Scatter Settings ───────────────────────────────────────────────────
 const BOULDER_COUNT      = 46;    // solid stones (same on every quality: they have colliders)
+const COVER_ROCK_COUNT   = 34;    // big rocks to hide behind (same on every quality too)
 const TREE_A_COUNT       = 5;
 const TREE_B_COUNT       = 4;
 
@@ -220,6 +246,20 @@ function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX =
   }
   sfx.hurt();
   postFx.hurt(Math.min(1, amount / 30));
+  // Aqua blood: a spray off the body (away from whoever hit you) and drops on the screen
+  if (amount > 0.5) {
+    const p = characterBody.position;
+    _bleedAt.set(p.x, p.y + (kind === "head" ? 0.6 : 0.2), p.z);
+    const away = srcX !== null;
+    effects.bleed(_bleedAt, away ? p.x - srcX : Math.random() - 0.5, away ? p.z - srcZ : Math.random() - 0.5, Math.min(22, 6 + amount * 0.5));
+    let screenAngle = null;
+    if (away) {
+      const dx = srcX - p.x, dz = srcZ - p.z;
+      screenAngle = Math.atan2(dx * -Math.cos(aimYaw) + dz * Math.sin(aimYaw), dx * Math.sin(aimYaw) + dz * Math.cos(aimYaw));
+    }
+    screenBlood.hit(Math.min(1, amount / 35), screenAngle);
+    playerAnim.hurt(amount);
+  }
   timeSinceHit = 0;
   damageFlash  = Math.min(1, damageFlash + Math.max(0.25, shake * 1.5));
   cameraTrauma = Math.min(1, cameraTrauma + shake);
@@ -256,6 +296,7 @@ function regenPlayerHealth(amount) {
 }
 
 function onPlayerDeath() {
+  cancelClimb();
   killStreak.reset();
   setStance("stand", true);
   cameraTrauma = 1;
@@ -263,7 +304,7 @@ function onPlayerDeath() {
   sfx.hurt();
   cancelThrow();
   setInventoryOpen(false);
-  exitRickshaw();
+  exitVehicle();
   if (isBR()) { brOnLocalDeath(); return; }
   if (deathKillsEl) deathKillsEl.textContent = `${killsThisLife}`;
   if (deathXpEl) deathXpEl.textContent = progress.runXp ? `+${progress.runXp.toLocaleString()} XP this life` : "";
@@ -272,6 +313,7 @@ function onPlayerDeath() {
 }
 
 function respawnPlayer() {
+  cancelClimb();
   playerHealth = MAX_HEALTH;
   healthTrail  = MAX_HEALTH;
   timeSinceHit = 99;
@@ -279,7 +321,7 @@ function respawnPlayer() {
   // Co-op: come back next to a living teammate
   const mate = net.connected ? remotePlayers.targets().find(t => t.alive) : null;
   const sx = mate ? mate.pos.x + 2 : 0, sz = mate ? mate.pos.z + 2 : 0;
-  exitRickshaw();
+  exitVehicle();
   const sy = groundHeight(sx, sz);
   characterBody.position.set(sx, sy + FEET_OFFSET + 0.02, sz);
   characterBody.velocity.set(0, 0, 0);
@@ -387,7 +429,7 @@ function updateCombatHUD(delta) {
     hud.gap = gap;
     crosshairEl?.style.setProperty("--gap", `${gap}px`);
   }
-  const hideCrosshair = sprinting || playerHealth <= 0 || !currentDef() || brAirborne() || drive.on;
+  const hideCrosshair = sprinting || playerHealth <= 0 || !currentDef() || brAirborne() || drive.on || scopeShown;
   if (hideCrosshair !== hud.crosshairHidden) {
     hud.crosshairHidden = hideCrosshair;
     crosshairEl?.classList.toggle("hidden", hideCrosshair);
@@ -528,24 +570,32 @@ const canvas = document.getElementById("webgl");
 // With post-processing on, the MSAA lives on PostFX's scene target instead
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: QUALITY.antialias && QUALITY.post === "off", powerPreference: "high-performance" });
 renderer.setSize(window.innerWidth, window.innerHeight);
+// Asking the driver whether each program linked waits for it to finish compiling,
+// one program at a time; in a release build that stall is pure loading time
+renderer.debug.checkShaderErrors = import.meta.env.DEV;
 
 // ─── Dynamic resolution ───────────────────────────────────────────────────────
 // Drops the render scale when frames run long and creeps back up when there's
 // headroom, so a heavy moment (big horde, explosions) costs sharpness, not FPS.
 const MAX_PIXEL_RATIO = Math.min(window.devicePixelRatio, QUALITY.pixelRatioMax);
 const MIN_PIXEL_RATIO = Math.min(QUALITY.pixelRatioMin, MAX_PIXEL_RATIO);
-const perf = { ratio: MAX_PIXEL_RATIO, avg: 16.7, logic: 8, slow: 0, fast: 0 };
+const perf = { ratio: MAX_PIXEL_RATIO, avg: 16.7, logic: 8, slow: 0, fast: 0, upWait: 3000, raisedAt: -1e9 };
 renderer.setPixelRatio(perf.ratio);
 
 /**
- * frameMs: time since the last frame. logicMs: JavaScript spent on the game
- * (physics, AI, animation) before drawing. When that alone eats most of the
- * frame, the CPU is the limit (typical on phones) and a lower resolution would
- * only blur the picture without making it any faster, so it stays sharp.
+ * frameMs: time since the last frame. cpuMs: JavaScript spent on the frame,
+ * game logic (physics, AI, animation) and issuing the draw calls. When that
+ * eats most of the frame, the CPU is the limit (typical on phones, and on
+ * integrated GPUs with many draw calls) and a lower resolution would only blur
+ * the picture without making it any faster, so it stays sharp.
+ *
+ * Every change reallocates the canvas and the post-processing targets (a
+ * hitch), so it backs off: a raise that gets taken back within 8 s doubles
+ * the wait before the next try (up to a minute).
  */
-function updateDynamicResolution(frameMs, logicMs) {
+function updateDynamicResolution(frameMs, cpuMs) {
   perf.avg += (Math.min(frameMs, 100) - perf.avg) * 0.05;
-  perf.logic += (Math.min(logicMs, 100) - perf.logic) * 0.05;
+  perf.logic += (Math.min(cpuMs, 100) - perf.logic) * 0.05;
   const cpuBound = perf.logic > perf.avg * 0.6;
   // Frame budget: 60 FPS, or 30 when a phone is capped there (a capped frame isn't a slow one)
   const budget = 1000 / frameCap();
@@ -555,8 +605,14 @@ function updateDynamicResolution(frameMs, logicMs) {
   else { perf.slow = 0; perf.fast = 0; }
 
   let next = perf.ratio;
-  if (perf.slow > 600) next = Math.max(MIN_PIXEL_RATIO, perf.ratio - 0.1);
-  else if (perf.fast > 3000) next = Math.min(MAX_PIXEL_RATIO, perf.ratio + 0.05);
+  const now = performance.now();
+  if (perf.slow > 600) {
+    next = Math.max(MIN_PIXEL_RATIO, perf.ratio - 0.1);
+    if (next !== perf.ratio && now - perf.raisedAt < 8000) perf.upWait = Math.min(60000, perf.upWait * 2);
+  } else if (perf.fast > perf.upWait) {
+    next = Math.min(MAX_PIXEL_RATIO, perf.ratio + 0.05);
+    if (next !== perf.ratio) perf.raisedAt = now;
+  }
   if (next !== perf.ratio) {
     perf.ratio = next;
     perf.slow = 0;
@@ -585,15 +641,23 @@ function syncPostSize() {
 }
 
 const effects = new Effects(scene);
+// Blood drops land on the terrain, or on the asphalt (drawn up to 10 cm over the levelled ground)
+effects.groundAt = (x, z) => groundHeight(x, z) + (roads && roads.distance(x, z) < ROAD_HALF ? 0.11 : 0);
+const screenBlood = new ScreenBlood();             // aqua drops on the screen when you're hit
+const _bleedAt = new THREE.Vector3();
 // HRTF 3D audio on desktop (headphones hear left / right / behind); phones pan cheaper.
-// The samples start downloading now, alongside the models.
+// The samples download once the models are in (loadWorld), so they don't
+// share a phone's bandwidth with what the loading screen is waiting for.
 const sfx = new Sfx({ hrtf: !IS_TOUCH });
-sfx.preload();
 
 // ─── Physics World ────────────────────────────────────────────────────────────
 const world = new CANNON.World();
 world.gravity.set(0, -20, 0); // Earth gravity
-world.broadphase = new CANNON.SAPBroadphase(world);
+// Static bodies in a grid, built once; only moving bodies are swept each step
+// (physics/StaticGridBroadphase.js). Pairs are confirmed by bounding boxes, not
+// bounding spheres: long walls, roads and flat static bodies have spheres far
+// bigger than they are.
+world.broadphase = new StaticGridBroadphase(world);
 world.allowSleep = true;
 world.solver.iterations = 8;
 world.solver.tolerance = 0.0001;
@@ -655,6 +719,7 @@ function freezeStatic(root) {
 const mapObstacles = [];
 const navObstacles = [];
 let caves = null;          // world/Caves.js, built in loadWorld()
+let indiaBuildings = null; // world/IndiaProps.js: the panchayat offices and town buildings you can walk into
 let caveMapShapes = [];
 /** What you'd stand on from above: the ground, or the top of a cave hill. */
 function surfaceHeight(x, z) {
@@ -777,8 +842,11 @@ flashlight.castShadow = false;
 scene.add(flashlight, flashlight.target);
 const torch = { on: false, manual: false, level: 0, hinted: false };
 
-const env = new Environment({ scene, renderer, lights: { hemi: hemiLight, ambient: ambientLight, sun } });
-const weather = new Weather(scene, "overcast", QUALITY.rain);
+// Always a clear, sunny midday: no day/night cycle and no rain
+const env = new Environment({ scene, renderer, lights: { hemi: hemiLight, ambient: ambientLight, sun }, startHour: 12 });
+env.paused = true;
+const weather = new Weather(scene, "clear", QUALITY.rain);
+weather.locked = true;
 const atmosphere = new Atmosphere(scene, QUALITY.mist);
 const grass = new Grass(scene, QUALITY.grass);
 const backdrop = new Backdrop({ segments: QUALITY.mountainSegments });
@@ -858,12 +926,41 @@ const cameraRig = {
   air:    { distance: 6.5,  shoulder: 0,    height: 1.0,  fov: 72 }, // freefall / parachute
   plane:  { distance: 24,   shoulder: 0,    height: 5.0,  fov: 66 }, // riding in the drop plane
   drive:  { distance: 5.6,  shoulder: 0,    height: 0.75, fov: 68 }, // behind the auto-rickshaw
+  scope:  { distance: -0.15, shoulder: 0,   height: 0.04, fov: 7 },  // down a scope: at the eye (fov = the gun's)
+  fp:     { distance: 0,    shoulder: 0,    height: 0,    fov: 74 }, // first person indoors (eye from the head bone)
   followXZ: 16, followY: 9,
   pitchMin: -1.2, pitchMax: 1.0,
   sensitivity: 0.0022, aimSensitivity: 0.0012,
 };
 let aimYaw = 0, aimPitch = -0.12;
 let aimBlend = 0, sprintBlend = 0, airBlend = 0, planeBlend = 0, driveBlend = 0;
+let scopeBlend = 0;              // 0..1: looking down a scoped gun (sniper, 4x ACOG)
+let fpBlend = 0;                 // 0..1: first-person view, inside a house
+const FP_EYE_UP  = 0.1;          // eyes above the head joint (m)
+const FP_EYE_FWD = 0.14;         // ...and in front of it, along the aim
+const FP_NEAR    = 0.05;         // near plane in first person, so the gun in your hands isn't clipped
+const TP_NEAR    = 0.5;
+const SCOPE_AIM_FOV = 32;        // a scoped gun's shoulder-aim FOV on the way into the scope
+
+// Scope view: the lens overlay, and your own body hidden (the camera sits in
+// your head). Touched only when it flips.
+const scopeEl = document.createElement("div");
+scopeEl.id = "scope-overlay";
+scopeEl.innerHTML = '<div class="scope-lens"></div><i class="scope-h"></i><i class="scope-v"></i><i class="scope-dot"></i>';
+document.body.append(scopeEl);
+let scopeShown = false;
+function updateScopeView() {
+  const on = scopeBlend > 0.6;
+  if (on === scopeShown) return;
+  scopeShown = on;
+  scopeEl.classList.toggle("on", on);
+  if (soldier.root) soldier.root.visible = !on;
+}
+
+/** Looking down a scope slows the mouse / gyro to match the zoom. */
+function scopeLookScale() {
+  return 1 - scopeBlend * (1 - Math.min(1, cameraRig.scope.fov / SCOPE_AIM_FOV));
+}
 let camFrac = 1;                 // 0..1 of the desired boom length after collision
 let recoilPitch = 0, recoilYaw = 0;
 const camPivot     = new THREE.Vector3(0, cameraRig.pivotHeight, 0);
@@ -898,7 +995,7 @@ const input = { fire: false, aim: false, firePressed: false };
 let touchPlaying = false;
 // mapHoldsPlay: the big map has freed the mouse on desktop, but the game is still on
 let mapHoldsPlay = false;
-const isLocked = () => touchPlaying || mapHoldsPlay || bench.on || document.pointerLockElement === canvas;
+const isLocked = () => touchPlaying || mapHoldsPlay || shopHoldsPlay || bench.on || document.pointerLockElement === canvas;
 
 const SLOT_KEYS = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4, Digit5: 5 };
 
@@ -923,6 +1020,7 @@ function setKey(code, pressed, repeat) {
     if (code === "Escape" && inventoryOpen) { if (!lootScreen.escape()) setInventoryOpen(false); return; }
     if (code === "KeyM" && !lobby.open && (isLocked() || brWatching() || worldMap.open)) { setMapOpen(!worldMap.open); return; }
     if (code === "Escape" && worldMap.open) { setMapOpen(false); return; }
+    if (code === "Escape" && shopUI.open) { setShopOpen(false); return; }
     if (isBR() && !lobby.open) {
       if (code === "Enter" && net.isHost && (br.state === "warm" || br.state === "count")) { brHostStart(); return; }
       if (brWatching()) {
@@ -943,14 +1041,15 @@ function setKey(code, pressed, repeat) {
       case "KeyE": interact(); break;
       case "KeyG": beginThrow(); break;
       case "KeyQ": cycleThrowable(); break;
-      case "KeyH": useMedkit(); break;
-      case "KeyO": if (nearDoor) useDoor(!nearDoor.doorOpen); break;
+      case "KeyH": useHeal(); break;
+      case "KeyB": if (nearShop) setShopOpen(!shopUI.open); break;
+      case "KeyF": if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); break;
       case "KeyC": toggleStance("crouch"); break;
       case "KeyZ": toggleStance("prone"); break;
       case "KeyL": useLightSwitch(); break;
-      case "KeyF": toggleTorch(); break;
-      case "KeyV": toggleRickshaw(); break;
-      case "KeyT": refuelRickshaw(); break;
+      case "KeyN": toggleTorch(); break;
+      case "KeyV": toggleVehicle(); break;
+      case "KeyT": refuelVehicle(); break;
     }
   } else if (code === "KeyG") {
     releaseThrow();
@@ -982,7 +1081,7 @@ window.addEventListener("wheel", e => {
 }, { passive: true });
 canvas.addEventListener("mousedown", e => {
   if (!isLocked()) return;
-  if (worldMap.open) return;
+  if (worldMap.open || shopUI.open) return;
   if (weaponWheel.isOpen) {
     // Left click equips the front card, right click keeps what you hold
     if (e.button === 0) confirmWeaponWheel();
@@ -1020,7 +1119,7 @@ document.addEventListener("mousemove", e => {
 /** Mouse / touch-drag look, in mouse pixels. */
 function lookBy(dx, dy) {
   if (drive.on && (dx || dy)) drive.lastMouse = performance.now() / 1000;
-  const s = THREE.MathUtils.lerp(cameraRig.sensitivity, cameraRig.aimSensitivity, aimBlend);
+  const s = THREE.MathUtils.lerp(cameraRig.sensitivity, cameraRig.aimSensitivity, aimBlend) * scopeLookScale();
   aimYaw   -= dx * s;
   aimPitch -= dy * s;
   aimPitch  = THREE.MathUtils.clamp(aimPitch, cameraRig.pitchMin, cameraRig.pitchMax);
@@ -1029,7 +1128,7 @@ function lookBy(dx, dy) {
 /** Gyro look, in radians; slowed down while scoped, like the mouse. */
 function turnBy(yaw, pitch) {
   if (drive.on && Math.abs(yaw) > 0.004) drive.lastMouse = performance.now() / 1000;
-  const s = THREE.MathUtils.lerp(1, cameraRig.aimSensitivity / cameraRig.sensitivity, aimBlend);
+  const s = THREE.MathUtils.lerp(1, cameraRig.aimSensitivity / cameraRig.sensitivity, aimBlend) * scopeLookScale();
   aimYaw   += yaw * s;
   aimPitch += pitch * s;
   aimPitch  = THREE.MathUtils.clamp(aimPitch, cameraRig.pitchMin, cameraRig.pitchMax);
@@ -1052,8 +1151,9 @@ const touch = IS_TOUCH ? new TouchControls({
       else inventoryUI.feed(`${WEAPONS[id].name} not found yet`, "info");
     } else if (hb === "throwable") {
       if (inventory.selectedThrowable !== id) selectThrowable(id);
-    } else if (hb === "medkit") useMedkit();
-    else if (hb === "fuel") refuelRickshaw();
+    } else if (hb === "medkit") useHeal("medkit");
+    else if (hb === "biscuit") useHeal("biscuit");
+    else if (hb === "fuel") refuelVehicle();
   },
   pause: () => releaseLock(),
   unlock: () => sfx.unlock(),
@@ -1069,7 +1169,7 @@ window.addEventListener("androidback", () => {
 
 const _touchCtx = {
   playing: false, alive: true, aiming: false, inventoryOpen: false, lobby: false, spectating: false,
-  br: false, canStart: false, driving: false, airborne: false, jumpLabel: "", throwCount: 0, stance: "stand",
+  br: false, canStart: false, driving: false, airborne: false, jumpLabel: "", throwCount: 0, healCount: 0, stance: "stand",
 };
 function updateTouch() {
   if (!touch) return;
@@ -1086,10 +1186,12 @@ function updateTouch() {
   c.airborne = brAirborne();
   c.stance = stance;
   c.jumpLabel = drive.on ? "BRAKE"
+    : climb.offer === "wall" ? "CLIMB" : climb.offer === "window" ? "VAULT"
     : stance !== "stand" ? "STAND"
     : !isBR() || br.flight === PHASE_GROUND ? "JUMP"
     : br.flight === PHASE_PLANE ? "JUMP" : br.flight === PHASE_FALL ? "CHUTE" : "";
   c.throwCount = inventory.throwables[inventory.selectedThrowable] ?? 0;
+  c.healCount = inventory.medkits + inventory.biscuits;
   touch.update(c);
 }
 
@@ -1183,8 +1285,11 @@ function updateCharacterMovement(delta) {
     characterBody.velocity.z += _doorPull.z;
   }
 
+  // SPACE at a window vaults through it, at a yard wall (after a moment) climbs it
+  updateClimbOffer(delta);
+  if (jumpQueued && alive && climb.offer) startClimb();
   // Jump from a crouch stands you up; from prone, to a crouch
-  if (jumpQueued && alive && stance !== "stand") setStance(stance === "prone" ? "crouch" : "stand");
+  else if (jumpQueued && alive && stance !== "stand") setStance(stance === "prone" ? "crouch" : "stand");
   else if (jumpQueued && onGround && alive) {
     characterBody.velocity.y = JUMP_VELOCITY;
     jumpGrace = 0.8;
@@ -1206,8 +1311,129 @@ function updateCharacterMovement(delta) {
   characterRoot.rotation.y = bodyYaw;
 }
 
+// ─── Climbing yard walls, vaulting through windows ────────────────────────────
+// Stand at a compound wall facing it for CLIMB_WAIT s and SPACE climbs over it;
+// face a window whose sill is between knee and chest height and SPACE vaults
+// through (out of an upstairs one too: you drop from the sill). A short
+// scripted move with collisions off, then gravity takes over.
+const CLIMB_WAIT  = 2;      // s at a wall before the climb is offered
+const CLIMB_TIME  = 1.05;   // s up and over a yard wall
+const VAULT_TIME  = 0.6;    // s through a window
+const CLIMB_SPLIT = 0.55;   // share of the move spent getting up to the top
+const climb = {
+  active: false, kind: "", t: 0, dur: 1, wait: 0, offer: "", spot: null,
+  from: new THREE.Vector3(), mid: new THREE.Vector3(), to: new THREE.Vector3(), pos: new THREE.Vector3(),
+  dirX: 0, dirZ: 0,
+};
+
+/** What SPACE does right now besides jumping: "wall", "window" or "". */
+function updateClimbOffer(delta) {
+  climb.offer = "";
+  climb.spot = null;
+  if (climb.active || playerHealth <= 0 || drive.on || brAirborne() || !houses
+    || stance === "prone" || throwAiming || inventoryOpen) { climb.wait = 0; return; }
+  const p = characterBody.position;
+  const fx = Math.sin(aimYaw), fz = Math.cos(aimYaw);
+  const win = onGround && houses.windowVaultSpot(p.x, p.y - FEET_OFFSET, p.z, fx, fz);
+  if (win) { climb.offer = "window"; climb.spot = win; climb.wait = 0; return; }
+  const wall = houses.wallClimbSpot(p.x, p.z, fx, fz);
+  if (!wall) { climb.wait = 0; return; }
+  // A frame or two off the ground (contact jitter) doesn't restart the wait
+  climb.wait += delta;
+  if (climb.wait >= CLIMB_WAIT && onGround) { climb.offer = "wall"; climb.spot = wall; }
+}
+
+function startClimb() {
+  const s = climb.spot, p = characterBody.position;
+  climb.kind = climb.offer;
+  climb.from.set(p.x, p.y - FEET_OFFSET, p.z);
+  if (climb.kind === "wall") {
+    climb.mid.set(s.x, s.topY + 0.12, s.z);
+    const tx = s.x + s.nx * 0.95, tz = s.z + s.nz * 0.95;
+    climb.to.set(tx, groundHeight(tx, tz) + 0.05, tz);
+    climb.dur = CLIMB_TIME;
+  } else {
+    climb.mid.set(s.x, s.sillY + 0.08, s.z);
+    // Off the sill on the far side; from upstairs the fall does the rest
+    climb.to.set(s.x + s.nx * 0.85, s.sillY + 0.08, s.z + s.nz * 0.85);
+    climb.dur = VAULT_TIME;
+  }
+  bodyYaw = Math.atan2(s.nx, s.nz);
+  climb.dirX = s.nx;
+  climb.dirZ = s.nz;
+  climb.active = true;
+  climb.t = 0;
+  playerAnim.gesture(climb.kind === "wall" ? "climb" : "vault", climb.dur);
+  climb.wait = 0;
+  climb.offer = "";
+  if (stance !== "stand") setStance("stand", true);
+  moveVelocity.set(0, 0, 0);
+  knockbackVel.set(0, 0, 0);
+  characterBody.collisionResponse = false;
+  sfx.footstep(footSurface(p.x, climb.from.y, p.z), 0.7);
+  makeNoise(p.x, p.z, 8, "step");
+}
+
+/** Moves the body along the climb (before the physics step; climbAfterStep pins it after). */
+function updateClimb(delta) {
+  climb.t += delta;
+  const k = Math.min(1, climb.t / climb.dur);
+  const { from, mid, to, pos } = climb;
+  if (k < CLIMB_SPLIT) {
+    const a = k / CLIMB_SPLIT, up = 1 - (1 - a) * (1 - a);
+    pos.set(from.x + (mid.x - from.x) * a, from.y + (mid.y - from.y) * up, from.z + (mid.z - from.z) * a);
+  } else {
+    const a = (k - CLIMB_SPLIT) / (1 - CLIMB_SPLIT);
+    pos.set(mid.x + (to.x - mid.x) * a, mid.y + (to.y - mid.y) * a * a, mid.z + (to.z - mid.z) * a);
+  }
+  climbAfterStep();
+  characterRoot.rotation.y = bodyYaw;
+  if (k >= 1) {
+    climb.active = false;
+    characterBody.collisionResponse = true;
+    // Step off with a little momentum so it doesn't feel like a teleport
+    moveVelocity.set(climb.dirX * 1.6, 0, climb.dirZ * 1.6);
+    characterBody.velocity.set(moveVelocity.x, 0, moveVelocity.z);
+    jumpGrace = 0.4;
+  }
+}
+
+function climbAfterStep() {
+  if (!climb.active) return;
+  characterBody.position.set(climb.pos.x, climb.pos.y + FEET_OFFSET, climb.pos.z);
+  characterBody.velocity.set(0, 0, 0);
+}
+
+/** Drops a climb in progress (death, getting in the rickshaw, a respawn). */
+function cancelClimb() {
+  if (!climb.active) return;
+  climb.active = false;
+  characterBody.collisionResponse = true;
+}
+
+// Animations beyond the clips the soldier walks and aims with (Soldier.playClip / playGesture).
+// Teammates see them too: each one goes out as an "anim" message.
+let airPose = 0;                 // eased 0..1: knees tucked in the air
+const playerAnim = {
+  clip(name, dur, weight = 1) {
+    soldier.playClip(name, dur, weight);
+    net.send({ t: "anim", c: name, d: dur, w: weight });
+  },
+  gesture(name, dur) {
+    soldier.playGesture(name, dur);
+    net.send({ t: "anim", g: name, d: +dur.toFixed(2) });
+  },
+  /** Flinch when hit: harder hits, the bigger reaction. */
+  hurt(amount) {
+    if (playerHealth <= 0 || soldier.gesture?.name === "vault" || soldier.gesture?.name === "climb") return;
+    this.clip(amount > 18 ? "hit2" : "hit", amount > 18 ? 0.7 : 0.5, 0.4);
+  },
+};
+
 function updateSoldier(delta) {
   characterRoot.updateMatrixWorld(true);
+  const inAir = !onGround && !climb.active && !drive.on && !brAirborne() && Math.abs(characterBody.velocity.y) > 1.2;
+  airPose += ((inAir ? 1 : 0) - airPose) * (1 - Math.exp(-10 * delta));
   const vx = characterBody.velocity.x - knockbackVel.x;
   const vz = characterBody.velocity.z - knockbackVel.z;
   const sy = Math.sin(bodyYaw), cy = Math.cos(bodyYaw);
@@ -1216,10 +1442,13 @@ function updateSoldier(delta) {
     localForward: onGround ? vx * sy + vz * cy : 0,
     localRight:   onGround ? -vx * cy + vz * sy : 0,
     // Prone always holds the gun up (the arms are what you lie on)
-    aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone"),
+    // First person holds it up too, so the gun is in front of you
+    aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone" || fpBlend > 0.5),
     firing: timeSinceShot < 0.12,
     aimYawOffset: angleDiff(aimYaw + recoilYaw, bodyYaw),
     aimPitch: aimPitch + recoilPitch,
+    health: playerHealth / MAX_HEALTH,
+    air: airPose,
   });
 }
 
@@ -1296,7 +1525,7 @@ function updateTorch(delta) {
   if (!torch.manual) torch.on = env.darkness > 0.55;
   if (env.darkness > 0.55 && !torch.hinted) {
     torch.hinted = true;
-    inventoryUI.feed(`Night falls. ${IS_TOUCH ? "The torch button" : "F"} toggles your flashlight (they can see it)`, "info");
+    inventoryUI.feed(`Night falls. ${IS_TOUCH ? "The torch button" : "N"} toggles your flashlight (they can see it)`, "info");
   }
   const want = torch.on && playerHealth > 0 && !brWatching() ? 1 : 0;
   torch.level += (want - torch.level) * (1 - Math.exp(-14 * delta));
@@ -1350,7 +1579,7 @@ function updateMood(delta) {
   // Underground: how far from daylight the camera is (0 outside … 1 deep in a cave), eased
   const deep = caves ? caves.depthAt(camera.position.x, camera.position.y, camera.position.z) : 0;
   caveDepth += (deep - caveDepth) * (1 - Math.exp(-3 * delta));
-  indoor = !!houses?.indoorAt(camera.position.x, camera.position.y, camera.position.z) || deep > 0.05;
+  indoor = !!houses?.houseAt(camera.position.x, camera.position.z) || !!indiaBuildings?.inside(camera.position.x, camera.position.z) || deep > 0.05;
   env.update(delta, camera, weather);
   if (caveDepth > 0.001) dimUnderground(caveDepth);
   caves?.update(delta, camera.position, renderer.domElement.height);
@@ -1402,7 +1631,10 @@ function rigValue(key) {
   const { hip, aim, sprint, air, plane, drive: car } = cameraRig;
   const v = THREE.MathUtils.lerp(THREE.MathUtils.lerp(hip[key], aim[key], aimBlend), sprint[key], sprintBlend);
   const w = THREE.MathUtils.lerp(THREE.MathUtils.lerp(v, air[key], airBlend), plane[key], planeBlend);
-  return THREE.MathUtils.lerp(w, car[key], driveBlend);
+  const d = THREE.MathUtils.lerp(w, car[key], driveBlend);
+  // First person zooms like the shoulder aim does
+  const fp = key === "fov" ? THREE.MathUtils.lerp(cameraRig.fp.fov, aim.fov, aimBlend) : cameraRig.fp[key];
+  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(d, fp, fpBlend), cameraRig.scope[key], scopeBlend);
 }
 
 /** Eases the freefall / plane / driving camera presets in and out. phase: a PHASE_* drop phase. */
@@ -1417,7 +1649,20 @@ function updateThirdPersonCamera(delta) {
   const alive = playerHealth > 0;
   aimBlend    += ((input.aim && alive && !sprinting && !brAirborne() ? 1 : 0) - aimBlend) * (1 - Math.exp(-12 * delta));
   sprintBlend += ((sprinting ? 1 : 0) - sprintBlend) * (1 - Math.exp(-4 * delta));
+  // A scoped gun goes on into the scope once it's up at the shoulder
+  const scoped = aimBlend > 0.8 && input.aim && alive && !!currentDef()?.scope && !drive.on && !climb.active
+    && weapon.switchTimer <= 0 && !weapon.reloading && !throwAiming;
+  scopeBlend  += ((scoped ? 1 : 0) - scopeBlend) * (1 - Math.exp(-18 * delta));
+  if (!scoped && scopeBlend < 0.01) scopeBlend = 0;
+  updateScopeView();
   blendAirRig(isBR() ? br.flight : PHASE_GROUND, delta, drive.on);
+  // Inside a house the camera moves into your head; outside it's the shoulder camera again
+  const inside = alive && !drive.on && !climb.active && !brAirborne()
+    && (!!houses?.houseAt(characterBody.position.x, characterBody.position.z)
+      || !!indiaBuildings?.inside(characterBody.position.x, characterBody.position.z));
+  fpBlend += ((inside ? 1 : 0) - fpBlend) * (1 - Math.exp(-8 * delta));
+  if (!inside && fpBlend < 0.01) fpBlend = 0;
+  soldier.setFirstPerson(fpBlend > 0.5);
 
   // Critically-damped style follow: tight on XZ, softer on Y so jumps/steps don't jolt
   const kxz = 1 - Math.exp(-cameraRig.followXZ * delta);
@@ -1435,6 +1680,10 @@ function updateThirdPersonCamera(delta) {
 /** Battle royale spectator: the same shoulder camera, riding another player's aim. */
 function updateSpectatorCamera(delta, p) {
   aimBlend    += (0 - aimBlend) * (1 - Math.exp(-12 * delta));
+  scopeBlend = 0;
+  updateScopeView();
+  fpBlend = 0;
+  soldier.setFirstPerson(false);
   sprintBlend += (0 - sprintBlend) * (1 - Math.exp(-4 * delta));
   blendAirRig(p.phase, delta, p.driving);
   const k = 1 - Math.exp(-10 * delta);
@@ -1462,7 +1711,7 @@ function placeCamera(yaw, rawPitch, delta) {
   camRayFrom.set(camPivot.x, camPivot.y, camPivot.z);
   camRayTo.set(camPivot.x + camOffset.x, camPivot.y + camOffset.y, camPivot.z + camOffset.z);
   let targetFrac = 1;
-  if (world.raycastClosest(camRayFrom, camRayTo, camRayOpts, camRayResult)) {
+  if (boom > 0.01 && world.raycastClosest(camRayFrom, camRayTo, camRayOpts, camRayResult)) {
     targetFrac = Math.max(0.1, (camRayResult.distance - 0.25) / boom);
   }
   if (targetFrac < camFrac) camFrac = targetFrac;
@@ -1482,10 +1731,28 @@ function placeCamera(yaw, rawPitch, delta) {
   }
 
   const fov = rigValue("fov");
-  if (Math.abs(camera.fov - fov) > 0.01) {
+  const near = fpBlend > 0.3 ? FP_NEAR : TP_NEAR;
+  if (Math.abs(camera.fov - fov) > 0.01 || camera.near !== near) {
     camera.fov = fov;
+    camera.near = near;
     camera.updateProjectionMatrix();
   }
+  camera.updateMatrixWorld();
+}
+
+/**
+ * First person: once the soldier is posed this frame, put the camera at its
+ * eyes (the head joint follows the stance, the walk and the aim lean).
+ */
+const _fpEye = new THREE.Vector3();
+function applyFirstPersonCamera() {
+  const w = fpBlend * (1 - scopeBlend);
+  if (w <= 0.001 || !soldier.root) return;
+  soldier.getHeadWorldPosition(_fpEye);
+  _fpEye.x += Math.sin(aimYaw) * FP_EYE_FWD;
+  _fpEye.y += FP_EYE_UP;
+  _fpEye.z += Math.cos(aimYaw) * FP_EYE_FWD;
+  camera.position.lerp(_fpEye, w);
   camera.updateMatrixWorld();
 }
 
@@ -1509,6 +1776,7 @@ function startReload() {
   const def = currentDef();
   weapon.reloading = true;
   weapon.reloadTimer = def.reloadTime;
+  playerAnim.gesture("reload", def.reloadTime);
   sfx.reload(def.reloadTime, def.sound);
 }
 
@@ -1520,8 +1788,11 @@ function equipWeapon(id) {
 function onWeaponChanged(withSound = true) {
   const def = currentDef();
   soldier.setWeapon(inventory.current);
-  cameraRig.aim.fov = def ? def.aimFov : 50;
+  // Scoped guns: a wide shoulder aim, then the real zoom inside the scope
+  cameraRig.aim.fov = def ? (def.scope ? Math.max(def.aimFov, SCOPE_AIM_FOV) : def.aimFov) : 50;
+  cameraRig.scope.fov = def?.scope ? def.aimFov : cameraRig.aim.fov;
   weapon.reloading = false;
+  soldier.stopGesture("reload");
   weapon.bloom = 0;
   weapon.cooldown = 0;
   weapon.switchTimer = withSound ? SWITCH_TIME : 0;
@@ -1590,6 +1861,7 @@ function updateWeapon(delta) {
 }
 
 const shotPoints = [];
+const CLOSE_SPLASH = 4.5;   // m: hits this close spatter your screen
 const pvpDamage = new Map(); // player id → damage from this shot
 const pvpHead = new Map();
 
@@ -1654,6 +1926,7 @@ function fireShot(def) {
       pvpDamage.set(victim.id, (pvpDamage.get(victim.id) ?? 0) + dmg);
       if (head) pvpHead.set(victim.id, true);
       effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", head ? 18 : def.pellets > 1 ? 4 : 9);
+      if (i === 0 && _hitPoint.distanceToSquared(camera.position) < CLOSE_SPLASH * CLOSE_SPLASH) screenBlood.splash(0.4);
       anyHit = true;
       anyHead ||= head;
     } else if (zombie && zombieManager) {
@@ -1663,6 +1936,7 @@ function fireShot(def) {
       const killed = hitMonster(zombie, damage, _shotDir.x * def.push, _shotDir.z * def.push);
       const blood = def.pellets > 1 ? 4 : headshot ? 22 : 10;
       effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", blood);
+      if (i === 0 && _hitPoint.distanceToSquared(camera.position) < CLOSE_SPLASH * CLOSE_SPLASH) screenBlood.splash(headshot ? 0.6 : 0.35);
       anyHit = true;
       anyHead ||= headshot;
       anyKill ||= killed;
@@ -1675,8 +1949,8 @@ function fireShot(def) {
   characterBody.collisionFilterGroup = ownGroup;
   // One damage message per player hit (a shotgun blast is one hit, not nine)
   for (const [id, dmg] of pvpDamage) {
-    net.send({
-      t: "pvp", to: id, d: +dmg.toFixed(1), hs: pvpHead.has(id) ? 1 : 0, w: inventory.current,
+    sendPvp(id, {
+      d: +dmg.toFixed(1), hs: pvpHead.has(id) ? 1 : 0, w: inventory.current,
       sx: +characterBody.position.x.toFixed(1), sz: +characterBody.position.z.toFixed(1),
     });
   }
@@ -1695,6 +1969,7 @@ function fireShot(def) {
   cameraTrauma = Math.min(1, cameraTrauma + (def.pellets > 1 || def.damage > 100 ? 0.18 : 0.05));
 
   makeNoise(characterBody.position.x, characterBody.position.z, def.alertRadius, "shot");
+  noteShot("me", characterBody.position.x, characterBody.position.z);
   if (net.connected) {
     net.send({ t: "shot", w: def.sound, s: def.suppressed ? 1 : undefined, f: [+_muzzle.x.toFixed(2), +_muzzle.y.toFixed(2), +_muzzle.z.toFixed(2)], h: shotPoints });
   }
@@ -1705,6 +1980,12 @@ let throwAiming   = false;
 let throwCooldown = 0;
 const _throwFrom  = new THREE.Vector3();
 const _throwVel   = new THREE.Vector3();
+// Grenade cook countdown: one big number under the crosshair, touched only when it changes
+let cookTime      = -1;     // seconds since the pin was pulled, −1 = not cooking
+let cookShown     = 0;
+const cookEl = document.createElement("div");
+cookEl.id = "grenade-cook";
+document.body.append(cookEl);
 
 function computeThrow() {
   // From the right shoulder, along the camera aim with some loft
@@ -1726,23 +2007,33 @@ function beginThrow() {
   }
   throwAiming = true;
   weapon.reloading = false;
+  // A grenade's fuse starts with the pin: hold it to cook, the HUD counts 5…1
+  cookTime = kind === "grenade" ? 0 : -1;
+  if (cookTime === 0) sfx.pin();
 }
 
 function releaseThrow() {
   if (!throwAiming) return;
   throwAiming = false;
   throwables.hidePreview();
-  if (playerHealth <= 0) return;
+  if (playerHealth <= 0) { setCookCountdown(0); return; }
+  computeThrow();
+  launchThrow(cookTime >= 0 ? Math.max(0.05, GRENADE.cookTime - cookTime) : undefined);
+}
+
+/** Throws the selected item from _throwFrom at _throwVel (fuse: a cooked grenade's time left). */
+function launchThrow(fuse) {
+  setCookCountdown(0);
+  cookTime = -1;
   const kind = inventory.takeThrowable();
   if (!kind) return;
-  computeThrow();
   // Smoke comes in a random colour; c tells everyone else which
   const color = kind === "smoke" ? Math.floor(Math.random() * SMOKE_COLORS.length) : 0;
-  if (kind !== "molotov") sfx.pin();
-  throwables.throw(kind, _throwFrom, _throwVel, localTarget.id, color);
+  if (kind === "smoke") sfx.pin();
+  throwables.throw(kind, _throwFrom, _throwVel, localTarget.id, color, fuse);
   if (net.connected) {
     net.send({
-      t: "throw", k: kind, c: color,
+      t: "throw", k: kind, c: color, f: fuse === undefined ? undefined : +fuse.toFixed(2),
       o: [_throwFrom.x, _throwFrom.y, _throwFrom.z].map(v => +v.toFixed(3)),
       v: [_throwVel.x, _throwVel.y, _throwVel.z].map(v => +v.toFixed(3)),
     });
@@ -1752,7 +2043,18 @@ function releaseThrow() {
 
 function cancelThrow() {
   throwAiming = false;
+  cookTime = -1;
+  setCookCountdown(0);
   throwables.hidePreview();
+}
+
+function setCookCountdown(n) {
+  if (n === cookShown) return;
+  cookShown = n;
+  cookEl.textContent = n > 0 ? String(n) : "";
+  cookEl.classList.toggle("show", n > 0);
+  cookEl.classList.toggle("hot", n > 0 && n <= 2);
+  if (n > 0 && n < GRENADE.cookTime) sfx.click();
 }
 
 function cycleThrowable() {
@@ -1770,6 +2072,18 @@ function updateThrowAim(delta) {
   if (!throwAiming) return;
   if (playerHealth <= 0 || !isLocked()) { cancelThrow(); return; }
   computeThrow();
+  if (cookTime >= 0) {
+    cookTime += delta;
+    if (cookTime >= GRENADE.cookTime) {
+      // Held too long: it goes off in your hand
+      throwAiming = false;
+      throwables.hidePreview();
+      _throwVel.set(0, 0, 0);
+      launchThrow(0.01);
+      return;
+    }
+    setCookCountdown(Math.ceil(GRENADE.cookTime - cookTime));
+  }
   throwables.showPreview(inventory.selectedThrowable, _throwFrom, _throwVel);
 }
 
@@ -1817,6 +2131,7 @@ function onGrenadeExplode(pos, owner = null) {
     const k = pd > 1e-3 ? 8 * f / pd : 0;
     dealDamageToPlayer(GRENADE.playerMaxDamage * f, px * k, pz * k, 0.6, null, null, "blast");
   }
+  if (isBR() && net.isHost) bots.blast(pos, by, GRENADE.playerRadius, GRENADE.playerMaxDamage);
   cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - pd / 35, 0, 1) * 0.8);
   sfx.explosion(pos);
   if (!net.isClient) zombieManager?.noise(pos.x, pos.z, GRENADE.alertRadius, "explosion");
@@ -1846,16 +2161,33 @@ function onFireTick(x, z, r, dt, owner = null, hostile = false) {
     if (!hostile && by !== localTarget.id) brNoteAttacker(by, "molotov", false);
     dealDamageToPlayer(MOLOTOV.playerDps * dt, 0, 0, 0.08);
   }
+  if (!hostile && isBR() && net.isHost) bots.burn(x, z, r, MOLOTOV.playerDps, dt, by);
 }
 
-// ─── Medkits ──────────────────────────────────────────────────────────────────
-function useMedkit() {
+// ─── Healing: medkits and Parle-G ─────────────────────────────────────────────
+/**
+ * kind: "medkit" | "biscuit", or nothing for H: a medkit when you're badly
+ * hurt (below BISCUIT.medkitBelow), otherwise a biscuit, whichever you have.
+ */
+function useHeal(kind = null) {
   if (playerHealth <= 0) return;
   if (playerHealth >= MAX_HEALTH) { inventoryUI.feed("Health already full", "info"); return; }
-  if (!inventory.takeMedkit()) { inventoryUI.feed("No medkits", "info"); return; }
-  playerHealth = Math.min(MAX_HEALTH, playerHealth + MEDKIT.heal);
+  if (!kind) {
+    const wantKit = playerHealth < BISCUIT.medkitBelow;
+    kind = wantKit ? (inventory.medkits ? "medkit" : "biscuit") : (inventory.biscuits ? "biscuit" : "medkit");
+  }
+  const ok = kind === "medkit" ? inventory.takeMedkit() : inventory.takeBiscuit();
+  if (!ok) { inventoryUI.feed(kind === "medkit" ? "No medkits" : "No Parle-G left", "info", kind); return; }
+  const heal = kind === "medkit" ? MEDKIT.heal : BISCUIT.heal;
+  playerHealth = Math.min(MAX_HEALTH, playerHealth + heal);
+  // A Parle-G goes in the mouth; a medkit gets put on
+  if (kind === "biscuit") {
+    if (!soldier.handProps.eat) soldier.setHandProp("eat", cloneItem("biscuit"));
+    playerAnim.gesture("eat", 1.5);
+  }
+  else playerAnim.clip("interact", 1.2);
   sfx.heal();
-  inventoryUI.feed(`+${MEDKIT.heal} health`, "medkit");
+  inventoryUI.feed(`+${heal} health${kind === "biscuit" ? " · Parle-G" : ""}`, "medkit", kind);
 }
 
 // ─── Pickups ──────────────────────────────────────────────────────────────────
@@ -1863,6 +2195,7 @@ function pickupData(kind) {
   const def = WEAPONS[kind];
   if (def) return { ammo: def.magSize, reserve: isBR() ? BR_GUN_RESERVE[kind] : def.pickupReserve };
   if (GEAR[kind]?.durability) return { dur: GEAR[kind].durability };
+  if (kind === "cash") return { count: CASH.note };
   return null;
 }
 
@@ -1905,47 +2238,80 @@ function updatePickups(delta) {
     nearDoor = near?.door ?? null;
     nearSwitch = near?.sw ?? null;
     if (nearDoor) {
-      promptRows[n++] = "O";
+      promptRows[n++] = "F";
       promptRows[n++] = nearDoor.doorOpen ? "Close door" : "Open door";
+    }
+    const gateHere = !nearDoor && !drive.on ? collegeGate?.interaction(characterBody.position.x, characterBody.position.z) : null;
+    nearGatePart = gateHere?.part ?? null;
+    if (gateHere) {
+      promptRows[n++] = "F";
+      promptRows[n++] = gateHere.label;
     }
     if (nearSwitch) {
       promptRows[n++] = "L";
       promptRows[n++] = nearSwitch.lightOn ? "Turn lights off" : "Turn lights on";
     }
-    if (rickshaw) {
-      const near = drive.on || nearRickshaw();
+    nearShop = null;
+    if (!drive.on) {
+      const p = characterBody.position;
+      for (const s of shops) if (Math.hypot(s.front.x - p.x, s.front.z - p.z) < SHOP_RANGE) { nearShop = s; break; }
+    }
+    if (nearShop) {
+      promptRows[n++] = "B";
+      promptRows[n++] = `Shop · ${fmtRupees(inventory.cash)}`;
+    }
+    if (climb.offer) {
+      promptRows[n++] = "Space";
+      promptRows[n++] = climb.offer === "wall" ? "Climb over the wall" : "Jump through the window";
+    }
+    const car = drive.car ?? nearestVehicle();
+    if (car) {
       if (drive.on) {
         promptRows[n++] = "V";
         promptRows[n++] = "Get out";
-      } else if (near && rickshaw.driver === null) {
+      } else if (car.driver === null) {
         promptRows[n++] = "V";
-        promptRows[n++] = rickshaw.empty ? "Drive auto-rickshaw (no petrol)" : "Drive auto-rickshaw";
+        promptRows[n++] = `Drive the ${car.spec.label}${car.empty ? " (no petrol)" : ""}`;
       }
-      if (near && inventory.fuelCans > 0 && rickshaw.fuel < RICKSHAW.fuelMax - 1) {
+      if (inventory.fuelCans > 0 && car.fuel < car.spec.fuelMax - 1) {
         promptRows[n++] = "T";
         promptRows[n++] = `Fill petrol (${inventory.fuelCans} can${inventory.fuelCans > 1 ? "s" : ""})`;
       }
     }
   } else {
-    nearDoor = nearSwitch = null;
+    nearDoor = nearSwitch = nearShop = null;
   }
+  // Walked away (or died): the shop closes
+  if (shopUI.open && !nearShop) setShopOpen(false);
+  shopUI.update(inventory.cash);
   inventoryUI.setPrompts(promptRows, n);
 }
 
 // ─── Doors & lights ───────────────────────────────────────────────────────────
 const promptRows = [];
 let nearDoor = null;
+let nearGatePart = null;   // "gate" | "booth": the college gate's lanes or its guard booth door
 let nearSwitch = null;
 
 function useDoor(open) {
   if (nearDoor && houses.setDoor(nearDoor, open)) {
+    playerAnim.clip("interact", 0.8);
     makeNoise(nearDoor.doorWorld.x, nearDoor.doorWorld.z, open ? 9 : 12, "door");
     net.send({ t: "door", h: houses.houses.indexOf(nearDoor), o: open });
   }
 }
 
+function useGate(part) {
+  const open = collegeGate.toggle(part);
+  playerAnim.clip("interact", 0.8);
+  sfx.doorBang({ x: collegeGate.x, y: groundHeight(collegeGate.x, collegeGate.z) + 1.5, z: collegeGate.z });
+  makeNoise(collegeGate.x, collegeGate.z, part === "gate" ? 20 : 9, "door");
+  net.send({ t: "gate", p: part, o: open });
+}
+
 function useLightSwitch() {
   if (!nearSwitch) return;
+  playerAnim.clip("interact", 0.6, 0.8);
   houses.toggleLight(nearSwitch);
   net.send({ t: "light", h: houses.houses.indexOf(nearSwitch.house), f: nearSwitch.index, on: nearSwitch.lightOn });
 }
@@ -1975,9 +2341,9 @@ function floorY(x, z, feetY) {
   return houses ? houses.surfaceAt(x, z, feetY + 0.3, g) : g;
 }
 
-function spawnDrop(k, x, z, life, y = groundHeight(x, z)) {
-  pickups.spawn(k, x, z, pickupData(k), life, null, y);
-  net.send({ t: "drop", k, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), l: life });
+function spawnDrop(k, x, z, life, y = groundHeight(x, z), data = pickupData(k)) {
+  pickups.spawn(k, x, z, data, life, null, y);
+  net.send({ t: "drop", k, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), l: life, ...packLoot(data) });
 }
 
 const BOSS_STASH   = ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov", "helmet3", "scope4x"];
@@ -1985,6 +2351,13 @@ const DRAGON_STASH = ["medkit", "medkit", "ammo", "ammo", "ammo", "grenade", "ve
 
 function rollZombieDrop(zombie) {
   const p0 = zombie.body.position;
+  // Rupees: bosses always pay, the rest now and then
+  const pay = CASH.monster[zombie.type] ?? CASH.monster.walker;
+  if (zombie.def.boss || zombie.def.bossBar || Math.random() < CASH.monsterChance) {
+    const a = Math.random() * Math.PI * 2;
+    const x = p0.x + Math.cos(a) * 0.9, z = p0.z + Math.sin(a) * 0.9;
+    spawnDrop("cash", x, z, DROP_LIFETIME, floorY(x, z, zombie.root.position.y), { count: pay });
+  }
   const stash = zombie.def.boss ? BOSS_STASH : zombie.def.bossBar ? DRAGON_STASH : null;
   if (stash) {
     // The Warlord and dragons drop a stash
@@ -2018,7 +2391,7 @@ const STARTER_LOOT = [
 ];
 const WORLD_LOOT = {
   pistol: 1, smg: 2, shotgun: 3, rifle: 3, sniper: 3,
-  ammo: 14, grenade: 10, molotov: 10, medkit: 8, fuel: 6,
+  ammo: 14, grenade: 10, molotov: 10, medkit: 8, fuel: 6, biscuit: 12, cash: 14,
   helmet1: 4, helmet2: 2, vest1: 4, vest2: 2, backpack1: 4, backpack2: 2,
   reddot: 3, scope4x: 2, compensator: 2, suppressor: 2, extmag: 3, grip: 2,
 };
@@ -2040,7 +2413,7 @@ function isOpenGround(x, z) {
   return true;
 }
 
-const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag"];
+const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag", "biscuit", "cash", "biscuit"];
 const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov", "helmet3", "vest3", "backpack3", "scope4x", "suppressor"];
 
 function spawnWorldLoot() {
@@ -2056,6 +2429,12 @@ function spawnWorldLoot() {
     }
   });
   for (const [kind, x, z] of STARTER_LOOT) pickups.spawn(kind, x, z, pickupData(kind));
+  // The panchayat offices and town buildings have a little something too
+  indiaBuildings?.lootSpots.forEach((sp, i) => {
+    if (lootRng() < 0.4) return;
+    const kind = HOUSE_LOOT[(i * 5 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
+    pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
+  });
   // The caves are worth the walk: something in most chambers and junctions
   caves?.lootSpots.forEach((sp, i) => {
     if (lootRng() < 0.3) return;
@@ -2094,20 +2473,27 @@ function setInventoryOpen(open) {
   }
 }
 
-// Item icons are rendered from the same 3D models once at startup
+// Item icons: the game-icons.net set wherever it has the item, else a white
+// silhouette rendered from the item's 3D model (each one is a render and a GPU
+// read-back, so only the ones the set lacks are drawn)
 const itemIcons = {};
-for (const id of WEAPON_ORDER) itemIcons[id] = renderItemIcon(renderer, id, { width: 160, height: 56 });
-itemIcons.grenade = renderItemIcon(renderer, "grenade", { width: 64, height: 64, yaw: 0.4 });
-itemIcons.molotov = renderItemIcon(renderer, "molotov", { width: 64, height: 64, yaw: 0.4 });
-itemIcons.smoke   = renderItemIcon(renderer, "smoke",   { width: 64, height: 64, yaw: 0.4 });
-itemIcons.ammo    = renderItemIcon(renderer, "ammo",    { width: 64, height: 64, yaw: 0.6, pitch: 0.35 });
-itemIcons.fuel    = renderItemIcon(renderer, "fuel",    { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
-itemIcons.medkit  = renderItemIcon(renderer, "medkit",  { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
+const itemIcon = (id, opts) => gameItemIcon(id) ?? renderItemIcon(renderer, id, opts);
+for (const id of WEAPON_ORDER) itemIcons[id] = itemIcon(id, { width: 160, height: 56 });
+itemIcons.grenade = itemIcon("grenade", { width: 64, height: 64, yaw: 0.4 });
+itemIcons.molotov = itemIcon("molotov", { width: 64, height: 64, yaw: 0.4 });
+itemIcons.smoke   = itemIcon("smoke",   { width: 64, height: 64, yaw: 0.4 });
+itemIcons.ammo    = itemIcon("ammo",    { width: 64, height: 64, yaw: 0.6, pitch: 0.35 });
+itemIcons.fuel    = itemIcon("fuel",    { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
+itemIcons.medkit  = itemIcon("medkit",  { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
+itemIcons.biscuit = itemIcon("biscuit", { width: 64, height: 64, yaw: 0.5, pitch: 0.35 });
+itemIcons.cash    = itemIcon("cash",    { width: 64, height: 64, yaw: 0.5, pitch: 0.45 });
 for (const id of [...Object.keys(GEAR), ...Object.keys(ATTACHMENTS)]) {
-  itemIcons[id] = renderItemIcon(renderer, id, { width: 64, height: 64, yaw: 0.6, pitch: 0.25 });
+  itemIcons[id] = itemIcon(id, { width: 64, height: 64, yaw: 0.6, pitch: 0.25 });
 }
-
-const inventoryUI = new InventoryUI({ inventory, icons: itemIcons });
+applyStaticIcons();
+// Prompt rows show what the key does as an icon too (and that's all a phone shows)
+const PROMPT_ICONS = { O: "door", E: "bag", V: "steering", B: "shop", Space: "jump", L: "flashlight", T: "fuel", H: "medkit" };
+const inventoryUI = new InventoryUI({ inventory, icons: itemIcons, promptIcon: key => icon(PROMPT_ICONS[key] ?? "", "prompt-icon") });
 
 
 // Mouse-wheel weapon carousel around the player. In solo it slows the world
@@ -2256,7 +2642,7 @@ const lootScreen = new LootScreen({
   actions: lootActions,
   icons: itemIcons,
   cb: {
-    onUse: kind => { if (kind === "medkit") useMedkit(); else if (kind === "fuel") refuelRickshaw(); },
+    onUse: kind => { if (kind === "medkit" || kind === "biscuit") useHeal(kind); else if (kind === "fuel") refuelVehicle(); },
     onSelectThrowable: kind => { inventory.selectThrowable(kind); sfx.click(); },
   },
 });
@@ -2271,6 +2657,93 @@ function syncGearModel() {
 }
 let _gearCode = 0;
 
+// ─── Dukaan: buying with rupees ───────────────────────────────────────────────
+// Stand at a town stall's counter and press B (or tap the prompt). The world
+// keeps running while you shop, like the map. Purchases go straight into your
+// pockets; gear you replace drops at your feet.
+let shops = [];                  // world/Shops.js: [{ town, x, z, rot, front }]
+let nearShop = null;
+let shopHoldsPlay = false;       // the shop freed the mouse on desktop, but the game is still on
+
+/** "" if `item` can be bought right now, otherwise a short reason. */
+function whyNotBuy(item) {
+  if (inventory.cash < item.price) return "Need more ₹";
+  switch (item.give) {
+    case "stack": {
+      const n = item.n ?? 1;
+      if (inventory.canAdd(item.id) >= n) return "";
+      return inventory.count(item.id) + n > inventory.maxOf(item.id) ? "Carrying the max" : "Backpack full";
+    }
+    case "ammo": return !inventory.ownedWeapons.length ? "No gun" : inventory.ammoFull() ? "Ammo full" : "";
+    case "gun": return inventory.has(item.id) && inventory.ammoFull() ? "Have it, ammo full" : "";
+    case "gear": {
+      const g = GEAR[item.id], cur = inventory.gear[g.slot];
+      if (cur && GEAR[cur.id].level > g.level) return "Wearing better";
+      if (cur?.id === item.id && (cur.dur ?? Infinity) >= (g.durability ?? 0)) return "Wearing it";
+      return inventory._capacityWith(g.slot, item.id) < inventory.load ? "Backpack too full" : "";
+    }
+    case "attachment": return inventory.freeSlotFor(item.id) || inventory.room(item.id) >= 1 ? "" : "Backpack full";
+  }
+  return "";
+}
+
+function buyItem(id) {
+  const item = SHOP_ITEMS.find(i => i.id === id);
+  const why = item ? whyNotBuy(item) : "Not for sale";
+  if (why) { sfx.click(); return { ok: false, msg: why }; }
+  const prev = inventory.current;
+  switch (item.give) {
+    case "stack": inventory.addStack(item.id, item.n ?? 1); break;
+    case "ammo": inventory.addAmmoCrate(); break;
+    case "gun": {
+      const isNew = !inventory.has(item.id);
+      inventory.addWeapon(item.id, WEAPONS[item.id].magSize, WEAPONS[item.id].pickupReserve);
+      if (isNew) inventory.equip(item.id);
+      break;
+    }
+    case "gear": {
+      const r = inventory.equipGear(item.id);
+      if (r.error) return { ok: false, msg: r.error };
+      if (r.prev) lootActions.spawnLoot(r.prev.id, { dur: r.prev.dur });
+      break;
+    }
+    case "attachment": {
+      const w = inventory.freeSlotFor(item.id);
+      if (w) inventory.attach(w, item.id);
+      else inventory.addStack(item.id, 1);
+      break;
+    }
+  }
+  inventory.spend(item.price);
+  if (inventory.current !== prev) onWeaponChanged();
+  else onWeaponChanged(false);
+  sfx.pickup(item.give === "gun" || item.give === "gear");
+  inventoryUI.feed(`Bought ${item.label} · ${fmtRupees(item.price)}`, "cash", item.id);
+  return { ok: true, msg: `Bought ${item.label}` };
+}
+
+const shopUI = new ShopUI({ icons: itemIcons, buy: buyItem, canBuy: whyNotBuy, onClose: () => setShopOpen(false) });
+
+function setShopOpen(open) {
+  if (open === shopUI.open) return;
+  if (open && (playerHealth <= 0 || !nearShop || drive.on)) return;
+  shopUI.setOpen(open);
+  shopUI.update(inventory.cash, true);
+  if (open) {
+    input.fire = false;
+    input.aim = false;
+    cancelThrow();
+    touch?.reset();
+    if (!IS_TOUCH && document.pointerLockElement === canvas) {
+      shopHoldsPlay = true;
+      document.exitPointerLock();
+    }
+  } else if (shopHoldsPlay) {
+    shopHoldsPlay = false;
+    requestLock();
+  }
+}
+
 const fireFX = new FireFX(scene);
 const smokeFX = new SmokeFX(scene);
 
@@ -2281,11 +2754,10 @@ const _earUp = new THREE.Vector3();
 const _fireAt = { x: 0, y: 0, z: 0 };
 let _wasOnGround = true, _fallSpeed = 0;
 
-/** What feet hit at (x, feetY, z): house floors are wood, roof terraces and caves stone, the rest grass. */
+/** What feet hit at (x, feetY, z): house floors are wood, caves stone, the rest grass. */
 function footSurface(x, feetY, z) {
   if (houses?.floorAt(x, feetY, z)) return "wood";
-  if (houses?.onRoof(x, feetY, z)) return "concrete";
-  if (caves?.inside(x, z, feetY)) return "concrete";
+  if (caves?.inside(x, z, feetY) || indiaBuildings?.inside(x, z)) return "concrete";
   return "grass";
 }
 
@@ -2399,6 +2871,7 @@ function playerVisibility() {
   else if (Math.hypot(moveVelocity.x, moveVelocity.z) < 0.5) v *= 0.85;
   const floor = houses?.floorAt(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
   if (floor && !floor.lightOn) v *= 0.45;
+  if (indiaBuildings?.inside(characterBody.position.x, characterBody.position.z)) v *= 0.7;
   v *= STANCES[stance].vis;
   v *= 1 - env.darkness * (torch.level > 0.5 ? 0.1 : 0.5);
   v *= 1 - weather.rain * 0.25;
@@ -2532,7 +3005,75 @@ const minimap = new Minimap(document.getElementById("minimap"), {
   players: () => (isBR() ? NO_PLAYERS : remotePlayers.mapList()),
   zone: () => (isBR() && br.state === "match" ? br.zone : null),
   pins: () => pinList,
+  fights: () => fightZones,
 });
+
+// ─── Red zones: players fighting ──────────────────────────────────────────────
+// Battle royale matches: every player's shots are noted (yours, and everyone
+// else's "shot" messages). Two or more different players firing within
+// FIGHT_RADIUS of each other inside FIGHT_WINDOW s starts a red zone there: a
+// red circle on both maps and a message with how far and which way it is. It
+// fades FIGHT_LIFE s after the last shot in it.
+const FIGHT_WINDOW = 8;          // s
+const FIGHT_RADIUS = 70;         // m between two shooters that counts as one fight
+const FIGHT_ZONE_R = 40;         // m: the red circle (later shots inside it keep it alive)
+const FIGHT_LIFE   = 20;         // s after its last shot
+const SHOT_NOTE_GAP = 0.5;       // s: an automatic gun is noted twice a second, not every bullet
+const MAX_FIGHTS   = 6;
+const shotLog = [];              // recent shots { id, x, z, t }
+const fightZones = [];           // { x, z, r, last }
+const _lastNoted = new Map();    // player id → time of their last noted shot
+const redZoneEl = document.createElement("div");
+redZoneEl.id = "redzone-alert";
+document.body.append(redZoneEl);
+let redZoneHide = 0;
+const HEADING_8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+function fightsOn() { return isBR() && br.state === "match"; }
+
+/** A player fired at (x, z). id: their net id ("me" for you). */
+function noteShot(id, x, z) {
+  if (!fightsOn()) return;
+  const t = performance.now() / 1000;
+  if (t - (_lastNoted.get(id) ?? -99) < SHOT_NOTE_GAP) return;
+  _lastNoted.set(id, t);
+  while (shotLog.length && t - shotLog[0].t > FIGHT_WINDOW) shotLog.shift();
+
+  // Inside a red zone already: keep it burning
+  for (const f of fightZones) {
+    if (Math.hypot(f.x - x, f.z - z) < f.r) { f.last = t; shotLog.push({ id, x, z, t }); return; }
+  }
+  // Somebody else fired near here lately: a new fight
+  const other = shotLog.find(s => s.id !== id && Math.hypot(s.x - x, s.z - z) < FIGHT_RADIUS);
+  shotLog.push({ id, x, z, t });
+  if (!other) return;
+  if (fightZones.length >= MAX_FIGHTS) fightZones.shift();
+  const f = { x: (x + other.x) / 2, z: (z + other.z) / 2, r: FIGHT_ZONE_R, last: t };
+  fightZones.push(f);
+  announceRedZone(f);
+}
+
+function announceRedZone(f) {
+  const me = mapMe();
+  const dx = f.x - me.x, dz = f.z - me.z, d = Math.hypot(dx, dz);
+  // World +Z is north and +X east (as on the maps)
+  const dir = HEADING_8[Math.round(((Math.atan2(dx, dz) * 180 / Math.PI + 360) % 360) / 45) % 8];
+  redZoneEl.innerHTML = d < f.r
+    ? "<b>⚠ RED ZONE</b> · A fight broke out right here"
+    : `<b>⚠ RED ZONE</b> · Players fighting ${Math.round(d)} m ${dir}`;
+  redZoneEl.classList.add("show");
+  redZoneHide = performance.now() + 4500;
+  sfx.click();
+}
+
+/** Ages the red zones out and hides the message. */
+function updateFightZones(now) {
+  if (redZoneHide && now > redZoneHide) { redZoneHide = 0; redZoneEl.classList.remove("show"); }
+  if (!fightZones.length) return;
+  if (!fightsOn()) { fightZones.length = 0; shotLog.length = 0; return; }
+  const t = now / 1000;
+  for (let i = fightZones.length - 1; i >= 0; i--) if (t - fightZones[i].last > FIGHT_LIFE) fightZones.splice(i, 1);
+}
 
 // ─── World map + pins ─────────────────────────────────────────────────────────
 // M (or the map button) opens the full map; tap / click it to drop a pin. Your
@@ -2554,12 +3095,13 @@ const worldMap = new WorldMap({
   players: () => (isBR() ? NO_PLAYERS : remotePlayers.mapList()),
   obstacles: () => mapObstacles,
   fires: () => atmosphere.sources,
-  vehicle: () => rickshaw?.footprint ?? null,
+  vehicles: () => vehicles,
   br: () => (isBR() ? _mapState : null),
   height: (x, z) => (caves ? caves.mapHeight(x, z) : groundHeight(x, z)),
   caves: () => caveMapShapes,
   roads: () => roadLines,
   labels: () => townLabels,
+  fights: () => fightZones,
 }, {
   touch: IS_TOUCH,
   onPin: (x, z) => setPin("me", x, z, true),
@@ -2798,15 +3340,6 @@ function setupGui() {
 
   }
 
-  const wFolder = gui.addFolder("🌗 Time & Weather");
-  wFolder.close();
-  wFolder.add(env, "hour", 0, 23.99, 0.01).name("Hour").listen();
-  wFolder.add(env, "timeScale", 0, 20, 0.1).name("Time speed");
-  wFolder.add(env, "bloodMoon").name("Blood moon").listen();
-  const wx = { state: weather.state };
-  wFolder.add(wx, "state", ["clear", "overcast", "drizzle", "rain", "storm"]).name("Weather").onChange(s => weather.set(s));
-  wFolder.add(weather, "locked").name("Hold weather");
-
   if (zombieManager) {
     const zFolder = gui.addFolder("👹 Monsters & Levels");
     zFolder.close();
@@ -2835,6 +3368,8 @@ function setupGui() {
 let zombieManager = null;
 let houses = null;
 let roads = null;          // world/Roads.js, built in loadWorld()
+let collegeGate = null;    // world/CollegeGate.js, placed in loadWorld()
+let indiaModels = {};      // world/IndiaAssets.js: { rickshaw, thar, truck, … } (null where missing)
 let townLabels = [];       // town names for the world map
 let roadLines = [];        // road centrelines for the maps
 
@@ -2847,6 +3382,8 @@ async function loadCharacter() {
 // One GLTF loader for everything, with meshopt decoding for the optimized assets
 const gltfLoader = new GLTFLoader();
 gltfLoader.setMeshoptDecoder(MeshoptDecoder);
+// Decompress meshes on worker threads: the main thread stays free to parse the next file
+try { MeshoptDecoder.useWorkers(Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1))); } catch { /* single-threaded decode */ }
 
 /**
  * Loads "<name>.opt.glb" (written by `npm run optimize-assets`) when present,
@@ -2868,8 +3405,10 @@ async function loadWorld() {
 
   // Fetch and parse everything at once instead of one model after another
   // (the dragon and the hellhound are monsters now: MonsterPool loads them)
+  const indiaDownload = loadIndiaModels(gltfLoader);
   const downloads = Promise.all([
-    settle(loadGLB("/models/autorickshaw_3d_model_free.glb")),
+    // The old free rickshaw is only the fallback for the Indian one: fetched only when that's missing
+    indiaDownload.then(m => (m.rickshaw ? null : settle(loadGLB("/models/autorickshaw_3d_model_free.glb")))),
     settle(vrmlLoader.loadAsync("/models/house.wrl")),
     // ?v=: bump when the kit changes (/models is cached for a day, a stale kit would miss pieces)
     gltfLoader.loadAsync("/models/house/house-kit.glb?v=2"),
@@ -2878,12 +3417,19 @@ async function loadWorld() {
     // Far-away versions (~20% of the triangles), made by `npm run optimize-assets`
     settle(gltfLoader.loadAsync("/trees/old_tree_with_vine_3d_model_free.lod1.glb")),
     settle(gltfLoader.loadAsync("/trees/dreftwood tree.lod1.glb")),
+    settle(loadGLB("/models/msbecl_gate_final.glb")),
+    indiaDownload,
   ]);
-  // The caves' heavy lifting (rock field, mesh, torches, baked light) needs no
-  // terrain: do it while the models above are still downloading
-  await new Promise(r => setTimeout(r, 0));
+  // The caves' rock: from the worker (started at boot), or here if it couldn't run
+  await cavesPrecomputed;
   precomputeCaves();
-  const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf, treeALod, treeBLod] = await downloads;
+  const [autoGltf, wrlScene, houseKit, treeAGltf, treeBGltf, treeALod, treeBLod, gateGltf, india] = await downloads;
+  loadMark("world downloaded");
+  sfx.preload();
+  indiaModels = india;
+  // The real Parle-G pack and ₹2000 notes replace the procedural ones (before any pickup is built)
+  if (india.biscuit) setItemModel("biscuit", india.biscuit, 0.22);
+  if (india.rupees) setItemModel("cash", india.rupees, 0.18);
   // Every tree clone shares these: one mesh per material instead of dozens of parts
   mergeStaticMeshes(treeAGltf.scene);
   mergeStaticMeshes(treeBGltf.scene);
@@ -2961,12 +3507,43 @@ async function loadWorld() {
 
   // ── Towns and roads (world/Towns.js, world/Roads.js): the same map for every player
   roads = new Roads(ROAD_DEFS);
+  // Where the rickshaws and Thars are parked, the dukaan stalls and the
+  // Indian props stand (towns, trees, rocks and poles keep clear of them).
+  // r: a radius round each one's footprint
+  const parked = vehicleSpawns(roads);
+  const stalls = shopSpots(roads);
+  const props = propSpots(roads);
+  const reserved = [
+    ...parked.map(p => ({ x: p.x, z: p.z, r: VEHICLES[p.kind].length / 2 + 0.5 })),
+    ...stalls.map(s => ({ x: s.x, z: s.z, r: 2.4 })),
+    ...props,
+  ];
+  // Asked for every grass texel and tree / rock / pole candidate: a coarse grid keeps it to nearby spots
+  const RES_CELL = 8, RES_PAD = 6, resGrid = new Map();
+  const resKey = (ix, iz) => ix * 4096 + iz;
+  for (const p of reserved) {
+    const R = p.r + RES_PAD;
+    for (let ix = Math.floor((p.x - R) / RES_CELL); ix <= Math.floor((p.x + R) / RES_CELL); ix++) {
+      for (let iz = Math.floor((p.z - R) / RES_CELL); iz <= Math.floor((p.z + R) / RES_CELL); iz++) {
+        const k = resKey(ix, iz);
+        if (!resGrid.has(k)) resGrid.set(k, []);
+        resGrid.get(k).push(p);
+      }
+    }
+  }
+  const nearParked = (x, z, pad) => {
+    const list = pad <= RES_PAD ? resGrid.get(resKey(Math.floor(x / RES_CELL), Math.floor(z / RES_CELL))) : reserved;
+    if (!list) return false;
+    for (const p of list) if (Math.hypot(x - p.x, z - p.z) < p.r + pad) return true;
+    return false;
+  };
   const town = layoutTowns({
     roads, rng: makeLCG(0x7095a1), halfSize: houseHalfSize,
     blocked: (x, z, r) => caveBlocks(x, z, r),
     keepClear: [
       { x: 0, z: 0, r: 16 },                                   // spawn
-      { x: RICK_SPAWN.x, z: RICK_SPAWN.z, r: 6 },              // the auto-rickshaw's parking spot
+      ...reserved.map(p => ({ x: p.x, z: p.z, r: p.r + 2.5 })), // parked vehicles, stalls, Indian props
+      { x: COLLEGE_GATE.x, z: COLLEGE_GATE.z, r: COLLEGE_GATE.clear }, // the college gate over the North Road
       ...STARTER_LOOT.map(([, x, z]) => ({ x, z, r: 1.5 })),
       ...DEBRIS_SPOTS.map(([x, z]) => ({ x, z, r: 4 })),
       // The WRL house and the two hand-placed trees
@@ -2986,7 +3563,8 @@ async function loadWorld() {
   const pads = [
     ...plateaus,
     { x: 0, z: 0, r: 16, fade: 14 },                                                         // spawn + starter loot
-    { x: RICK_SPAWN.x, z: RICK_SPAWN.z, r: 6, fade: 8, y: lvl(RICK_SPAWN.x, RICK_SPAWN.z) }, // the rickshaw's spot
+    ...reserved.map(p => ({ x: p.x, z: p.z, r: p.r + 1, fade: 6, y: lvl(p.x, p.z) })),        // parked vehicles, stalls, props
+    { x: COLLEGE_GATE.x, z: COLLEGE_GATE.z, r: COLLEGE_GATE.width / 2 + 2, fade: 12, y: lvl(COLLEGE_GATE.x, COLLEGE_GATE.z) }, // level under the gate
   ];
   for (const o of mapObstacles) {
     if (o.house || o.wall || o.pole) continue;
@@ -3004,15 +3582,30 @@ async function loadWorld() {
     // Roads level the ground under them; the ground sinks to the cave floors under the massifs
     modify: (x, z, h) => caveTerrain(x, z, roads.modify(x, z, h)),
     tint: (x, z, c) => roads.tint(x, z, c),
-    // No grass on roads, through floors, props, the parked rickshaw or rock; trimmed in yards
+    // No grass on roads, through floors, props, parked vehicles or rock; trimmed in yards
     grassMask: (x, z) => {
-      if (houses.blocks(x, z, 1.5) || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 2.5) return 0;
+      if (houses.blocks(x, z, 1.5) || nearParked(x, z, 0.3)) return 0;
       if (roads.onRoad(x, z, 0.6)) return 0;
       for (const o of propBoxes) if (Math.hypot(x - o.x, z - o.z) < Math.hypot(o.w, o.d) / 2 + 1) return 0;
       return (0.55 + fbmGrass(x, z) * 0.45) * caveGrass(x, z) * (houses.inYard(x, z) ? 0.3 : 1);
     },
   });
   roads.buildMesh(scene);
+
+  // The college gate across the North Road (after the terrain: it stands on it)
+  if (gateGltf) {
+    collegeGate = placeCollegeGate({
+      gltf: gateGltf, scene, world, material: staticMaterial, roads, groundAt: groundHeight, mapObstacles, navObstacles,
+    });
+  }
+  const nearGate = (x, z, pad) => !!collegeGate?.blocks(x, z, pad);
+
+  // Dukaan stalls and the Indian props (after the terrain too)
+  shops = buildShops({ scene, world, material: staticMaterial, spots: stalls, groundAt: groundHeight, mapObstacles, navObstacles });
+  indiaBuildings = placeIndiaProps({
+    scene, world, material: staticMaterial, spots: props, groundAt: groundHeight, mapObstacles, navObstacles,
+    models: { truck: indiaModels.truck, panchayat: indiaModels.panchayat, townBuilding: indiaModels.townBuilding },
+  });
 
   // Underground cave networks under rock massifs (world/Caves.js): needs the final terrain
   caves = new Caves({ scene, world, physicsMaterial: staticMaterial, lights: QUALITY.caveLights });
@@ -3021,15 +3614,15 @@ async function loadWorld() {
   // Power poles along the roads (after the terrain: they stand on it)
   roads.buildPoles({
     scene, world, material: staticMaterial, mapObstacles, groundAt: groundHeight,
-    blocked: (x, z) => houses.blocks(x, z, 1.2) || houses.inYard(x, z) || caveBlocks(x, z, 2)
-      || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 5
+    blocked: (x, z) => houses.blocks(x, z, 1.2) || houses.inYard(x, z) || caveBlocks(x, z, 2) || nearGate(x, z, 1)
+      || nearParked(x, z, 2)
       || DEBRIS_SPOTS.some(([dx, dz]) => Math.hypot(dx - x, dz - z) < 4)
       || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2),
   });
 
   // Big trees stay out of houses (a scattered tree used to land on one)
   const keepClear = (list, pad) => list.filter(({ x, z }) => !houses.blocks(x, z, pad) && !caveBlocks(x, z, pad + 4)
-    && !roads.onRoad(x, z, pad) && !houses.inYard(x, z));
+    && !roads.onRoad(x, z, pad) && !houses.inYard(x, z) && !nearGate(x, z, pad));
   const treeAPositions = keepClear(scatterPositions(TREE_A_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 8), 5);
   const treeBPositions = keepClear(scatterPositions(TREE_B_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 7), 4);
 
@@ -3069,22 +3662,32 @@ async function loadWorld() {
   }
   atmosphere.setSources(fireSpots);
 
-  // The drivable auto-rickshaw
-  if (autoGltf) {
-    rickshaw = new Rickshaw({ scene, world, gltf: autoGltf, material: staticMaterial, spawn: RICK_SPAWN });
-    mapObstacles.push(rickshaw.footprint);
-  }
+  // Drivable vehicles: the Thar uses a stand-in jeep until its model is in public/models/india/
+  headlight = new THREE.SpotLight(0xffe6b8, 0, 52, 0.5, 0.5, 1.3);
+  headlight.castShadow = false;
+  scene.add(headlight, headlight.target);
+  const vehicleModels = { rickshaw: indiaModels.rickshaw ?? autoGltf?.scene ?? null, thar: indiaModels.thar ?? null };
+  parked.forEach((spawn, index) => {
+    const src = vehicleModels[spawn.kind];
+    if (spawn.kind === "rickshaw" && !src) return;
+    const model = src ? src.clone(true) : standInJeep();
+    // The old free rickshaw model (the fallback) points its nose along +X
+    const modelYaw = spawn.kind === "rickshaw" && !indiaModels.rickshaw ? -Math.PI / 2 : null;
+    const v = new Vehicle({ scene, world, kind: spawn.kind, model, material: staticMaterial, spawn, index, standIn: !src, modelYaw });
+    vehicles[index] = v;
+    mapObstacles.push(v.footprint);
+  });
 
   // Stones: boulders are solid and the same everywhere; pebbles follow the quality setting
   const keepOff = (x, z, pad) => Math.hypot(x, z) < 15 || houses.blocks(x, z, pad + 2) || nearObstacle(x, z, pad)
-    || caveBlocks(x, z, pad + 2) || roads.onRoad(x, z, pad + 1) || houses.inYard(x, z)
-    || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 6 + pad
+    || caveBlocks(x, z, pad + 2) || roads.onRoad(x, z, pad + 1) || houses.inYard(x, z) || nearGate(x, z, pad)
+    || nearParked(x, z, 3 + pad)
     || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2 + pad)
     || fireSpots.some(f => Math.hypot(f.x - x, f.z - z) < 4 + pad);
   scatterRocks({
     scene, world, material: staticMaterial, mapObstacles,
-    boulderRng: makeLCG(0xb01de55), pebbleRng: makeLCG(0x9ebb1e5),
-    boulders: BOULDER_COUNT, pebbles: QUALITY.pebbles, ringMin: 12, ringMax: 230,
+    boulderRng: makeLCG(0xb01de55), pebbleRng: makeLCG(0x9ebb1e5), coverRng: makeLCG(0xc0fe12),
+    boulders: BOULDER_COUNT, pebbles: QUALITY.pebbles, cover: COVER_ROCK_COUNT, ringMin: 12, ringMax: 230,
     blocked: (x, z, r) => keepOff(x, z, r),
   });
 
@@ -3094,8 +3697,8 @@ async function loadWorld() {
     count: DEAD_TREE_COUNT, playerHeight: CHARACTER_HEIGHT, heightMul: DEAD_TREE_HEIGHT_MUL,
     ringMin: 14, ringMax: 175, mapObstacles,
     blocked: (x, z) => Math.hypot(x, z) < 12 || houses.blocks(x, z, 4) || nearObstacle(x, z, 3.5) || caveBlocks(x, z, 4)
-      || roads.onRoad(x, z, 3) || houses.inYard(x, z, -3)
-      || Math.hypot(x - RICK_SPAWN.x, z - RICK_SPAWN.z) < 8
+      || roads.onRoad(x, z, 3) || houses.inYard(x, z, -3) || nearGate(x, z, 2)
+      || nearParked(x, z, 5)
       || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 3)
       || fireSpots.some(s => Math.hypot(s.x - x, s.z - z) < 5),
   });
@@ -3191,6 +3794,8 @@ const remotePlayers = new RemotePlayers({
   capsule: { radius: CHARACTER_RADIUS, height: CAPSULE_HEIGHT },
   addCapsule: addCapsuleToBody,
 });
+// Smoke hides enemy name tags in the battle royale
+remotePlayers.concealed = (from, to) => smokeFX.blocks(from, to);
 // Teammates' and enemies' footsteps, from where they are
 const _stepAt = { x: 0, y: 0, z: 0 };
 remotePlayers.onStep = (p, x, feetY, z, vol) => {
@@ -3216,8 +3821,11 @@ function getTargets() {
 
 /** A monster hit a player: you take it directly, teammates get a message. */
 function onPlayerHit(target, dmg, kx, kz, shake, sx, sz) {
-  if (target.local) dealDamageToPlayer(dmg, kx, kz, shake, sx, sz, "monster");
-  else net.send({ t: "hurt", to: target.id, d: +dmg.toFixed(1), kx: +kx.toFixed(2), kz: +kz.toFixed(2), sh: shake, sx: +sx.toFixed(2), sz: +sz.toFixed(2) });
+  if (target.local) { dealDamageToPlayer(dmg, kx, kz, shake, sx, sz, "monster"); return; }
+  // A teammate bleeds where everyone here can see it
+  _bleedAt.set(target.pos.x, target.pos.y + 0.3, target.pos.z);
+  effects.bleed(_bleedAt, target.pos.x - sx, target.pos.z - sz, Math.min(18, 5 + dmg * 0.4));
+  net.send({ t: "hurt", to: target.id, d: +dmg.toFixed(1), kx: +kx.toFixed(2), kz: +kz.toFixed(2), sh: shake, sx: +sx.toFixed(2), sz: +sz.toFixed(2) });
 }
 
 /** Footsteps, gunfire, doors: the host's monsters hear everyone. */
@@ -3265,7 +3873,6 @@ function onConnected(welcome) {
     // The host owns the monsters; ours become puppets of its snapshots
     zombieManager.clearAll();
     zombieManager.pool.setPuppetMode(true);
-    weather.locked = true; // the host's sky
     inventoryUI.feed(`Joined room "${net.room}" · host: ${net.players.get(net.hostId)?.name ?? "?"}`, "info");
   } else {
     inventoryUI.feed(`Hosting room "${net.room}". Friends join with the same code.`, "info");
@@ -3274,8 +3881,8 @@ function onConnected(welcome) {
 }
 
 function becomeHost() {
-  weather.locked = false;
   if (isBR()) {
+    bots.adopt(); // the old host's bots carry on, run from here
     // The match clock, zone and alive list are already here: just carry on
     inventoryUI.feed("You're hosting the match now", "info");
     brCheckWinner();
@@ -3294,7 +3901,7 @@ net.on("joined", msg => {
   updateSquadPlayerCount();
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
-    if (net.isHost) net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: rickshawState() });
+    if (net.isHost) net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state } });
     return;
   }
   if (net.isHost) {
@@ -3303,7 +3910,8 @@ net.on("joined", msg => {
       t: "world", to: msg.p.id,
       doors: houses.houses.map(h => h.doorOpen),
       lights: houses.houses.map(h => h.floors.map(f => f.lightOn)),
-      veh: rickshawState(),
+      veh: vehiclesState(),
+      gate: collegeGate && { ...collegeGate.state },
     });
   }
 });
@@ -3311,7 +3919,7 @@ net.on("left", msg => {
   const name = remotePlayers.players.get(msg.id)?.name ?? "A player";
   remotePlayers.remove(msg.id);
   if (worldMap.pins.has(msg.id)) setPin(msg.id, null);
-  if (rickshaw?.driver === msg.id) rickshaw.releaseRemote();
+  for (const v of vehicles) if (v.driver === msg.id) v.releaseRemote();
   inventoryUI.feed(`${name} left`, "info");
   updateSquadPlayerCount();
   if (isBR()) brOnPlayerLeft(msg.id);
@@ -3336,17 +3944,30 @@ net.on("pin", msg => {
   setPin(msg.from, msg.c ? null : msg.x, msg.c ? null : msg.z);
   if (!msg.c && fresh) inventoryUI.feed(`${net.players.get(msg.from)?.name ?? "A teammate"} marked a spot`, "info");
 });
-net.on("shot", msg => remotePlayers.shot(msg.from, msg));
+net.on("shot", msg => {
+  const who = msg.b ?? msg.from;
+  remotePlayers.shot(who, msg);
+  noteShot(who, msg.f[0], msg.f[2]);
+});
+// A teammate reloading, eating, opening a door, flinching, vaulting
+net.on("anim", msg => {
+  const s = remotePlayers.players.get(msg.b ?? msg.from)?.soldier;
+  if (!s) return;
+  if (msg.g) s.playGesture(msg.g, msg.d);
+  else if (msg.c) s.playClip(msg.c, msg.d, msg.w ?? 1);
+});
 net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz, "monster"));
 net.on("throw", msg => {
-  throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.from, msg.c ?? 0);
+  throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.b ?? msg.from, msg.c ?? 0, msg.f);
 });
 net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
+net.on("gate", msg => collegeGate?.setState(msg.p, msg.o));
 net.on("light", msg => {
   const f = houses.houses[msg.h]?.floors[msg.f ?? 0];
   if (f && f.lightOn !== msg.on) houses.toggleLight(f);
 });
 net.on("world", msg => {
+  if (msg.gate) for (const part of ["gate", "booth"]) collegeGate?.setState(part, msg.gate[part], true);
   msg.doors.forEach((o, i) => { if (houses.houses[i]) houses.setDoor(houses.houses[i], o); });
   // Per house: [ground, upstairs] (a plain boolean from an older client: the ground floor)
   msg.lights.forEach((ons, i) => {
@@ -3355,9 +3976,14 @@ net.on("world", msg => {
       if (f && f.lightOn !== on) houses.toggleLight(f);
     });
   });
-  if (msg.veh && rickshaw && rickshaw.driver === null) {
-    [rickshaw.x, rickshaw.z, rickshaw.yaw, rickshaw.fuel] = msg.veh;
-  }
+  // Where every vehicle is parked ([[x, z, yaw, fuel], …]; an older host sends just the rickshaw's)
+  const parkedNow = msg.veh && !Array.isArray(msg.veh[0]) ? [msg.veh] : msg.veh ?? [];
+  parkedNow.forEach((p, i) => {
+    const v = vehicles[i];
+    if (!v || v.driver !== null || !p) return;
+    [v.x, v.z, v.yaw, v.fuel] = p;
+    v.place();
+  });
 });
 net.on("drop", msg => pickups.spawn(msg.k, msg.x, msg.z, unpackLoot(msg), msg.l ?? Infinity, msg.i ?? null, msg.y ?? null));
 
@@ -3481,7 +4107,7 @@ function netTick(delta) {
       vis: +playerVisibility().toFixed(2), k: killsThisLife, sn: STANCE_RANK[stance], g: _gearCode || undefined,
       ph: isBR() ? (br.ghost ? PHASE_PLANE : br.flight) : PHASE_GROUND,
       veh: drive.on
-        ? [+rickshaw.x.toFixed(2), +rickshaw.z.toFixed(2), +rickshaw.yaw.toFixed(3), +rickshaw.speed.toFixed(2), +rickshaw.fuel.toFixed(1)]
+        ? [+drive.car.x.toFixed(2), +drive.car.z.toFixed(2), +drive.car.yaw.toFixed(3), +drive.car.speed.toFixed(2), +drive.car.fuel.toFixed(1), drive.car.index]
         : undefined,
     });
   }
@@ -3546,26 +4172,53 @@ function updateSquad(delta) {
   }
 }
 
-// ─── Auto-rickshaw ────────────────────────────────────────────────────────────
-// One drivable rickshaw (vehicles/Rickshaw.js). V gets in and out, W/S are
-// throttle and brake/reverse, A/D steer, Space is the handbrake, and T pours
-// in a petrol can (next to it, or while driving). Whoever drives simulates it
-// and streams the pose in their `st` packets; everyone else smooths toward it.
-const RICK_SPAWN = { x: -16, z: -15, yaw: Math.atan2(16, 15) }; // parked facing the middle of the map
-const SEATED_HIP = 0.95;                                        // soldier hip height above the feet
-let rickshaw = null;
-const drive = { on: false, lastMouse: 0, emptyNotice: 0 };
+// ─── Vehicles: auto-rickshaws and Thars ───────────────────────────────────────
+// vehicles/Vehicle.js. V gets in and out of the nearest one, W/S are throttle
+// and brake/reverse, A/D steer, Space is the handbrake, and T pours in a petrol
+// can (next to it, or while driving). Whoever drives simulates it and streams
+// the pose in their `st` packets (with its index); everyone else smooths toward it.
+//
+// Where they're parked: the same list for every player (the index is the
+// vehicle's network id). The first is hand-placed by the spawn; the rest sit
+// on a road's shoulder in the towns, on `side` of the road.
+const VEHICLE_SPAWNS = [
+  { kind: "rickshaw", x: -16, z: -15, yaw: Math.atan2(16, 15) },     // Crossroads, facing the middle of the map
+  { kind: "thar", road: "Highway", near: [-34, -3], side: -1 },       // Crossroads
+  { kind: "rickshaw", road: "North Road", near: [4, 142], side: 1 },  // Ravencross
+  { kind: "thar", road: "North Road", near: [1, 110], side: -1 },
+  { kind: "rickshaw", road: "Highway", near: [134, -26], side: 1 },   // Ashford
+  { kind: "thar", road: "Highway", near: [168, -33], side: -1 },
+  { kind: "rickshaw", road: "North Road", near: [20, -134], side: 1 }, // Mill Creek
+  { kind: "thar", road: "Highway", near: [-134, 11], side: -1 },      // Pine Hollow
+  { kind: "rickshaw", road: "Highway", near: [-104, 5], side: 1 },
+];
+const PARK_OFFSET = 4.4;         // m from the road's centreline: on the shoulder, inside the power-pole line (5.9 m)
+const SEATED_HIP = 0.95;         // soldier hip height above the feet
+const vehicles = [];             // index = VEHICLE_SPAWNS index
+let headlight = null;            // the one shared beam (Vehicle.aimHeadlight)
+const drive = { on: false, car: null, lastMouse: 0, emptyNotice: 0 };
 const _seat = new THREE.Vector3();
 const _exit = { x: 0, z: 0 };
-const _runOver = new Map();                                     // monster / player id → last hit (ms)
+const _runOver = new Map();      // monster / player id → last hit (ms)
 const vehicleHudEl = document.getElementById("vehicle-hud");
 const vehSpeedEl = document.getElementById("veh-speed");
 const vehFuelEl = document.getElementById("veh-fuel-fill");
 const vehFuelValEl = document.getElementById("veh-fuel-val");
 const vehHud = { shown: null, speed: -1, fuel: -1 };
 
-/** True if a circle at (x, z) overlaps anything solid on the obstacle list (or the map edge). */
-function solidAt(x, z, r) {
+/** Resolves the road-relative spawns into { kind, x, z, yaw } (needs the roads). */
+function vehicleSpawns(roads) {
+  return VEHICLE_SPAWNS.map(s => {
+    if (!s.road) return s;
+    const road = roads.byName(s.road);
+    const at = roads.pointAt(road, roads.arcNear(road, s.near[0], s.near[1]));
+    // Right of the direction of travel is (tz, −tx)
+    return { kind: s.kind, x: at.x + at.tz * PARK_OFFSET * s.side, z: at.z - at.tx * PARK_OFFSET * s.side, yaw: Math.atan2(at.tx, at.tz) };
+  });
+}
+
+/** True if a circle at (x, z) overlaps anything solid on the obstacle list (or the map edge). self: a vehicle to ignore. */
+function solidAt(x, z, r, self = null) {
   if (Math.hypot(x, z) > PLAY_RADIUS - r) return true;
   if (caves?.solidAt(x, z, r)) return true;
   for (const o of mapObstacles) {
@@ -3583,21 +4236,38 @@ function solidAt(x, z, r) {
     const qx = Math.max(Math.abs(lx) - o.w / 2, 0), qz = Math.max(Math.abs(lz) - o.d / 2, 0);
     if (qx * qx + qz * qz < r * r) return true;
   }
+  // Other vehicles: a circle each is plenty for bumping (only checked while driving one)
+  if (self) {
+    for (const v of vehicles) {
+      if (v === self) continue;
+      const rr = v.spec.width * 0.6 + r, dx = x - v.x, dz = z - v.z;
+      if (dx * dx + dz * dz < rr * rr) return true;
+    }
+  }
   return false;
 }
 
-function nearRickshaw() {
-  return !!rickshaw && rickshaw.distanceTo(characterBody.position.x, characterBody.position.z) < RICKSHAW.enterRange;
+/** The closest vehicle you could get into (or refuel), or null. */
+function nearestVehicle() {
+  const px = characterBody.position.x, pz = characterBody.position.z;
+  let best = null, bestD = Infinity;
+  for (const v of vehicles) {
+    const d = v.distanceTo(px, pz);
+    if (d < v.spec.enterRange && d < bestD) { best = v; bestD = d; }
+  }
+  return best;
 }
 
-function toggleRickshaw() {
-  if (drive.on) { exitRickshaw(); return; }
-  if (!nearRickshaw() || playerHealth <= 0 || brAirborne()) return;
-  if (rickshaw.driver !== null) { inventoryUI.feed("Someone is already driving it", "info"); return; }
+function toggleVehicle() {
+  if (drive.on) { exitVehicle(); return; }
+  const car = nearestVehicle();
+  if (!car || playerHealth <= 0 || brAirborne() || climb.active) return;
+  if (car.driver !== null) { inventoryUI.feed("Someone is already driving it", "info"); return; }
   drive.on = true;
-  rickshaw.driver = "local";
-  rickshaw.remote = null;
-  characterBody.collisionResponse = false; // the rickshaw's box carries you
+  drive.car = car;
+  car.driver = "local";
+  car.remote = null;
+  characterBody.collisionResponse = false; // the vehicle's box carries you
   soldier.seated = true;
   setStance("stand", true);
   cancelThrow();
@@ -3606,39 +4276,43 @@ function toggleRickshaw() {
   knockbackVel.set(0, 0, 0);
   drive.lastMouse = 0;
   sfx.equip();
-  inventoryUI.feed(rickshaw.empty
+  inventoryUI.feed(car.empty
     ? `Out of petrol: find a petrol can, then ${IS_TOUCH ? "tap it in the hotbar" : "press T"}`
     : IS_TOUCH ? "Joystick: drive & steer · BRAKE · tap Get out" : "W/S drive · A/D steer · Space brake · V get out",
-    rickshaw.empty ? "info" : "fuel", "fuel");
+    car.empty ? "info" : "fuel", "fuel");
 }
 
-function exitRickshaw() {
+function exitVehicle() {
   if (!drive.on) return;
+  const car = drive.car;
   drive.on = false;
+  drive.car = null;
   soldier.seated = false;
-  rickshaw.driver = null;
-  rickshaw.speed = 0;
-  rickshaw.yawRate = 0;
-  rickshaw.exitSpot(solidAt, _exit);
+  car.driver = null;
+  car.speed = 0;
+  car.yawRate = 0;
+  car.exitSpot(solidAt, _exit);
   characterBody.collisionResponse = true;
   characterBody.position.set(_exit.x, groundHeight(_exit.x, _exit.z) + FEET_OFFSET + 0.05, _exit.z);
   characterBody.velocity.set(0, 0, 0);
-  bodyYaw = rickshaw.yaw;
+  bodyYaw = car.yaw;
 }
 
-function refuelRickshaw() {
-  if (!rickshaw || playerHealth <= 0) return;
-  if (!drive.on && !nearRickshaw()) { inventoryUI.feed("Stand next to the auto-rickshaw to fill it up", "info", "fuel"); return; }
-  if (rickshaw.fuel >= RICKSHAW.fuelMax - 1) { inventoryUI.feed("The tank is already full", "info", "fuel"); return; }
+function refuelVehicle() {
+  if (playerHealth <= 0) return;
+  const car = drive.car ?? nearestVehicle();
+  if (!car) { inventoryUI.feed("Stand next to a rickshaw or a Thar to fill it up", "info", "fuel"); return; }
+  if (car.fuel >= car.spec.fuelMax - 1) { inventoryUI.feed("The tank is already full", "info", "fuel"); return; }
   if (!inventory.takeFuelCan()) { inventoryUI.feed("No petrol cans: they lie around the map", "info", "fuel"); return; }
-  rickshaw.fuel = Math.min(RICKSHAW.fuelMax, rickshaw.fuel + RICKSHAW.canFuel);
+  car.fuel = Math.min(car.spec.fuelMax, car.fuel + car.spec.canFuel);
   sfx.refuel();
-  inventoryUI.feed(`Petrol: ${Math.round(rickshaw.fuel)}%`, "fuel", "fuel");
-  net.send({ t: "vfuel", f: +rickshaw.fuel.toFixed(1) });
+  inventoryUI.feed(`Petrol: ${Math.round(car.fuel)}%`, "fuel", "fuel");
+  net.send({ t: "vfuel", f: +car.fuel.toFixed(1), i: car.index });
 }
 
 /** Replaces the on-foot controller while you drive. */
 function updateDriving(delta) {
+  const car = drive.car;
   let throttle = 0, steer = 0;
   if (!inventoryOpen && playerHealth > 0) {
     throttle = (keys.forward ? 1 : 0) - (keys.backward ? 1 : 0);
@@ -3649,13 +4323,13 @@ function updateDriving(delta) {
     }
   }
   const now = performance.now() / 1000;
-  if (throttle !== 0 && rickshaw.empty && now > drive.emptyNotice) {
+  if (throttle !== 0 && car.empty && now > drive.emptyNotice) {
     drive.emptyNotice = now + 4;
     sfx.sputter();
     inventoryUI.feed(`Out of petrol! ${IS_TOUCH ? "Tap the petrol can in the hotbar" : "Press T with a petrol can"}`, "info", "fuel");
   }
-  const crash = rickshaw.drive(delta, { throttle, steer, handbrake: keys.jump }, solidAt);
-  progress.drive(Math.abs(rickshaw.speed) * delta);
+  const crash = car.drive(delta, { throttle, steer, handbrake: keys.jump }, solidAt);
+  progress.drive(Math.abs(car.speed) * delta);
   jumpQueued = false;
   if (crash > 3) {
     cameraTrauma = Math.min(1, cameraTrauma + Math.min(0.7, crash * 0.05));
@@ -3663,115 +4337,144 @@ function updateDriving(delta) {
     if (crash > 10) dealDamageToPlayer((crash - 10) * 3, 0, 0, 0.5);
   }
   // The camera swings in behind you unless you're looking around with the mouse
-  if (now - drive.lastMouse > 1.2 && Math.abs(rickshaw.speed) > 1.5) {
-    aimYaw += angleDiff(rickshaw.yaw, aimYaw) * (1 - Math.exp(-2.2 * delta));
+  if (now - drive.lastMouse > 1.2 && Math.abs(car.speed) > 1.5) {
+    aimYaw += angleDiff(car.yaw, aimYaw) * (1 - Math.exp(-2.2 * delta));
     aimPitch += (-0.16 - aimPitch) * (1 - Math.exp(-2 * delta));
   }
-  rickshawRunOver();
+  vehicleRunOver(car);
 }
 
 /** Driving into monsters (or other players, in the battle royale) hurts them. */
-function rickshawRunOver() {
-  const v = Math.abs(rickshaw.speed);
+function vehicleRunOver(car) {
+  const v = Math.abs(car.speed);
   if (v < 4) return;
   const now = performance.now();
-  const dir = Math.sign(rickshaw.speed);
-  const fx = Math.sin(rickshaw.yaw), fz = Math.cos(rickshaw.yaw);
-  const cx = rickshaw.x + fx * 0.9 * dir, cz = rickshaw.z + fz * 0.9 * dir;
+  const dir = Math.sign(car.speed);
+  const fx = Math.sin(car.yaw), fz = Math.cos(car.yaw);
+  const nose = car.spec.length * 0.33;
+  const cx = car.x + fx * nose * dir, cz = car.z + fz * nose * dir;
+  const hit = car.spec.width * 0.9;
   for (const z of zombieManager?.active ?? []) {
     if (z.dying || z.def.flying) continue;
     const p = z.body.position;
-    const reach = 1.25 + (z.capRadius ?? 0.4);
+    const reach = hit + (z.capRadius ?? 0.4);
     if ((p.x - cx) ** 2 + (p.z - cz) ** 2 > reach * reach) continue;
     if (now - (_runOver.get(z) ?? 0) < 600) continue;
     _runOver.set(z, now);
     z.killCause = "road";
-    hitMonster(z, v * 14 * (z.def.bigBody ? 0.5 : 1), fx * dir * v * 0.5, fz * dir * v * 0.5);
+    hitMonster(z, v * car.spec.runOver * 2.8 * (z.def.bigBody ? 0.5 : 1), fx * dir * v * 0.5, fz * dir * v * 0.5);
     _vecA.set(p.x, p.y + 0.6, p.z);
     effects.impact(_vecA, fx * dir, 0.4, fz * dir, "blood", 14);
     sfx.thud(p, false);
-    rickshaw.speed *= z.def.bigBody ? 0.4 : 0.8;
+    car.speed *= z.def.bigBody ? 0.4 : 0.8;
   }
   if (!isBR()) return;
   for (const t of remotePlayers.targets()) {
     if (!t.alive) continue;
-    if ((t.pos.x - cx) ** 2 + (t.pos.z - cz) ** 2 > 1.6 * 1.6) continue;
+    if ((t.pos.x - cx) ** 2 + (t.pos.z - cz) ** 2 > (hit + 0.35) ** 2) continue;
     if (now - (_runOver.get(t.id) ?? 0) < 700) continue;
     _runOver.set(t.id, now);
-    net.send({ t: "pvp", to: t.id, d: Math.round(v * 5), hs: 0, w: "rickshaw", sx: +rickshaw.x.toFixed(1), sz: +rickshaw.z.toFixed(1) });
+    sendPvp(t.id, { d: Math.round(v * car.spec.runOver), hs: 0, w: "rickshaw", sx: +car.x.toFixed(1), sz: +car.z.toFixed(1) });
     showHitMarker(false, false);
     sfx.thud(t.pos, false);
   }
 }
 
 /** After the physics step: you ride in the seat. */
-function rickshawAfterStep() {
+function vehicleAfterStep() {
   if (!drive.on) return;
-  rickshaw.seatWorld(_seat);
+  drive.car.seatWorld(_seat);
   characterBody.position.set(_seat.x, _seat.y - SEATED_HIP + FEET_OFFSET, _seat.z);
   characterBody.velocity.set(0, 0, 0);
-  bodyYaw = rickshaw.yaw;
+  bodyYaw = drive.car.yaw;
   characterRoot.rotation.y = bodyYaw;
 }
 
-const _rickshawAt = { x: 0, y: 0, z: 0 };
-/** Engine sound, and the speed / petrol gauge while you drive. */
-function updateRickshawFx() {
-  if (!rickshaw) return;
-  // Someone else driving: the engine is placed at the rickshaw and fades with distance
-  let vol = 0;
-  if (rickshaw.driver !== null && rickshaw.fuel > 0) {
-    vol = drive.on ? 1 : rickshaw.distanceTo(camera.position.x, camera.position.z) < 90 ? 1 : 0;
+/** Every vehicle's pose and lamps; the shared headlight goes to the closest one that's lit. */
+function updateVehicles(delta) {
+  let lit = null, litD = Infinity;
+  for (const v of vehicles) {
+    v.update(delta, env.darkness);
+    if (v.lightLevel > 0) {
+      const d = v.distanceTo(camera.position.x, camera.position.z);
+      if (d < litD) { lit = v; litD = d; }
+    }
   }
-  _rickshawAt.x = rickshaw.x; _rickshawAt.y = groundHeight(rickshaw.x, rickshaw.z) + 0.8; _rickshawAt.z = rickshaw.z;
-  sfx.setRickshaw(vol, Math.min(1, Math.abs(rickshaw.speed) / RICKSHAW.maxSpeed * 0.8 + rickshaw.throttle * 0.25), drive.on ? null : _rickshawAt);
+  if (!headlight) return;
+  if (lit) lit.aimHeadlight(headlight);
+  else headlight.intensity = 0;
+}
+
+const _engineAt = { x: 0, y: 0, z: 0 };
+/** Engine sound (yours, or the nearest someone else drives), and the speed / petrol gauge while you drive. */
+function updateVehicleFx() {
+  let car = drive.car, near = Infinity;
+  if (!car) {
+    for (const v of vehicles) {
+      if (v.driver === null || v.fuel <= 0) continue;
+      const d = v.distanceTo(camera.position.x, camera.position.z);
+      if (d < 90 && d < near) { car = v; near = d; }
+    }
+  }
+  const vol = car && car.driver !== null && car.fuel > 0 ? 1 : 0;
+  if (car) { _engineAt.x = car.x; _engineAt.y = groundHeight(car.x, car.z) + 0.8; _engineAt.z = car.z; }
+  sfx.setRickshaw(vol, car ? Math.min(1, Math.abs(car.speed) / car.spec.maxSpeed * 0.8 + car.throttle * 0.25) : 0,
+    drive.on ? null : _engineAt, car?.spec.tone ?? 1);
 
   const show = drive.on;
   if (show !== vehHud.shown) {
     vehHud.shown = show;
     vehicleHudEl?.classList.toggle("visible", show);
+    const name = document.getElementById("veh-name");
+    if (show && name) name.textContent = drive.car.spec.label.toUpperCase();
   }
   if (!show) return;
-  const kmh = Math.round(Math.abs(rickshaw.speed) * 3.6);
+  const kmh = Math.round(Math.abs(drive.car.speed) * 3.6);
   if (kmh !== vehHud.speed) {
     vehHud.speed = kmh;
     if (vehSpeedEl) vehSpeedEl.textContent = `${kmh}`;
   }
-  const fuel = Math.ceil(rickshaw.fuel);
+  const fuel = Math.ceil(drive.car.fuel);
   if (fuel !== vehHud.fuel) {
     vehHud.fuel = fuel;
-    if (vehFuelEl) vehFuelEl.style.transform = `scaleX(${fuel / RICKSHAW.fuelMax})`;
+    if (vehFuelEl) vehFuelEl.style.transform = `scaleX(${fuel / drive.car.spec.fuelMax})`;
     if (vehFuelValEl) vehFuelValEl.textContent = `${fuel}%`;
     vehicleHudEl?.classList.toggle("low", fuel <= 15);
   }
 }
 
-// Someone else's rickshaw driving, carried in their state packet
+// Someone else driving, carried in their state packet: veh = [x, z, yaw, speed, fuel, index]
 net.on("st", msg => {
-  if (!rickshaw) return;
-  if (msg.veh) {
-    if (drive.on) {
+  if (!vehicles.length) return;
+  const car = msg.veh ? vehicles[msg.veh[5] ?? 0] : null;
+  if (car) {
+    if (drive.car === car) {
       // Both jumped in at once: the lower id keeps it
       if (msg.from > net.id) return;
-      exitRickshaw();
+      exitVehicle();
       inventoryUI.feed(`${remotePlayers.players.get(msg.from)?.name ?? "Someone"} is driving`, "info");
     }
-    rickshaw.setRemote(msg.from, msg.veh[0], msg.veh[1], msg.veh[2], msg.veh[3], msg.veh[4]);
-  } else if (rickshaw.driver === msg.from) {
-    rickshaw.releaseRemote();
+    car.setRemote(msg.from, msg.veh[0], msg.veh[1], msg.veh[2], msg.veh[3], msg.veh[4]);
   }
+  // Out of the one they were driving (or switched)
+  for (const v of vehicles) if (v !== car && v.driver === msg.from) v.releaseRemote();
 });
 net.on("vfuel", msg => {
-  if (!rickshaw) return;
-  // A teammate topping it up: you hear it from the rickshaw
-  if (msg.f > rickshaw.fuel + 1) sfx.refuel({ x: rickshaw.x, y: groundHeight(rickshaw.x, rickshaw.z) + 0.8, z: rickshaw.z });
-  rickshaw.fuel = msg.f;
+  const car = vehicles[msg.i ?? 0];
+  if (!car) return;
+  // A teammate topping it up: you hear it from the vehicle
+  if (msg.f > car.fuel + 1) sfx.refuel({ x: car.x, y: groundHeight(car.x, car.z) + 0.8, z: car.z });
+  car.fuel = msg.f;
 });
 
+/** [[x, z, yaw, fuel], …] of every vehicle, for late joiners. */
+function vehiclesState() {
+  return vehicles.map(v => [+v.x.toFixed(2), +v.z.toFixed(2), +v.yaw.toFixed(3), +v.fuel.toFixed(1)]);
+}
 
-/** [x, z, yaw, fuel] of the parked rickshaw, for late joiners. */
-function rickshawState() {
-  return rickshaw ? [+rickshaw.x.toFixed(2), +rickshaw.z.toFixed(2), +rickshaw.yaw.toFixed(3), +rickshaw.fuel.toFixed(1)] : null;
+/** Parks every vehicle back where it started (a new battle royale round). */
+function resetVehicles() {
+  for (const v of vehicles) v.reset();
 }
 
 /**
@@ -3853,6 +4556,84 @@ const br = {
 };
 const _planePos = { x: 0, y: 0, z: 0 };
 const _spawn = { x: 0, z: 0 };
+
+// ── Bots: seven AI players in every match (br/Bots.js), simulated by the host ──
+const _botMe = { id: 0, x: 0, y: 0, z: 0, speed: 0 };
+const bots = new Bots({
+  get world() { return world; },
+  get net() { return net; },
+  get remotePlayers() { return remotePlayers; },
+  get pickups() { return pickups; },
+  get vehicles() { return vehicles; },
+  get br() { return br; },
+  feetOffset: FEET_OFFSET,
+  groundHeight,
+  surfaceAt: (x, z, y, ground) => (houses ? houses.surfaceAt(x, z, y, ground) : ground),
+  navigate: (x, z, tx, tz, out, y, ty) => (zombieManager?.navigate ? zombieManager.navigate(x, z, tx, tz, out, false, y, ty) : 0),
+  solidAt: (x, z, r, self) => solidAt(x, z, r, self),
+  concealed: (a, b) => smokeFX.blocks(a, b),
+  shielded: (pos, x, y, z) => blastShielded(pos, x, y, z),
+  now: () => clock.elapsedTime,
+  dropSpots: () => pickups.active,
+  /** You, as something a bot can shoot at (null when you can't be). */
+  localTarget() {
+    if (playerHealth <= 0 || br.ghost || br.flight !== PHASE_GROUND || (br.state === "match" && !br.inMatch)) return null;
+    const p = characterBody.position;
+    _botMe.id = localTarget.id; _botMe.x = p.x; _botMe.y = p.y; _botMe.z = p.z;
+    _botMe.speed = Math.hypot(moveVelocity.x, moveVelocity.z);
+    return _botMe;
+  },
+  /** Host takes a shared pickup for a bot (everyone else is told it's gone). */
+  takeLoot(entry, id) {
+    if (!entry.active || entry.pending) return false;
+    if (entry.id !== null) {
+      if (takenLoot.has(entry.id)) { pickups.release(entry); return false; }
+      takenLoot.add(entry.id);
+      net.send({ t: "take", i: entry.id, by: id });
+    }
+    pickups.release(entry);
+    return true;
+  },
+  spill: (items, x, y, z) => spillLoot(items, x, y, z),
+  openDoorAt(x, z, y) {
+    const door = houses?.interaction(x, z, y)?.door;
+    if (!door || door.doorOpen || !houses.setDoor(door, true)) return;
+    net.send({ t: "door", h: houses.houses.indexOf(door), o: true });
+  },
+  gesture(id, name, dur) {
+    const s = remotePlayers.players.get(id)?.soldier;
+    if (name) s?.playGesture(name, dur); else s?.playClip("interact", dur, 0.9);
+    net.send(name ? { t: "anim", b: id, g: name, d: +dur.toFixed(2) } : { t: "anim", b: id, c: "interact", d: +dur.toFixed(2), w: 0.9 });
+  },
+  flinch(id, dmg) {
+    const clip = dmg > 18 ? "hit2" : "hit";
+    remotePlayers.players.get(id)?.soldier?.playClip(clip, 0.5, 0.4);
+    net.send({ t: "anim", b: id, c: clip, d: 0.5, w: 0.4 });
+  },
+  impact: (p, n, kind) => effects.impact(p, n.x, n.y, n.z, kind, kind === "blood" ? 9 : 5),
+  /** A bot hit player `id`: you, a bot, or someone else (who applies it themselves). */
+  hitPlayer(id, dmg, hs, by, w, sx, sz) {
+    if (isBotId(id)) bots.damage(id, dmg, hs, by, w, sx, sz);
+    else if (id === localTarget.id) pvpHitMe(by, dmg, hs, w, sx, sz);
+    else net.send({ t: "pvp", to: id, b: by, d: +dmg.toFixed(1), hs: hs ? 1 : 0, w, sx: +sx.toFixed(1), sz: +sz.toFixed(1) });
+  },
+  botShot(id, def, from, hits) {
+    const msg = { t: "shot", b: id, w: def.sound, f: [from.x, from.y, from.z].map(v => +v.toFixed(2)), h: hits };
+    remotePlayers.shot(id, msg);
+    noteShot(id, from.x, from.z);
+    net.send(msg);
+  },
+  botThrow(id, kind, from, vel) {
+    const c = kind === "smoke" ? Math.floor(Math.random() * SMOKE_COLORS.length) : 0;
+    throwables.throw(kind, from, vel, id, c);
+    net.send({ t: "throw", b: id, k: kind, c, o: [from.x, from.y, from.z].map(v => +v.toFixed(3)), v: [vel.x, vel.y, vel.z].map(v => +v.toFixed(3)) });
+  },
+  botEliminated(id, by, w, hs) {
+    const msg = { t: "elim", v: id, k: by ?? null, w: w ?? "self", hs: hs ? 1 : 0 };
+    net.send(msg);
+    brHandleElim(msg);
+  },
+});
 const _lootSpot = new THREE.Vector3();
 const _specIds = [];
 const ELIM_VERB = { zone: "ZONE", self: "SELF", grenade: "FRAG", molotov: "BURNED", rickshaw: "RUN OVER" };
@@ -3877,7 +4658,7 @@ function brName(id) {
   if (id === net.id) return myName;
   return remotePlayers.players.get(id)?.name ?? net.players.get(id)?.name ?? "Player";
 }
-function brColor(id) { return net.players.get(id)?.color ?? "#e2a42b"; }
+function brColor(id) { return net.players.get(id)?.color ?? remotePlayers.players.get(id)?.color ?? "#e2a42b"; }
 
 function brPickSpectate(dir) {
   _specIds.length = 0;
@@ -3892,14 +4673,8 @@ function brNoteAttacker(id, w, hs) {
   br.atkId = id; br.atkW = w; br.atkHs = hs; br.atkAt = clock.elapsedTime;
 }
 
-/** Co-op and battle royale clients follow the host's clock and weather. */
-function applyWorldClock(hr, wx) {
-  if (typeof hr === "number") {
-    const d = Math.abs(env.hour - hr);
-    if (Math.min(d, 24 - d) > 0.05) env.hour = hr;
-  }
-  if (wx && weather.state !== wx) weather.set(wx);
-}
+/** The sky is always a clear midday now, so there's no host clock or weather to follow. */
+function applyWorldClock() {}
 
 function enterBattleRoyale(welcome) {
   gameMode = "br";
@@ -3909,11 +4684,11 @@ function enterBattleRoyale(welcome) {
   for (const p of welcome.players) if (p.id !== net.id) remotePlayers.add(p);
   zombieManager.clearAll();
   enemyFire.clear();
-  if (net.isClient) weather.locked = true; // the host's sky
   brHud.setVisible(true);
+  if (net.isHost) bots.spawnAll();
   brEnterWarmup();
   inventoryUI.feed(net.isHost
-    ? `You're the host. ${IS_TOUCH ? "Tap START MATCH" : "Press ENTER"} to start (alone is a practice drop)`
+    ? `You're the host. The match starts by itself, or ${IS_TOUCH ? "tap START MATCH" : "press ENTER"} to drop now`
     : `Joined "${welcome.room.slice(3)}" · waiting for the host to start`, "info");
 }
 
@@ -3925,7 +4700,8 @@ function brWarmSpawn() {
 
 /** Full health, fresh pockets (empty for the drop, a warm-up kit otherwise), at (x, y, z). */
 function brResetPlayer(x, y, z, empty) {
-  exitRickshaw();
+  cancelClimb();
+  exitVehicle();
   playerHealth = MAX_HEALTH;
   healthTrail = MAX_HEALTH;
   timeSinceHit = 99;
@@ -3966,9 +4742,10 @@ function brEnterWarmup() {
   setMapOpen(false);
   brWarmSpawn();
   brResetPlayer(_spawn.x, groundHeight(_spawn.x, _spawn.z) + FEET_OFFSET + 0.02, _spawn.z, false);
-  rickshaw?.reset();
+  resetVehicles();
   killsThisLife = 0;
   progress.resetRun();
+  if (net.isHost) bots.onWarmup();
 }
 
 function brHostStart() {
@@ -4001,7 +4778,7 @@ function brStartMatch(seed, ids, t) {
   takenLoot.clear(); // the next match's loot reuses the ids
   lootClaims.clear();
   brSpawnLoot(seed);
-  rickshaw?.reset();
+  resetVehicles();
   brHud.hideResult();
 
   planeAt(br.route, t, _planePos);
@@ -4012,6 +4789,7 @@ function brStartMatch(seed, ids, t) {
   // Look along the route, a little down, so you can pick your spot
   aimYaw = Math.atan2(br.route.dx, br.route.dz);
   aimPitch = -0.35;
+  if (net.isHost) bots.onMatch();
   if (br.inMatch) {
     setMapOpen(true);
     gameHud.showBanner({ title: "DROP ZONE", sub: "Pick your spot", text: `${IS_TOUCH ? "JUMP" : "SPACE"} jumps. Land, loot, and stay inside the blue zone.`, color: "#4da3ff", duration: 5 });
@@ -4030,6 +4808,7 @@ function brSpawnLoot(seed) {
     }
   }
   for (const sp of caves?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
+  for (const sp of indiaBuildings?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
     pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`, it.y ?? null);
   });
@@ -4078,17 +4857,24 @@ function brDropLoot() {
   }
   for (const k of THROWABLE_ORDER) if (inventory.throwables[k] > 0) items.push([k, { count: inventory.throwables[k] }]);
   if (inventory.medkits) items.push(["medkit", { count: inventory.medkits }]);
+  if (inventory.biscuits) items.push(["biscuit", { count: inventory.biscuits }]);
+  if (inventory.cash) items.push(["cash", { count: inventory.cash }]);
   if (inventory.fuelCans) items.push(["fuel", { count: inventory.fuelCans }]);
   for (const [k, n] of Object.entries(inventory.bag)) if (n > 0) items.push([k, { count: n }]);
   for (const piece of Object.values(inventory.gear)) if (piece) items.push([piece.id, { dur: piece.dur }]);
+  spillLoot(items, p.x, p.y - FEET_OFFSET, p.z);
+  inventory.reset(true);
+  onWeaponChanged(false);
+}
+
+/** items: [[kind, data]] laid out in a ring round (x, feetY, z), shared with everyone. */
+function spillLoot(items, x, feetY, z) {
   if (items.length) items.push(["ammo", null]);
   items.forEach(([k, data], i) => {
     const a = (i / items.length) * Math.PI * 2;
-    const x = p.x + Math.cos(a) * 1.5, z = p.z + Math.sin(a) * 1.5;
-    spawnShared(k, x, z, data, floorY(x, z, p.y - FEET_OFFSET));
+    const lx = x + Math.cos(a) * 1.5, lz = z + Math.sin(a) * 1.5;
+    spawnShared(k, lx, lz, data, floorY(lx, lz, feetY));
   });
-  inventory.reset(true);
-  onWeaponChanged(false);
 }
 
 // ── The drop ─────────────────────────────────────────────────────────────────
@@ -4314,6 +5100,7 @@ function brOnPlayerLeft(id) {
 
 // ── Per frame ────────────────────────────────────────────────────────────────
 function brUpdate(delta) {
+  if (net.isHost) bots.update(delta);
   if (net.isHost) {
     // Someone else is here: count down to the drop
     if (br.state === "warm" && remotePlayers.count > 0) { br.state = "count"; br.countdown = BR_AUTO_START; br.netTimer = 0; }
@@ -4354,6 +5141,7 @@ function brUpdate(delta) {
 
 /** Host: match state for everyone (and late joiners) twice a second. */
 function brNetTick(delta) {
+  if (remotePlayers.count > bots.count) bots.netTick(delta); // someone besides the bots is here
   br.netTimer -= delta;
   if (br.netTimer > 0 || remotePlayers.count === 0) return;
   br.netTimer = 0.5;
@@ -4447,12 +5235,29 @@ net.on("brstart", msg => { if (isBR()) brStartMatch(msg.seed, msg.ids, 0); });
 net.on("brend", msg => { if (isBR()) brShowEnd(msg.w ?? null); });
 net.on("brwarm", () => { if (isBR()) brEnterWarmup(); });
 net.on("elim", msg => { if (isBR()) brHandleElim(msg); });
-// Someone shot you: you apply it (you own your health) and remember who for the kill credit
+// Someone shot you: you apply it (you own your health) and remember who for the kill credit.
+// v: a bot was hit (the host owns bots' health); b: a bot did the shooting.
 net.on("pvp", msg => {
-  if (!isBR() || playerHealth <= 0 || br.ghost || br.flight === PHASE_PLANE) return;
-  brNoteAttacker(msg.from, msg.w, !!msg.hs);
-  dealDamageToPlayer(msg.d, 0, 0, msg.hs ? 0.5 : 0.25, msg.sx, msg.sz, msg.w === "rickshaw" ? "raw" : msg.hs ? "head" : "body");
+  if (msg.v) { if (net.isHost && isBR()) bots.damage(msg.v, msg.d, !!msg.hs, msg.from, msg.w, msg.sx, msg.sz); return; }
+  pvpHitMe(msg.b ?? msg.from, msg.d, msg.hs, msg.w, msg.sx, msg.sz);
 });
+net.on("bots", msg => { if (isBR() && !net.isHost) bots.applyNet(msg); });
+
+function pvpHitMe(from, d, hs, w, sx, sz) {
+  if (!isBR() || playerHealth <= 0 || br.ghost || br.flight === PHASE_PLANE) return;
+  brNoteAttacker(from, w, !!hs);
+  dealDamageToPlayer(d, 0, 0, hs ? 0.5 : 0.25, sx, sz, w === "rickshaw" ? "raw" : hs ? "head" : "body");
+}
+
+/** A hit on player `id` by you (m: { d, hs, w, sx, sz }): to them, or to the host when it's a bot. */
+function sendPvp(id, m) {
+  if (isBotId(id)) {
+    if (net.isHost) bots.damage(id, m.d, !!m.hs, localTarget.id, m.w, m.sx, m.sz);
+    else net.send({ t: "pvp", to: "host", v: id, ...m });
+    return;
+  }
+  net.send({ t: "pvp", to: id, ...m });
+}
 
 
 // ─── Lobby ────────────────────────────────────────────────────────────────────
@@ -4594,6 +5399,8 @@ function animate() {
     lastFrameAt = frameStart;
   }
   perfOverlay?.beginFrame(frameStart);
+  // Count every pass of the frame (backdrop, scene, post), not just the last one
+  if (perfOverlay) { renderer.info.autoReset = false; renderer.info.reset(); }
   if (bench.on) benchStep(frameStart);
   const rawDelta = clock.getDelta();
   const frameMs = rawDelta * 1000;
@@ -4609,19 +5416,23 @@ function animate() {
     updateDriving(delta);
   } else if (brFlying()) {
     brUpdateFlight(delta);
+  } else if (climb.active) {
+    updateClimb(delta);
   } else {
     updateCharacterMovement(delta);
     applyGroundStickForce(delta);
   }
   // Pose + collider before the step, so it pushes whatever it drives into
-  rickshaw?.update(delta, env.darkness);
+  updateVehicles(delta);
 
-  world.step(1 / 60, delta, IS_TOUCH ? 2 : 3);
+  // At most two catch-up steps: a slow frame must not make the next one slower too
+  world.step(1 / 60, delta, 2);
 
   checkGrounded();
-  snapCharacterToGround();
+  if (climb.active) climbAfterStep();
+  else snapCharacterToGround();
   if (isBR()) brAfterStep(delta);
-  rickshawAfterStep();
+  vehicleAfterStep();
   keepInBounds();
   keepOnCaveFloor(delta);
 
@@ -4634,6 +5445,7 @@ function animate() {
   characterRoot.position.set(characterBody.position.x, smoothY, characterBody.position.z);
 
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
+  collegeGate?.update(delta);
   houses?.cull(camera);
   if (isBR()) {
     brUpdate(delta);
@@ -4655,6 +5467,7 @@ function animate() {
   else updateThirdPersonCamera(realDelta);
   updateFocus(watched);
   updateSoldier(delta);
+  if (!watched) applyFirstPersonCamera();
   updateWeapon(delta);
   updateThrowAim(delta);
   throwables.update(delta);
@@ -4683,16 +5496,16 @@ function animate() {
 
   minimap.update(performance.now(), focusPos.x, focusPos.z, watched ? watched.aimYaw : aimYaw);
   updatePins(performance.now());
+  updateFightZones(performance.now());
   if (isBR()) brUpdateHud(delta);
 
   updateMood(delta);
-  updateRickshawFx();
+  updateVehicleFx();
   updateSunShadow();
   if (QUALITY.shadowEvery > 1 && ++shadowFrame % QUALITY.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
-  const logicMs = performance.now() - frameStart;
   perfOverlay?.markRender(performance.now());
   renderFrame();
-  updateDynamicResolution(frameMs, logicMs);
+  updateDynamicResolution(frameMs, performance.now() - frameStart);
   if (perfOverlay) perfOverlay.endFrame(performance.now(), perfCounts());
 }
 
@@ -4775,7 +5588,7 @@ function benchStep(now) {
   input.fire = false;
   bench.results.combat = perfOverlay.report().data;
   bench.on = false;
-  env.paused = false;
+  env.paused = true;
   const summary = {
     userAgent: navigator.userAgent, quality: QUALITY_NAME, pixelRatio: +perf.ratio.toFixed(2),
     screen: `${innerWidth}×${innerHeight} @ dpr ${devicePixelRatio}`,
@@ -4802,13 +5615,29 @@ window.addEventListener("resize", () => {
 const loadingScreen = document.getElementById("loading-screen");
 const loadingMsg    = document.getElementById("loading-message");
 
-function setLoadMsg(text) { if (loadingMsg) loadingMsg.textContent = text; }
+// The status line keeps its spinner; only the text after it changes
+const loadingMsgText = loadingMsg?.lastChild?.nodeType === Node.TEXT_NODE
+  ? loadingMsg.lastChild
+  : (loadingMsg ?? document.createElement("p")).appendChild(document.createTextNode(""));
+function setLoadMsg(text) { loadingMsgText.data = text; }
 
-// Progress counts files across every loader (GLTF, MD2, textures, VRML)
+// One bar for the whole load: downloads fill most of it, then building the
+// world and warming up the GPU (loadMark moves it on). It never goes back,
+// although the file total grows as loaders discover more files.
 const loadingBarEl = document.getElementById("loading-bar");
+const loadingPctEl = document.getElementById("loading-pct");
+const DOWNLOAD_SHARE = 72;
+let loadShown = 0;
+function setLoadProgress(pct) {
+  pct = Math.min(100, pct);
+  if (pct <= loadShown) return;
+  loadShown = pct;
+  if (loadingBarEl) loadingBarEl.style.transform = `scaleX(${pct / 100})`;
+  if (loadingPctEl) loadingPctEl.textContent = String(Math.floor(pct));
+}
 THREE.DefaultLoadingManager.onProgress = (_url, loaded, total) => {
-  if (loadingBarEl) loadingBarEl.style.transform = `scaleX(${Math.min(1, loaded / Math.max(1, total))})`;
-  setLoadMsg(`Loading assets… ${loaded} / ${total}`);
+  setLoadProgress(DOWNLOAD_SHARE * loaded / Math.max(1, total));
+  if (loadShown < DOWNLOAD_SHARE) setLoadMsg("Downloading the world");
 };
 
 /**
@@ -4825,23 +5654,28 @@ async function warmUpGpu() {
     for (const m of o.material ? [].concat(o.material) : []) if (m.transparent && m.side === THREE.DoubleSide) m.forceSinglePass = true;
   });
   fireFX.setWarmup(true);
-  const compile = async () => {
+  // target: the whole scene, or one object compiled against the scene's lights
+  // (a full pass walks ~1000 objects and every material's parameters: on a
+  // phone that's most of a second each, and the monster variants need 16)
+  const compile = async (target = scene) => {
     // Into the same target the game draws to: tone mapping and colour space
     // are part of each program, so the screen's variants would be the wrong ones
     postFx.begin();
-    if (renderer.compileAsync) await renderer.compileAsync(scene, camera);
-    else renderer.compile(scene, camera);
-    renderer.compile(backdrop.scene, backdrop.camera);
+    const lightsFrom = target === scene ? null : scene;
+    if (renderer.compileAsync) await renderer.compileAsync(target, camera, lightsFrom);
+    else renderer.compile(target, camera, lightsFrom);
+    if (target === scene) renderer.compile(backdrop.scene, backdrop.camera);
     renderer.setRenderTarget(null);
   };
   await compile();
+  loadMark("warm-up: scene programs");
   // Monster hit / burn materials only appear on demand: compile them on one of each type
   for (const t of Object.values(zombieManager?.pool.types ?? {})) {
     const m = zombieManager.pool.all.find(x => x.type === t.type);
     if (!m) continue;
     for (const mat of [t.skinMats[0].hit, t.skinMats[0].burn]) {
       m.mesh.material = mat;
-      await compile();
+      await compile(m.root);
     }
     m.mesh.material = t.skinMats[0].base;
   }
@@ -4868,7 +5702,9 @@ async function warmUpGpu() {
   scene.traverse(o => { if (o.isLOD) { lods.push(o); o.autoUpdate = false; for (const l of o.levels) l.object.visible = true; } });
   renderer.shadowMap.needsUpdate = true;
   houses?.warmup(true);
+  loadMark("warm-up: monster variants");
   renderFrame(); // uploads textures + buffers, compiles shadow programs
+  loadMark("warm-up: first frame (shadows, uploads)");
   houses?.warmup(false);
   [sc.left, sc.right, sc.top, sc.bottom, sc.far] = box;
   sc.updateProjectionMatrix();
@@ -4879,6 +5715,38 @@ async function warmUpGpu() {
   }
   for (const o of hidden) o.visible = false;
   fireFX.setWarmup(false);
+}
+
+/**
+ * Production builds keep their files on the device (public/sw.js), so the
+ * second visit loads from storage. The files this visit downloaded are handed
+ * to it straight away. Not in dev (Vite's live reload) or the Android app
+ * (its files are already local).
+ */
+function registerOfflineCache() {
+  if (!import.meta.env.PROD || !("serviceWorker" in navigator) || window.Capacitor || !window.isSecureContext) return;
+  navigator.serviceWorker.register("/sw.js").then(() => navigator.serviceWorker.ready).then(reg => {
+    const urls = performance.getEntriesByType("resource").map(e => e.name);
+    reg.active?.postMessage({ type: "warm", urls });
+  }).catch(() => { /* no offline cache: the HTTP cache still applies */ });
+}
+
+// Load timeline (?perf=1 prints it): ms since the page started, per phase.
+// Each phase also moves the loading bar on and says what comes next.
+const _loadMarks = [];
+const LOAD_STAGES = {
+  "boot": [1, "Downloading the world"],
+  "world downloaded": [DOWNLOAD_SHARE + 2, "Building towns, roads and caves"],
+  "world built": [84, "Preparing shaders"],
+  "warm-up: scene programs": [93, "Warming up the GPU"],
+  "warm-up: monster variants": [96, "Almost there"],
+  "warm-up: first frame (shadows, uploads)": [99, "Almost there"],
+  "ready": [100, "Ready"],
+};
+function loadMark(name) {
+  _loadMarks.push([name, Math.round(performance.now())]);
+  const stage = LOAD_STAGES[name];
+  if (stage) { setLoadProgress(stage[0]); setLoadMsg(stage[1]); }
 }
 
 async function boot() {
@@ -4899,6 +5767,7 @@ async function boot() {
     });
     zombieManager.onCrash = onMonsterCrash;
 
+    loadMark("boot");
     // Soldier, zombies and the world download + parse in parallel
     await Promise.all([
       loadCharacter(),
@@ -4906,6 +5775,7 @@ async function boot() {
       loadWorld(),
     ]);
     onWeaponChanged(false);
+    loadMark("world built");
 
     director = new LevelDirector({
       manager: zombieManager,
@@ -4939,6 +5809,9 @@ async function boot() {
     // Monsters walk around buildings, use doorways, and can't get through closed doors
     zombieManager.navigate = (zx, zz, tx, tz, out, big, zy, ty) => {
       // Through the cave tunnels when the monster or its target is in one; legs in the open use the houses' pathing
+      // In or out of a panchayat office / town building: through its doorway
+      const ib = indiaBuildings?.navigate(zx, zz, tx, tz, out, big, (ax, az, bx, bz, o) => houses.navigate(ax, az, bx, bz, o, big, zy, zy)) ?? -1;
+      if (ib >= 0) return ib;
       const r = caves.navigate(zx, zz, tx, tz, out, big, zy, ty, (ax, az, bx, bz, o) => houses.navigate(ax, az, bx, bz, o, big, zy, zy));
       return r >= 0 ? r : houses.navigate(zx, zz, tx, tz, out, big, zy, ty);
     };
@@ -4946,15 +5819,17 @@ async function boot() {
     zombieManager.flyFloor = (x, z) => surfaceHeight(x, z);
     // House floors and stairs are walkable surfaces too (monsters follow you upstairs)
     zombieManager.surfaceAt = (x, z, y, ground) => houses.surfaceAt(x, z, y, ground);
-    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4);
+    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z);
     zombieManager.onDoorBang = (x, z) => {
       sfx.doorBang({ x, y: groundHeight(x, z) + 1.2, z });
     };
     spawnWorldLoot();
 
-    setLoadMsg("Preparing shaders…");
     updateThirdPersonCamera(1 / 60);
     await warmUpGpu();
+
+    loadMark("ready");
+    if (PERF_ENABLED) console.info("LOAD_MARKS " + JSON.stringify(_loadMarks));
 
     clock.getDelta();
     _animRunning = true;
@@ -4965,14 +5840,16 @@ async function boot() {
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, get rickshaw() { return rickshaw; }, toggleRickshaw, refuelRickshaw, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, get kills() { return killsThisLife; } }; // TEMP-DBG
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     if (BENCH_ENABLED) startBenchmark();
     else lobby.show();
     // The inventory screen's 3D character loads in the background
     lootScreen.initPreview(gltfLoader);
+    clearInterval(window.__ldTips);
     loadingScreen.classList.add("hidden");
+    setTimeout(registerOfflineCache, 2500);
     loadingScreen.addEventListener("transitionend", () => loadingScreen.remove(), { once: true });
   } catch (err) {
     console.error("Boot failure:", err);

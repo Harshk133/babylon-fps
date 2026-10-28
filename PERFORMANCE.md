@@ -82,3 +82,18 @@ High: worst frame 194 ms → 50 ms (explore) and 267 ms → 57 ms (combat) after
 the shadow-shader warm-up fix; explore FPS 31.8 → 46.7.
 
 Not yet measured on a real Android device.
+
+## Desktop pass (Intel iGPU, D3D11, headless Chrome 1600×900, medium)
+
+Measured with a headless harness (puppeteer-core, `?bench=1` / `?perf=1`); this
+machine was busy, so FPS varied ±50% between identical runs and only the
+deterministic numbers are reliable:
+
+| | before | after |
+|---|---|---|
+| download | 12.4 MB | 10.8 MB (truck textures 256, panchayat / town building 512) |
+| physics broadphase per step | 5.6 ms (SAP) | 0.35–0.45 ms (static grid, identical pairs) |
+| empty instanced draw calls | ~30–90 per frame | ~1 |
+| render scale on a CPU-bound frame | dropped to the 0.6 floor | stays at 1 |
+| scene shader phase of the warm-up | 1.2–1.4 s | 0.8–1.1 s (`checkShaderErrors` off) |
+| load to ready (warm) | 5–8 s | 5.1–5.7 s |

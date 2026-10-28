@@ -15,6 +15,7 @@ const CAT_COLOR = {
   throwable: "#ff5a3a",
   medkit:    "#4dff88",
   fuel:      "#37e0c8",
+  cash:      "#ff5fd2",
 };
 
 export class Minimap {
@@ -25,6 +26,7 @@ export class Minimap {
    *   fires()     → [{ active, x, z, time }]
    *   obstacles() → [{ type:"box", x, z, w, d, rot } | { type:"circle", x, z, r }]
    *   pins()      → [{ x, z, color }]   map pins (kept on the rim when out of range)
+   *   fights()    → [{ x, z, r }]       red zones: players fighting (on the rim when out of range)
    */
   constructor(root, sources) {
     this.sources = sources;
@@ -48,6 +50,24 @@ export class Minimap {
     this.size = css;
     this._next = 0;
     this._layer = null; // redraw the static layer at the new size
+    // Compass letters: drawn once per size, stamped every redraw (fillText re-rasterises glyphs each time)
+    this._cardinals = {};
+    for (const [label] of CARDINALS) {
+      const cv = document.createElement("canvas");
+      cv.width = cv.height = Math.ceil(16 * dpr);
+      const g = cv.getContext("2d");
+      g.scale(dpr, dpr);
+      g.fillStyle = "rgba(10, 6, 4, 0.9)";
+      g.beginPath();
+      g.arc(8, 8, 7.5, 0, Math.PI * 2);
+      g.fill();
+      g.font = "800 11px 'Segoe UI', system-ui, sans-serif";
+      g.textAlign = "center";
+      g.textBaseline = "middle";
+      g.fillStyle = label === "N" ? "#ff4b3a" : "#f2e6d8";
+      g.fillText(label, 8, 8.5);
+      this._cardinals[label] = cv;
+    }
   }
 
   /** px, pz: player position. yaw: camera yaw (forward = (sin yaw, cos yaw)). */
@@ -258,6 +278,30 @@ export class Minimap {
       ctx.restore();
     }
 
+    // ── Red zones (players fighting): a pulsing red disc, or a red dot on the rim
+    const beat = 0.75 + Math.sin(now / 160) * 0.25;
+    for (const f of this.sources.fights?.() ?? []) {
+      const dx = f.x - px, dz = f.z - pz;
+      let qx = mx(f.x, f.z), qy = my(f.x, f.z);
+      if (dx * dx + dz * dz > (MAP_RANGE + f.r * 0.5) ** 2) {
+        const a = Math.atan2(qy - c, qx - c);
+        qx = c + Math.cos(a) * (R - 7); qy = c + Math.sin(a) * (R - 7);
+        ctx.fillStyle = `rgba(255, 50, 30, ${0.6 + beat * 0.4})`;
+        ctx.beginPath();
+        ctx.arc(qx, qy, 5, 0, Math.PI * 2);
+        ctx.fill();
+        continue;
+      }
+      ctx.fillStyle = `rgba(255, 40, 20, ${0.16 + beat * 0.1})`;
+      ctx.strokeStyle = `rgba(255, 70, 50, ${0.5 + beat * 0.4})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(qx, qy, f.r * k, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+
     // ── Pins: a drop on the map, or on the rim pointing the way
     for (const p of this.sources.pins?.() ?? []) {
       const dx = p.x - px, dz = p.z - pz;
@@ -336,30 +380,24 @@ export class Minimap {
     ctx.arc(c, c, R + 4, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Heading in compass degrees: 0 = +Z (north), clockwise toward −X (east)
+    // Heading in compass degrees: 0 = +Z (north), clockwise toward −X (east).
+    // Ticks in two paths (major, minor): one stroke each instead of 24
     const headingRad = -yaw;
-    for (let deg = 0; deg < 360; deg += 15) {
-      const a = (deg * Math.PI) / 180 - headingRad - Math.PI / 2;
-      const major = deg % 45 === 0;
-      const r0 = R + 2, r1 = R + (major ? 8 : 5);
+    for (const major of [true, false]) {
       ctx.strokeStyle = major ? "rgba(255, 240, 220, 0.7)" : "rgba(255, 240, 220, 0.3)";
       ctx.beginPath();
-      ctx.moveTo(c + Math.cos(a) * r0, c + Math.sin(a) * r0);
-      ctx.lineTo(c + Math.cos(a) * r1, c + Math.sin(a) * r1);
+      for (let deg = major ? 0 : 15; deg < 360; deg += major ? 45 : 15) {
+        if (!major && deg % 45 === 0) continue;
+        const a = (deg * Math.PI) / 180 - headingRad - Math.PI / 2;
+        const r0 = R + 2, r1 = R + (major ? 8 : 5);
+        ctx.moveTo(c + Math.cos(a) * r0, c + Math.sin(a) * r0);
+        ctx.lineTo(c + Math.cos(a) * r1, c + Math.sin(a) * r1);
+      }
       ctx.stroke();
     }
-    ctx.font = "800 11px 'Segoe UI', system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
     for (const [label, deg] of CARDINALS) {
       const a = (deg * Math.PI) / 180 - headingRad - Math.PI / 2;
-      const lx = c + Math.cos(a) * (R + 1), ly = c + Math.sin(a) * (R + 1);
-      ctx.fillStyle = "rgba(10, 6, 4, 0.9)";
-      ctx.beginPath();
-      ctx.arc(lx, ly, 7.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = label === "N" ? "#ff4b3a" : "#f2e6d8";
-      ctx.fillText(label, lx, ly + 0.5);
+      ctx.drawImage(this._cardinals[label], c + Math.cos(a) * (R + 1) - 8, c + Math.sin(a) * (R + 1) - 8, 16, 16);
     }
 
     // ── Heading readout (DOM, only when changed)

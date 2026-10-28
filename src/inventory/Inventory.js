@@ -1,6 +1,6 @@
 import {
   WEAPONS, WEAPON_ORDER, STARTING_WEAPONS, STARTING_WEAPON,
-  THROWABLES, THROWABLE_ORDER, MEDKIT, FUEL_CAN,
+  THROWABLES, THROWABLE_ORDER, MEDKIT, BISCUIT, FUEL_CAN,
   GEAR, ATTACHMENTS, ITEM_WEIGHT, BASE_CAPACITY,
 } from "../combat/weapons.js";
 import { weaponStats, fitsWeapon, attachSlotsFor } from "../items/ItemDefs.js";
@@ -13,10 +13,11 @@ const emptyAtt = () => ({ optic: null, muzzle: null, mag: null, grip: null });
  * - Guns: one of each type, each with its own magazine, reserve and
  *   attachments ({ optic, muzzle, mag, grip }); attachments travel with the
  *   gun when it's dropped.
- * - Backpack: stacks of throwables, medkits, petrol cans and loose
+ * - Backpack: stacks of throwables, medkits, Parle-G, petrol cans and loose
  *   attachments, limited by each kind's max and by weight vs capacity
  *   (BASE_CAPACITY + backpack + vest).
  * - Gear: helmet / vest / backpack slots, each { id, dur }.
+ * - Cash: rupees in the wallet (weightless; spent at the shops).
  *
  * Every change bumps `version` so the UI can skip work when nothing moved.
  * Methods that can fail return null / false or { error } and change nothing.
@@ -33,6 +34,9 @@ export class Inventory {
     if (!empty) for (const id of STARTING_WEAPONS) this._give(id, WEAPONS[id].magSize, WEAPONS[id].startReserve);
     for (const k of THROWABLE_ORDER) this.throwables[k] = empty ? 0 : THROWABLES[k].start;
     this.medkits = empty ? 0 : MEDKIT.start;
+    this.biscuits = empty ? 0 : BISCUIT.start;
+    // The wallet outlives a death in solo / co-op; a battle royale drop starts broke
+    if (empty || this.cash === undefined) this.cash = 0;
     this.fuelCans = 0;
     this.bag = {};                // loose attachments: id → count
     this.gear = { helmet: null, vest: null, backpack: null };
@@ -62,7 +66,7 @@ export class Inventory {
   get load() {
     let w = 0;
     for (const k of THROWABLE_ORDER) w += this.throwables[k] * (ITEM_WEIGHT[k] ?? 0);
-    w += this.medkits * ITEM_WEIGHT.medkit + this.fuelCans * ITEM_WEIGHT.fuel;
+    w += this.medkits * ITEM_WEIGHT.medkit + this.biscuits * ITEM_WEIGHT.biscuit + this.fuelCans * ITEM_WEIGHT.fuel;
     for (const [id, n] of Object.entries(this.bag)) w += n * (ITEM_WEIGHT[id] ?? 0);
     return w;
   }
@@ -84,6 +88,7 @@ export class Inventory {
   count(kind) {
     if (THROWABLES[kind]) return this.throwables[kind];
     if (kind === "medkit") return this.medkits;
+    if (kind === "biscuit") return this.biscuits;
     if (kind === "fuel") return this.fuelCans;
     if (ATTACHMENTS[kind]) return this.bag[kind] ?? 0;
     return 0;
@@ -93,6 +98,7 @@ export class Inventory {
   maxOf(kind) {
     if (THROWABLES[kind]) return THROWABLES[kind].max;
     if (kind === "medkit") return MEDKIT.max;
+    if (kind === "biscuit") return BISCUIT.max;
     if (kind === "fuel") return FUEL_CAN.max;
     if (ATTACHMENTS[kind]) return Infinity;
     return 0;
@@ -112,6 +118,7 @@ export class Inventory {
     if (take <= 0) return 0;
     if (THROWABLES[kind]) this.throwables[kind] += take;
     else if (kind === "medkit") this.medkits += take;
+    else if (kind === "biscuit") this.biscuits += take;
     else if (kind === "fuel") this.fuelCans += take;
     else if (ATTACHMENTS[kind]) this.bag[kind] = (this.bag[kind] ?? 0) + take;
     else return 0;
@@ -125,6 +132,7 @@ export class Inventory {
     if (take <= 0) return 0;
     if (THROWABLES[kind]) this.throwables[kind] -= take;
     else if (kind === "medkit") this.medkits -= take;
+    else if (kind === "biscuit") this.biscuits -= take;
     else if (kind === "fuel") this.fuelCans -= take;
     else if (ATTACHMENTS[kind]) {
       this.bag[kind] -= take;
@@ -393,5 +401,25 @@ export class Inventory {
 
   takeMedkit() {
     return this.removeStack("medkit", 1) > 0;
+  }
+
+  takeBiscuit() {
+    return this.removeStack("biscuit", 1) > 0;
+  }
+
+  // ── Wallet ──────────────────────────────────────────────────────────────────
+
+  addCash(amount) {
+    if (amount <= 0) return;
+    this.cash += Math.round(amount);
+    this._touch();
+  }
+
+  /** Pays if there's enough. Returns true if it did. */
+  spend(amount) {
+    if (amount > this.cash) return false;
+    this.cash -= amount;
+    this._touch();
+    return true;
   }
 }

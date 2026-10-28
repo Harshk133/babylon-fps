@@ -159,6 +159,7 @@ export class LootScreen {
       case "gear":
         return { sub: GEAR[e.kind].durability ? `Durability ${Math.round(d.dur ?? GEAR[e.kind].durability)} / ${GEAR[e.kind].durability}` : item.desc, qty: "" };
       case "ammo": return { sub: "Ammo for every gun", qty: "" };
+      case "cash": return { sub: "Walk over it to pocket it", qty: `₹${(d.count ?? 0).toLocaleString("en-IN")}` };
       default: return { sub: item.type === "attachment" ? ATTACH_SLOT_NAMES[ATTACHMENTS[e.kind].slot] : "", qty: (d.count ?? 1) > 1 ? `×${d.count}` : "" };
     }
   }
@@ -184,6 +185,7 @@ export class LootScreen {
   _renderBag() {
     const inv = this.inv;
     const groups = Object.fromEntries(GROUPS.map(g => [g, []]));
+    if (inv.biscuits) groups.Healing.push(this._row({ src: `data-src="bag" data-kind="biscuit"`, kind: "biscuit", name: ITEMS.biscuit.name, sub: "H to eat", qty: `×${inv.biscuits}` }));
     if (inv.medkits) groups.Healing.push(this._row({ src: `data-src="bag" data-kind="medkit"`, kind: "medkit", name: ITEMS.medkit.name, sub: "H to use", qty: `×${inv.medkits}` }));
     for (const k of THROWABLE_ORDER) {
       if (!inv.throwables[k]) continue;
@@ -195,7 +197,7 @@ export class LootScreen {
     for (const [k, n] of Object.entries(inv.bag)) {
       if (n > 0) groups.Attachments.push(this._row({ src: `data-src="bag" data-kind="${k}"`, kind: k, name: ITEMS[k].name, sub: ATTACH_SLOT_NAMES[ATTACHMENTS[k].slot], qty: n > 1 ? `×${n}` : "" }));
     }
-    if (inv.fuelCans) groups.Utility.push(this._row({ src: `data-src="bag" data-kind="fuel"`, kind: "fuel", name: ITEMS.fuel.name, sub: "T next to the rickshaw", qty: `×${inv.fuelCans}` }));
+    if (inv.fuelCans) groups.Utility.push(this._row({ src: `data-src="bag" data-kind="fuel"`, kind: "fuel", name: ITEMS.fuel.name, sub: "T next to a vehicle", qty: `×${inv.fuelCans}` }));
 
     // Ammo rides with each gun; listed here so you can see what you've got
     const ammo = inv.ownedWeapons.map(id => {
@@ -435,7 +437,7 @@ export class LootScreen {
     switch (src.from) {
       case "loot": res = this.actions.pickup(src.entry, { uid: src.uid, equip: true }); break;
       case "bag":
-        if (src.kind === "medkit") { this.cb.onUse("medkit"); return; }
+        if (src.kind === "medkit" || src.kind === "biscuit") { this.cb.onUse(src.kind); return; }
         if (src.kind === "fuel") { this.cb.onUse("fuel"); return; }
         if (THROWABLE_ORDER.includes(src.kind)) { this.cb.onSelectThrowable(src.kind); return; }
         if (ATTACHMENTS[src.kind]) {
@@ -468,6 +470,7 @@ export class LootScreen {
       }
       case "bag":
         if (src.kind === "medkit") items.push(["use", "Use"]);
+        if (src.kind === "biscuit") items.push(["use", "Eat"]);
         if (src.kind === "fuel") items.push(["use", "Fill the rickshaw"]);
         if (THROWABLE_ORDER.includes(src.kind) && inv.selectedThrowable !== src.kind) items.push(["select", "Ready to throw"]);
         if (ATTACHMENTS[src.kind]) for (const w of inv.ownedWeapons) if (inv.canAttach(w, src.kind)) items.push([`attach:${w}`, `Attach to ${WEAPONS[w].short}`]);

@@ -667,6 +667,35 @@ export function precomputeCaves() {
   for (const net of NETS) meshNet(net);
 }
 
+/**
+ * precomputeCaves() for a worker (world/cavesWorker.js): the results as plain
+ * data, with the typed arrays to transfer rather than copy.
+ */
+export function precomputeCavesData() {
+  precomputeCaves();
+  const transfer = new Set();
+  const nets = NETS.map(net => {
+    const m = net.mesh;
+    const mesh = { ...m, tris: Uint32Array.from(m.tris) };
+    for (const k of ["P", "col", "sky", "torch", "tris"]) transfer.add(mesh[k].buffer);
+    const v = t => [t.x, t.y, t.z];
+    return { mesh, torches: net.torches.map(t => ({ mount: v(t.mount), dir: v(t.dir), flame: v(t.flame), seed: t.seed })) };
+  });
+  return { nets, transfer: [...transfer] };
+}
+
+/** Takes what precomputeCavesData() made in a worker, as if precomputeCaves() had run here. */
+export function adoptCavesData(nets) {
+  if (_precomputed || nets.length !== NETS.length) return;
+  _precomputed = true;
+  nets.forEach((d, i) => {
+    const net = NETS[i];
+    net.mesh = d.mesh;
+    const v = a => new THREE.Vector3(a[0], a[1], a[2]);
+    net.torches = d.torches.map(t => ({ mount: v(t.mount), dir: v(t.dir), flame: v(t.flame), seed: t.seed, net }));
+  });
+}
+
 // ── The caves ────────────────────────────────────────────────────────────────
 export class Caves {
   /**
@@ -758,16 +787,30 @@ export class Caves {
     }
 
     // Colliders: static trimeshes chunked the same way (cannon keeps trimesh
-    // indices in an Int16Array, so each needs its own small vertex list)
+    // indices in an Int16Array, so each needs its own small vertex list).
+    // Each body sits at its chunk's centre with the vertices relative to it:
+    // the broadphase tests a bounding sphere round the body's position, and a
+    // body at the world origin would "touch" everything within ~200 m of it.
     for (const list of chunkTriangles(collide, P, net)) {
       const remap = new Map(), verts = [], idx = [];
+      let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
       for (const v of list) {
         let r = remap.get(v);
-        if (r === undefined) { r = remap.size; remap.set(v, r); verts.push(P[v * 3], P[v * 3 + 1], P[v * 3 + 2]); }
+        if (r === undefined) {
+          r = remap.size;
+          remap.set(v, r);
+          const x = P[v * 3], y = P[v * 3 + 1], z = P[v * 3 + 2];
+          verts.push(x, y, z);
+          x0 = Math.min(x0, x); y0 = Math.min(y0, y); z0 = Math.min(z0, z);
+          x1 = Math.max(x1, x); y1 = Math.max(y1, y); z1 = Math.max(z1, z);
+        }
         idx.push(r);
       }
       if (remap.size > 32767) console.warn("Caves: collider chunk too big", remap.size);
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, cz = (z0 + z1) / 2;
+      for (let i = 0; i < verts.length; i += 3) { verts[i] -= cx; verts[i + 1] -= cy; verts[i + 2] -= cz; }
       const body = new CANNON.Body({ mass: 0, material: physicsMaterial, collisionFilterGroup: GROUP_WORLD });
+      body.position.set(cx, cy, cz);
       body.addShape(new RockTrimesh(verts, idx));
       body.allowSleep = true;
       world.addBody(body);

@@ -6,10 +6,9 @@ import { ROAD_HALF, SHOULDER } from "./Roads.js";
 // open country around them). Everything is generated from a seed, so every
 // player and every quality preset builds the same world.
 //
-// A town lines its roads with buildings (houses, bungalows, cabins, corner
-// shops, three-storey apartments and warehouses, doors toward the street),
-// sits on its own levelled plateau, and walls some of them into compounds
-// with a gate toward the road. Farmsteads are houses, cottages and barns.
+// A town lines its roads with houses (all three kinds, doors toward the
+// street), sits on its own levelled plateau, and walls some of its houses
+// into compounds with a gate toward the road.
 
 /** Road centrelines (control points), in metres. The map's playable radius is ~230 m. */
 export const ROAD_DEFS = [
@@ -43,8 +42,7 @@ export const TOWNS = [
   { x: 2, z: 195, roads: [["North Road", 14]], density: 1, yards: 0.9 },
 ];
 
-const TOWN_KINDS = [["house", 0.27], ["bungalow", 0.18], ["cabin", 0.08], ["shop", 0.18], ["apartment", 0.17], ["warehouse", 0.12]];
-const FARM_KINDS = [["house", 0.3], ["bungalow", 0.28], ["cabin", 0.2], ["warehouse", 0.22]];
+const KIND_WEIGHTS = [["house", 0.4], ["bungalow", 0.35], ["cabin", 0.25]];
 const HOUSE_TINTS = [0xfff6e6, 0xffdcc0, 0xd6ead0, 0xd2e0f8, 0xf6d0cc, 0xf2e2b8, 0xffffff, 0xe8d8f0].map(c => new THREE.Color(c));
 const WALL_TINTS = [0xd9d2c4, 0xc7b29a, 0xb0a89c, 0xa86f55, 0xcfc6b0].map(c => new THREE.Color(c));
 const FRONT_GAP = 5.2;     // m between the road's edge and a house's front wall
@@ -54,21 +52,21 @@ const YARD_FRONT = 2.0;    // m of yard in front of the houses (the gate side)
 
 /**
  * Lays out every town. Pure geometry: the caller adds the houses and yards.
- *   roads: Roads. rng: seeded () → [0, 1). halfSize(kind) → { hw, hd, doorX } in metres.
+ *   roads: Roads. rng: seeded () → [0, 1). halfSize(kind) → { hw, hd } in metres.
  *   blocked(x, z, r): true where nothing may be built (caves, the map edge).
  *   keepClear: [{ x, z, r }] spots to leave alone (spawn, props, the rickshaw).
  *   heightAt(x, z): the natural ground (for each town's plateau level).
- * Returns { houses: [{ kind, x, z, rot, doorX, tint, town }], yards: [{ x, z, rot, hw, hd, gateX, tint, town }],
+ * Returns { houses: [{ kind, x, z, rot, tint, town }], yards: [{ x, z, rot, hw, hd, gateX, tint, town }],
  *           plateaus: [{ x, z, r, fade, y }], labels: [{ name, x, z }] }.
  */
 export function layoutTowns({ roads, rng, halfSize, blocked, keepClear, heightAt }) {
   const houses = [], yards = [], plateaus = [], labels = [];
   const at = {};
   const pick = list => list[Math.floor(rng() * list.length)];
-  const kindOf = weights => {
+  const kindOf = () => {
     let r = rng();
-    for (const [k, w] of weights) { if ((r -= w) < 0) return k; }
-    return weights[0][0];
+    for (const [k, w] of KIND_WEIGHTS) { if ((r -= w) < 0) return k; }
+    return KIND_WEIGHTS[0][0];
   };
 
   // Footprint corners of a house (or yard) in world space
@@ -108,8 +106,8 @@ export function layoutTowns({ roads, rng, halfSize, blocked, keepClear, heightAt
           else if (s < 0 || s > road.length) continue;
           roads.pointAt(road, s, at);
           const nx = at.tz, nz = -at.tx; // right of the road
-          const kind = kindOf(town.name ? TOWN_KINDS : FARM_KINDS);
-          const { hw, hd, doorX } = halfSize(kind);
+          const kind = kindOf();
+          const { hw, hd } = halfSize(kind);
           const off = ROAD_HALF + SHOULDER + FRONT_GAP + hd;
           const x = at.x + nx * off * side, z = at.z + nz * off * side;
           // Door (local +Z) toward the road
@@ -120,7 +118,7 @@ export function layoutTowns({ roads, rng, halfSize, blocked, keepClear, heightAt
           if (keepClear.some(k => Math.hypot(x - k.x, z - k.z) < k.r + r + 1.5)) continue;
           if (!clearOfRoads(corners(x, z, rot, hw, hd, 0.3))) continue;
           if ([...houses, ...placed].some(h => Math.hypot(h.x - x, h.z - z) < h.r + r + 3)) continue;
-          const h = { kind, x, z, rot, hw, hd, doorX, r, s, tint: pick(HOUSE_TINTS), town: town.name ?? null, base: plateau.y };
+          const h = { kind, x, z, rot, hw, hd, r, s, tint: pick(HOUSE_TINTS), town: town.name ?? null, base: plateau.y };
           placed.push(h);
           row.push(h);
         }
@@ -171,8 +169,9 @@ function fitYard(group, rng, pick) {
   const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
   // Back to world
   const x = ref.x + cx * c + cz * s, z = ref.z - cx * s + cz * c;
-  // Gate in front of the reference house's door
-  const gateX = Math.min(hw - 2.6, Math.max(-hw + 2.6, ref.doorX - cx));
+  // Gate in front of the reference house's door (house-local door x ≈ ±1.2 m)
+  const doorLocalX = ref.kind === "bungalow" ? -1.2 : 1.2;
+  const gateX = Math.min(hw - 2.6, Math.max(-hw + 2.6, doorLocalX - cx));
   return { x, z, rot, hw, hd, gateX, tint: pick(WALL_TINTS) };
 }
 
