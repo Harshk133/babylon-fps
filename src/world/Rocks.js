@@ -54,6 +54,7 @@ function instanced(scene, geos, material, list, castShadow) {
     mesh.receiveShadow = true;
     mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
+    mesh.userData.chunk = true; // split per map cell by main.js (WorldChunks)
     scene.add(mesh);
     return mesh;
   });

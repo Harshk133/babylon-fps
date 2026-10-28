@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { fbm, PLAY_RADIUS } from "./Terrain.js";
+import { fbm, SEA_Y } from "./Terrain.js";
 
 // Distant mountains. They live in their own scene, drawn first with a far
 // camera, then the depth buffer is cleared and the game scene is drawn on top
@@ -9,9 +9,13 @@ import { fbm, PLAY_RADIUS } from "./Terrain.js";
 // The sky dome joins this scene. The mountains are lit by a few uniforms
 // copied from the day/night lights (no real lights here) and fade into the
 // fog colour with distance, keeping the hazy horror skyline at night.
+//
+// The map is an island: the range is a far mainland coast across open sea
+// (it rises out of the water at INNER), and under everything is a sea-
+// coloured floor that carries on from the game scene's water past its far plane.
 
-const INNER = PLAY_RADIUS + 4;
-const OUTER = 1300;
+const INNER = 1000;
+const OUTER = 2000;
 const RINGS = 18;
 
 const VERT = /* glsl */ `
@@ -50,6 +54,8 @@ const FRAG = /* glsl */ `
   }
 `;
 
+const _sea = new THREE.Color(0x1d4a55);
+
 export class Backdrop {
   constructor({ segments = 160 }) {
     this.scene = new THREE.Scene();
@@ -70,7 +76,8 @@ export class Backdrop {
         // Rise from the border ridge to tall peaks, then fall away toward the horizon
         const profile = Math.sin(Math.min(1, t * 1.6) * Math.PI * 0.5) * (1 - t * 0.45);
         const ridge = 1 - Math.abs(fbm(Math.cos(a) * 5 + 40, Math.sin(a) * 5 + t * 3, 4, 101) * 2 - 1);
-        const y = 24 + profile * (60 + ridge * ridge * 210) + fbm(x / 60, z / 60, 3, 7) * 25;
+        // Out of the sea at the inner edge, up into the range
+        const y = SEA_Y - 4 + Math.min(1, t * 6) * 22 + profile * (60 + ridge * ridge * 210) + fbm(x / 60, z / 60, 3, 7) * 25 * Math.min(1, t * 6);
         const k = (j * (cols + 1) + i) * 3;
         pos[k] = x; pos[k + 1] = y; pos[k + 2] = z;
         const hN = Math.min(1, y / 240);
@@ -102,10 +109,10 @@ export class Backdrop {
     this.mountains.matrixAutoUpdate = false;
     this.scene.add(this.mountains);
 
-    // Fog-coloured ground out to the horizon, under the gap between the game's far plane and the range
+    // The sea out to the horizon, under the gap between the game's far plane and the range (hazed into the fog)
     this.floorMat = new THREE.MeshBasicMaterial({ color: 0x000000, fog: false });
     this.floor = new THREE.Mesh(new THREE.CircleGeometry(OUTER * 1.4, 48).rotateX(-Math.PI / 2), this.floorMat);
-    this.floor.position.y = -2;
+    this.floor.position.y = SEA_Y;
     this.floor.matrixAutoUpdate = false;
     this.floor.updateMatrix();
     this.scene.add(this.floor);
@@ -134,7 +141,7 @@ export class Backdrop {
     u.uLight.value.copy(sun.color).multiplyScalar(sun.intensity * 0.35);
     u.uAmbient.value.copy(hemi.color).multiplyScalar(hemi.intensity * 0.45);
     u.uHaze.value = 0.3 + darkness * 0.25;
-    this.floorMat.color.copy(fogColor);
+    this.floorMat.color.copy(fogColor).lerp(_sea, 0.35 * (1 - darkness * 0.6));
   }
 
   render(renderer) {

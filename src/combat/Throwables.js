@@ -65,9 +65,10 @@ export class Throwables {
       holder.visible = false;
       scene.add(holder);
 
-      const p = { body, holder, meshes, kind: null, active: false, age: 0, shatter: false, hitZombie: null, clink: 0 };
+      const p = { body, holder, meshes, kind: null, active: false, age: 0, shatter: false, landed: false, hitZombie: null, clink: 0 };
       body.addEventListener("collide", e => {
         if (!p.active || p.age <= 0.03) return;
+        if (p.kind === "grenade") p.landed = true;
         if (p.kind !== "molotov") {
           // Grenades and smoke cans clink as they bounce (not on every tiny roll)
           const v = body.velocity.length();
@@ -147,6 +148,7 @@ export class Throwables {
     p.active = true;
     p.age = 0;
     p.shatter = false;
+    p.landed = false;
     p.hitZombie = null;
     p.clink = 0;
     p.owner = owner;
@@ -237,6 +239,11 @@ export class Throwables {
       if (!p.active) continue;
       p.age += delta;
       const b = p.body;
+      if (p.landed) {
+        // A grenade stops dead where it lands (no bouncing or rolling off the target); it can only drop straight down
+        b.velocity.set(0, Math.min(0, b.velocity.y), 0);
+        b.angularVelocity.set(0, 0, 0);
+      }
       p.holder.position.set(b.position.x, b.position.y, b.position.z);
       p.holder.quaternion.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
 

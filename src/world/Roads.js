@@ -3,6 +3,7 @@ import * as CANNON from "cannon-es";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { GROUP_WORLD } from "../physicsGroups.js";
 import { QUALITY } from "../quality.js";
+import { shoreRadius } from "./Terrain.js";
 
 // Roads and the power line along them.
 //
@@ -242,6 +243,62 @@ export class Roads {
   }
 
   /**
+   * Wear on the asphalt: potholes (dark broken-edged dips) and patched
+   * squares, two instanced decal meshes laid on the road surface (no
+   * colliders, so they never upset driving). Fewer through the towns' level
+   * stretches, more out on the country roads. skip(x, z): none there (bridges).
+   */
+  buildPotholes(scene, rng, skip = () => false) {
+    const holes = [], patches = [];
+    const at = {};
+    this.roads.forEach((r, ri) => {
+      const lift = 0.07 + ri * 0.012 + 0.008;
+      for (let s = 6; s < r.length - 6; s += 9 + rng() * 14) {
+        this.pointAt(r, s, at);
+        const near = this.nearest(at.x, at.z);
+        if (near.road !== r) continue;            // a junction: the other road is on top
+        if (skip(at.x, at.z)) continue;
+        // Level stretches (towns) are kept better
+        const town = Math.abs(at.y - this.pointAt(r, s + 30, {}).y) < 0.01 && Math.abs(at.y - this.pointAt(r, s - 30, {}).y) < 0.01;
+        if (rng() < (town ? 0.8 : 0.25)) continue;
+        const across = (rng() * 2 - 1) * (ROAD_HALF - 0.9);
+        const nx = at.tz, nz = -at.tx;
+        const x = at.x + nx * across, z = at.z + nz * across, y = at.y + lift;
+        const yaw = Math.atan2(at.tx, at.tz) + (rng() - 0.5) * 0.5;
+        if (rng() < 0.7) holes.push({ x, y, z, yaw, sx: 0.7 + rng() * 0.8, sz: 0.55 + rng() * 0.7 });
+        else patches.push({ x, y: y - 0.002, z, yaw, sx: 1 + rng() * 1.6, sz: 0.8 + rng() * 1.8 });
+      }
+    });
+    // A pothole: jagged disc, darker in the middle (vertex colour), facing up
+    const holeGeo = new THREE.CircleGeometry(1, 12).rotateX(-Math.PI / 2);
+    const hp = holeGeo.attributes.position, col = new Float32Array(hp.count * 3);
+    for (let i = 0; i < hp.count; i++) {
+      const rim = i === 0 ? 0 : 0.75 + Math.sin(i * 2.7) * 0.15 + Math.cos(i * 5.1) * 0.1;
+      hp.setXYZ(i, hp.getX(i) * rim, 0, hp.getZ(i) * rim);
+      const k = i === 0 ? 0.2 : 0.6;
+      col.set([k, k, k], i * 3);
+    }
+    holeGeo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    const decal = (geo, color, list, vertexColors) => {
+      if (!list.length) return;
+      const mat = new THREE.MeshStandardMaterial({
+        color, roughness: 1, vertexColors,
+        polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+      });
+      const mesh = new THREE.InstancedMesh(geo, mat, list.length);
+      const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), p = new THREE.Vector3(), sc = new THREE.Vector3();
+      list.forEach((h, i) => mesh.setMatrixAt(i, m.compose(p.set(h.x, h.y, h.z), q.setFromAxisAngle(up, h.yaw), sc.set(h.sx, 1, h.sz))));
+      mesh.receiveShadow = true;
+      mesh.matrixAutoUpdate = false;
+      mesh.computeBoundingSphere();
+      scene.add(mesh);
+    };
+    decal(holeGeo, 0x2a2826, holes, true);
+    decal(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), 0x34312e, patches, false);
+    this.potholes = holes.length;
+  }
+
+  /**
    * Power poles every POLE_SPACING metres beside each road, with three sagging
    * wires between neighbours. blocked(x, z): no pole there (houses, yards,
    * rock). groundAt(x, z): height for the pole's foot. Each pole gets a
@@ -258,7 +315,7 @@ export class Roads {
         const x = at.x - nx * POLE_SIDE, z = at.z - nz * POLE_SIDE;
         // Not at junctions (another road close by), not in or against buildings
         const near = this.nearest(x, z);
-        const ok = near.road === r && near.d > POLE_SIDE - 0.5 && Math.hypot(x, z) < 232 && !blocked(x, z);
+        const ok = near.road === r && near.d > POLE_SIDE - 0.5 && Math.hypot(x, z) < shoreRadius(x, z) - 20 && !blocked(x, z);
         if (!ok) { prev = null; continue; }
         // Local +Z along the road, so the crossarm (local X) spans across it
         const pole = { x, z, y: groundAt(x, z), yaw: Math.atan2(at.tx, at.tz), road: r, s, prev, transformer: poles.length % 5 === 2 };
@@ -283,6 +340,7 @@ export class Roads {
     });
     dm.count = drums.length;
     for (const mesh of [im, dm]) {
+      mesh.userData.chunk = true; // split per map cell by main.js (WorldChunks)
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.computeBoundingSphere();

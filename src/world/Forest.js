@@ -121,6 +121,7 @@ export function plantDeadForest({
     mesh.receiveShadow = true;
     mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
+    mesh.userData.chunk = true; // split per map cell by main.js (WorldChunks)
     scene.add(mesh);
     return mesh;
   });
@@ -135,7 +136,7 @@ export function plantDeadForest({
     body.addShape(new CANNON.Cylinder(r * 0.8, r, trunkH, 8), new CANNON.Vec3(0, trunkH / 2, 0));
     body.position.set(p.x, groundHeight(p.x, p.z) - 0.15, p.z);
     world.addBody(body);
-    mapObstacles.push({ type: "circle", x: p.x, z: p.z, r: Math.max(0.6, r * 1.6) });
+    mapObstacles.push({ type: "circle", x: p.x, z: p.z, r: Math.max(0.6, r * 1.6), hit: r + 0.1 });
   }
   return { meshes, trees: placed };
 }

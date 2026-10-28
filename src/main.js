@@ -25,9 +25,16 @@ import { Environment } from "./world/Environment.js";
 import { Weather } from "./world/Weather.js";
 import { Atmosphere } from "./world/Atmosphere.js";
 import { plantDeadForest } from "./world/Forest.js";
-import { buildTerrain, groundHeight, flatHeight, rawHeight, PLAY_RADIUS } from "./world/Terrain.js";
+import { buildTerrain, groundHeight, flatHeight, rawHeight, PLAY_RADIUS, SEA_Y, shoreRadius, seaDepth } from "./world/Terrain.js";
+import { River } from "./world/River.js";
+import { Farmland, layoutFields } from "./world/Farmland.js";
+import { buildSea, buildBoats, waterUniforms } from "./world/Water.js";
+import { DustFX, DUST } from "./vehicles/DustFX.js";
+import { City } from "./world/City.js";
+import { Plots } from "./world/Plots.js";
+import { WorldChunks, splitInstanced } from "./world/Chunks.js";
 import { Roads, ROAD_HALF } from "./world/Roads.js";
-import { ROAD_DEFS, layoutTowns } from "./world/Towns.js";
+import { ROAD_DEFS, CITY, layoutTowns } from "./world/Towns.js";
 import { Backdrop } from "./world/Backdrop.js";
 import { Grass, GRASS_FLATTENERS } from "./world/Grass.js";
 import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves, adoptCavesData } from "./world/Caves.js";
@@ -36,7 +43,7 @@ import { COLLEGE_GATE, placeCollegeGate } from "./world/CollegeGate.js";
 import { loadIndiaModels } from "./world/IndiaAssets.js";
 import { propSpots, placeIndiaProps } from "./world/IndiaProps.js";
 import { mergeStaticMeshes } from "./world/MergeStatic.js";
-import { Vehicle, VEHICLES, standInJeep } from "./vehicles/Vehicle.js";
+import { Vehicle, VEHICLES, standInJeep, standInTractor } from "./vehicles/Vehicle.js";
 import { QUALITY, QUALITY_NAME, QUALITY_SETTING, QUALITY_PRESETS, saveQuality } from "./quality.js";
 import { Net } from "./net/Net.js";
 import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "./net/RemotePlayers.js";
@@ -106,7 +113,7 @@ const BACKPEDAL_SPEED     = 3.6;
 const STRAFE_SPEED        = 4.6;
 const SPRINT_SPEED        = 8.0;   // Shift + W, can't shoot while sprinting
 const AIM_MOVE_MULTIPLIER = 0.62;  // slower while aiming down sights
-const JUMP_VELOCITY       = 5.5;
+const JUMP_VELOCITY       = 7.2; // ~1.3 m with gravity 20 (was 5.5, ~0.75 m)
 const CHARACTER_HEIGHT    = 1.8;
 const CHARACTER_RADIUS    = 0.35;
 const CAPSULE_HEIGHT      = CHARACTER_HEIGHT - CHARACTER_RADIUS * 2;
@@ -121,20 +128,20 @@ const ROTATION_SPEED      = 16;
 const SHADOW_FRUSTUM_SIZE = 25;
 
 // ─── World Scatter Settings ───────────────────────────────────────────────────
-const BOULDER_COUNT      = 46;    // solid stones (same on every quality: they have colliders)
-const COVER_ROCK_COUNT   = 34;    // big rocks to hide behind (same on every quality too)
-const TREE_A_COUNT       = 5;
-const TREE_B_COUNT       = 4;
+const BOULDER_COUNT      = 110;    // solid stones (same on every quality: they have colliders)
+const COVER_ROCK_COUNT   = 80;    // big rocks to hide behind (same on every quality too)
+const TREE_A_COUNT       = 8;
+const TREE_B_COUNT       = 6;
 
 // Tree sizes in player heights (the soldier is CHARACTER_HEIGHT = 1.8 m tall),
 // so a tree always reads as a tree next to the player: 4–9× is 7–16 m.
 const TREE_A_HEIGHT_MUL  = [5, 8.5];   // old tree with vines
 const TREE_B_HEIGHT_MUL  = [3.5, 6];   // driftwood
-const DEAD_TREE_COUNT    = 130;
+const DEAD_TREE_COUNT    = 300;
 const DEAD_TREE_HEIGHT_MUL = [4, 8];
 
 const SCATTER_RADIUS_MIN = 18;
-const SCATTER_RADIUS_MAX = 200;
+const SCATTER_RADIUS_MAX = 360;
 
 // ─── Monster Settings ─────────────────────────────────────────────────────────
 // Per-type size, health, speed and senses live in zombies/MonsterTypes.js
@@ -743,7 +750,8 @@ function addTreeCollider(x, y, z, rotY, scale, trunkR, trunkH, crownR, crownY) {
   body.position.set(x, y, z);
   body.quaternion.setFromEuler(0, rotY, 0);
   world.addBody(body);
-  mapObstacles.push({ type: "circle", x, z, r: Math.max(0.8, crownR * scale * 0.7) });
+  // r: the canopy (maps); hit: the trunk, which is all a vehicle can bump into
+  mapObstacles.push({ type: "circle", x, z, r: Math.max(0.8, crownR * scale * 0.7), hit: trunkR * scale + 0.1 });
 }
 
 function addBoxCollider(x, y, z, rotY, scale, sizeX, sizeY, sizeZ, centreY) {
@@ -793,6 +801,23 @@ const planeMaterial = new THREE.MeshStandardMaterial({
   map: grassTexture, roughness: 0.95, metalness: 0.02,
   polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
 });
+// Bare ground: where the terrain's vertex colour leans brown (red over green:
+// field soil, dirt shoulders, river mud, sand, dry patches) the grass
+// texture loses its green and keeps only its detail, at about the grass's
+// brightness, so the tint reads as earth instead of olive grass.
+planeMaterial.onBeforeCompile = shader => {
+  shader.fragmentShader = shader.fragmentShader.replace("#include <map_fragment>", `
+    #ifdef USE_MAP
+      vec4 sampledDiffuseColor = texture2D( map, vMapUv );
+      #ifdef USE_COLOR
+        float bare = smoothstep( 0.015, 0.11, ( vColor.r - vColor.g ) / max( vColor.r, 0.05 ) );
+        float lum = dot( sampledDiffuseColor.rgb, vec3( 0.3, 0.59, 0.11 ) );
+        sampledDiffuseColor.rgb = mix( sampledDiffuseColor.rgb, vec3( lum * 1.8 ), bare );
+      #endif
+      diffuseColor *= sampledDiffuseColor;
+    #endif`);
+};
+planeMaterial.customProgramCacheKey = () => "ground-bare";
 
 // The rolling heightmap ground (world/Terrain.js) is built in loadWorld(),
 // once the houses are placed, because it flattens itself under them. This
@@ -1260,6 +1285,9 @@ function updateCharacterMovement(delta) {
     speed *= STANCES[stance].speed;
     speed *= analog;
   }
+  // Wading: knee-deep water halves your pace
+  const wade = waterDepthAt(characterBody.position.x, characterBody.position.z);
+  if (wade > 0.15) speed *= 1 - Math.min(0.55, wade * 0.6);
 
   // forward = (sin yaw, cos yaw), right = (−cos yaw, sin yaw)
   const sy = Math.sin(aimYaw), cy = Math.cos(aimYaw);
@@ -1579,7 +1607,8 @@ function updateMood(delta) {
   // Underground: how far from daylight the camera is (0 outside … 1 deep in a cave), eased
   const deep = caves ? caves.depthAt(camera.position.x, camera.position.y, camera.position.z) : 0;
   caveDepth += (deep - caveDepth) * (1 - Math.exp(-3 * delta));
-  indoor = !!houses?.houseAt(camera.position.x, camera.position.z) || !!indiaBuildings?.inside(camera.position.x, camera.position.z) || deep > 0.05;
+  indoor = !!houses?.houseAt(camera.position.x, camera.position.z) || !!indiaBuildings?.inside(camera.position.x, camera.position.z) || deep > 0.05
+    || !!city?.inside(camera.position.x, camera.position.z, camera.position.y - 1.6);
   env.update(delta, camera, weather);
   if (caveDepth > 0.001) dimUnderground(caveDepth);
   caves?.update(delta, camera.position, renderer.domElement.height);
@@ -1599,6 +1628,9 @@ function updateMood(delta) {
   _grassLight.add(_grassTint);
   grass.update(delta, camera.position, _grassLight, weather.wind, wetness);
   updateGrassTrample();
+  waterUniforms.uTime.value += delta;
+  farmland?.update(waterUniforms.uTime.value, weather.wind, camera.position.x, camera.position.z);
+  chunks.update(delta, camera.position.x, camera.position.z);
 
   // Rain soaks the ground (darker, glossier); it dries slowly
   wetness += ((weather.rain > 0.15 ? 1 : 0) - wetness) * (1 - Math.exp(-(weather.rain > 0.15 ? 0.08 : 0.02) * delta));
@@ -2402,6 +2434,7 @@ const lootRayOpts = { collisionFilterMask: GROUP_WORLD };
 
 // True if nothing but bare ground is under (x, z): keeps loot out of houses, trees and stones
 function isOpenGround(x, z) {
+  if (wetOrFarmed(x, z, 1)) return false;
   for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
     _lootFrom.set(x + ox, 40, z + oz);
     _lootTo.set(x + ox, -1, z + oz);
@@ -2433,6 +2466,12 @@ function spawnWorldLoot() {
   indiaBuildings?.lootSpots.forEach((sp, i) => {
     if (lootRng() < 0.4) return;
     const kind = HOUSE_LOOT[(i * 5 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
+    pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
+  });
+  // Shivpur's shops and rooftops, and the building sites
+  [...(city?.lootSpots ?? []), ...(plots?.lootSpots ?? [])].forEach((sp, i) => {
+    if (lootRng() < 0.45) return;
+    const kind = HOUSE_LOOT[(i * 7 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
     pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
   });
   // The caves are worth the walk: something in most chambers and junctions
@@ -2872,6 +2911,9 @@ function playerVisibility() {
   const floor = houses?.floorAt(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
   if (floor && !floor.lightOn) v *= 0.45;
   if (indiaBuildings?.inside(characterBody.position.x, characterBody.position.z)) v *= 0.7;
+  if (city?.inside(characterBody.position.x, characterBody.position.z, characterBody.position.y - FEET_OFFSET)) v *= 0.7;
+  // Deep in the sugarcane only movement gives you away
+  if (farmland?.inCane(characterBody.position.x, characterBody.position.z)) v *= sprinting ? 0.6 : 0.35;
   v *= STANCES[stance].vis;
   v *= 1 - env.darkness * (torch.level > 0.5 ? 0.1 : 0.5);
   v *= 1 - weather.rain * 0.25;
@@ -3098,6 +3140,7 @@ const worldMap = new WorldMap({
   vehicles: () => vehicles,
   br: () => (isBR() ? _mapState : null),
   height: (x, z) => (caves ? caves.mapHeight(x, z) : groundHeight(x, z)),
+  surface: (x, z) => mapSurface(x, z),
   caves: () => caveMapShapes,
   roads: () => roadLines,
   labels: () => townLabels,
@@ -3282,7 +3325,7 @@ function createEditableModel({
     get hd() { return size.z * params.scale / 2; },
   };
   if (trunkCollider) {
-    mapObstacles.push({ type: "circle", get x() { return footprint.x; }, get z() { return footprint.z; }, get r() { return footprint.hw * 0.5; } });
+    mapObstacles.push({ type: "circle", get x() { return footprint.x; }, get z() { return footprint.z; }, get r() { return footprint.hw * 0.5; }, get hit() { return footprint.hw * 0.12 + 0.1; } });
   } else {
     mapObstacles.push(footprint);
     navObstacles.push(footprint);
@@ -3368,6 +3411,11 @@ function setupGui() {
 let zombieManager = null;
 let houses = null;
 let roads = null;          // world/Roads.js, built in loadWorld()
+let river = null;          // world/River.js: the Sona River and the ponds, built in loadWorld()
+let farmland = null;       // world/Farmland.js: the fields between the towns, built in loadWorld()
+let city = null;           // world/City.js: Shivpur, built in loadWorld()
+let plots = null;          // world/Plots.js: walled plots and building sites along the roads
+const chunks = new WorldChunks(); // world/Chunks.js: far static meshes aren't drawn
 let collegeGate = null;    // world/CollegeGate.js, placed in loadWorld()
 let indiaModels = {};      // world/IndiaAssets.js: { rickshaw, thar, truck, … } (null where missing)
 let townLabels = [];       // town names for the world map
@@ -3507,6 +3555,7 @@ async function loadWorld() {
 
   // ── Towns and roads (world/Towns.js, world/Roads.js): the same map for every player
   roads = new Roads(ROAD_DEFS);
+  river = new River();
   // Where the rickshaws and Thars are parked, the dukaan stalls and the
   // Indian props stand (towns, trees, rocks and poles keep clear of them).
   // r: a radius round each one's footprint
@@ -3539,7 +3588,7 @@ async function loadWorld() {
   };
   const town = layoutTowns({
     roads, rng: makeLCG(0x7095a1), halfSize: houseHalfSize,
-    blocked: (x, z, r) => caveBlocks(x, z, r),
+    blocked: (x, z, r) => caveBlocks(x, z, r) || river.wet(x, z, r + 1) || Math.hypot(x, z) > shoreRadius(x, z) - 28 - r || inCityBox(x, z, r + 6),
     keepClear: [
       { x: 0, z: 0, r: 16 },                                   // spawn
       ...reserved.map(p => ({ x: p.x, z: p.z, r: p.r + 2.5 })), // parked vehicles, stalls, Indian props
@@ -3555,6 +3604,48 @@ async function loadWorld() {
   townLabels = town.labels;
   for (const h of town.houses) houses.add(h.x, h.z, h.rot, { type: h.kind, base: flatHeight(h.x, h.z, plateaus), tint: h.tint });
   for (const y of town.yards) houses.addCompound(y.x, y.z, y.rot, y.hw, y.hd, y.gateX, flatHeight(y.x, y.z, plateaus), y.tint);
+
+  // Shivpur, the city (world/City.js), on its own level plateau
+  const cityBase = rawHeight(CITY.x, CITY.z);
+  plateaus.push({ x: CITY.x, z: CITY.z, r: 88, fade: 34, y: cityBase });
+  townLabels.push({ name: CITY.name, x: CITY.x, z: CITY.z });
+  city = new City({
+    def: CITY, roads, rng: makeLCG(0x5141f0e), base: cityBase,
+    blocked: (x, z, r) => houses.blocks(x, z, r) || caveBlocks(x, z, r) || river.wet(x, z, r) || nearParked(x, z, r),
+  });
+
+  // Farmland between the towns (world/Farmland.js), and a farm shed (a cabin, with its loot spots) by some fields
+  const farmRng = makeLCG(0xfa53f1e1d);
+  // landClear: everything but the roads (plots stand right by them); farmClear: the fields keep off the roads too
+  const farmClear = (x, z, pad) => roads.onRoad(x, z, pad + 1) || landClear(x, z, pad);
+  const landClear = (x, z, pad) => houses.blocks(x, z, pad + 2) || houses.inYard(x, z, -pad)
+    || caveBlocks(x, z, pad + 4) || river.wet(x, z, pad) || nearParked(x, z, pad + 2)
+    || Math.hypot(x - COLLEGE_GATE.x, z - COLLEGE_GATE.z) < COLLEGE_GATE.clear + pad
+    || Math.hypot(x, z) < 34 || Math.hypot(x, z) > shoreRadius(x, z) - 30 - pad
+    || DEBRIS_SPOTS.some(([dx, dz]) => Math.hypot(dx - x, dz - z) < 5 + pad) || city.inArea(x, z, pad);
+  farmland = new Farmland(layoutFields({ rng: farmRng, roads, blocked: farmClear, count: 85 }));
+  const shedPads = [];
+  const shed = houseHalfSize("cabin");
+  for (const f of farmland.fields) {
+    if (f.kind === "ploughed" || farmRng() > 0.4) continue;
+    // Beside the field's near short end, door toward the field
+    const side = farmRng() < 0.5 ? -1 : 1;
+    const c = Math.cos(f.rot), sn = Math.sin(f.rot);
+    const lx = side * (f.hw + shed.hd + 2.5);
+    const x = f.x + lx * c, z = f.z - lx * sn;
+    const rot = f.rot + (side > 0 ? -Math.PI / 2 : Math.PI / 2);
+    const R = Math.hypot(shed.hw, shed.hd);
+    if (farmClear(x, z, R) || farmland.blocks(x, z, R)) continue;
+    const base = flatHeight(x, z, plateaus);
+    houses.add(x, z, rot, { type: "cabin", base, tint: FARM_TINT });
+    shedPads.push({ x, z, r: R + 1, fade: 6, y: base });
+  }
+  // Walled plots and building sites along the roads (world/Plots.js)
+  plots = new Plots({
+    roads, rng: makeLCG(0x9107517e),
+    blocked: (x, z, pad) => landClear(x, z, pad) || farmland.blocks(x, z, pad + 1) || Math.hypot(x, z) < 40
+      || shedPads.some(p => Math.hypot(p.x - x, p.z - z) < p.r + pad),
+  });
   houses.finalize();
   mapObstacles.push(...houses.mapObstacles());
 
@@ -3565,6 +3656,7 @@ async function loadWorld() {
     { x: 0, z: 0, r: 16, fade: 14 },                                                         // spawn + starter loot
     ...reserved.map(p => ({ x: p.x, z: p.z, r: p.r + 1, fade: 6, y: lvl(p.x, p.z) })),        // parked vehicles, stalls, props
     { x: COLLEGE_GATE.x, z: COLLEGE_GATE.z, r: COLLEGE_GATE.width / 2 + 2, fade: 12, y: lvl(COLLEGE_GATE.x, COLLEGE_GATE.z) }, // level under the gate
+    ...shedPads,                                                                               // farm sheds
   ];
   for (const o of mapObstacles) {
     if (o.house || o.wall || o.pole) continue;
@@ -3572,25 +3664,51 @@ async function loadWorld() {
     else pads.push({ x: o.x, z: o.z, r: 3, fade: 6, y: lvl(o.x, o.z) }); // the two hand-placed trees
   }
   for (const [x, z] of DEBRIS_SPOTS) pads.push({ x, z, r: 3, fade: 6, y: lvl(x, z) });
-  // Road profiles ride the padded ground, held level through the towns
-  roads.setProfile((x, z) => flatHeight(x, z, pads), plateaus);
+  // The river's water level follows the padded ground downhill to the sea; the
+  // roads ride the padded ground too (held level through the towns), humped
+  // over the river where they cross it on a causeway bridge
+  river.setProfile((x, z) => flatHeight(x, z, pads));
+  roads.setProfile((x, z) => flatHeight(x, z, pads) + river.bridgeLift(x, z), plateaus);
+  river.findCrossings(roads);
   roadLines = roads.mapLines();
   const propBoxes = mapObstacles.filter(o => o.type === "box" && !o.house && !o.wall);
-  buildTerrain({
+  const terrain = buildTerrain({
     scene, world, material: planeMaterial, physicsMaterial: groundMaterial, pads,
     renderStep: QUALITY.terrainStep,
-    // Roads level the ground under them; the ground sinks to the cave floors under the massifs
-    modify: (x, z, h) => caveTerrain(x, z, roads.modify(x, z, h)),
-    tint: (x, z, c) => roads.tint(x, z, c),
-    // No grass on roads, through floors, props, parked vehicles or rock; trimmed in yards
+    // The river carves its channel; roads level the ground under them (filling
+    // the channel at the bridges); the ground sinks to the cave floors under the massifs
+    modify: (x, z, h) => caveTerrain(x, z, roads.modify(x, z, river.modify(x, z, h))),
+    // Field soil, river mud, road shoulders, then sand and wet sand down the beach
+    tint: (x, z, c) => { farmland.tint(x, z, c); plots.tint(x, z, c); city.tint(x, z, c); river.tint(x, z, c); roads.tint(x, z, c); beachTint(x, z, c); },
+    // No grass on roads, through floors, props, parked vehicles, rock, water or sand; trimmed in yards; crops in the fields
     grassMask: (x, z) => {
       if (houses.blocks(x, z, 1.5) || nearParked(x, z, 0.3)) return 0;
-      if (roads.onRoad(x, z, 0.6)) return 0;
+      if (roads.onRoad(x, z, 0.6) || river.wet(x, z, -2.5) || city.inArea(x, z, -6)) return 0;
+      const beach = THREE.MathUtils.smoothstep(shoreRadius(x, z) - Math.hypot(x, z), BEACH_SAND - 2, BEACH_SAND + 6);
+      if (beach <= 0) return 0;
       for (const o of propBoxes) if (Math.hypot(x - o.x, z - o.z) < Math.hypot(o.w, o.d) / 2 + 1) return 0;
-      return (0.55 + fbmGrass(x, z) * 0.45) * caveGrass(x, z) * (houses.inYard(x, z) ? 0.3 : 1);
+      return (0.55 + fbmGrass(x, z) * 0.45) * caveGrass(x, z) * (houses.inYard(x, z) ? 0.3 : 1) * farmland.grass(x, z) * plots.grass(x, z) * beach;
     },
   });
   roads.buildMesh(scene);
+  for (const t of terrain.tiles) chunks.addMesh(t);
+  roads.buildPotholes(scene, makeLCG(0x907401e5), (x, z) => !!river.waterAt(x, z, 6));
+  // The water: the sea round the island, the river and ponds, the bridges over it
+  buildSea(scene);
+  river.buildMesh(scene);
+  river.buildBridges({ scene, world, material: staticMaterial, mapObstacles });
+  farmland.build(scene, makeLCG(0xc209f1e1d));
+  city.build({ scene, world, material: staticMaterial, mapObstacles, chunks });
+  plots.build({ scene, world, material: staticMaterial, mapObstacles, navObstacles, chunks });
+  // Fishing boats pulled up on the beach below Machhiwada
+  const boatSpots = [];
+  for (let i = 0; i < 7; i++) {
+    const a = Math.atan2(46, -400) + (i - 3) * 0.022, cx = Math.cos(a), cz = Math.sin(a);
+    const r = shoreRadius(cx, cz) - 5 - (i % 2) * 3;
+    boatSpots.push({ x: cx * r, z: cz * r, yaw: Math.PI / 2 - a + (i % 3 - 1) * 0.35 }); // bow up the beach
+  }
+  const boats = buildBoats({ scene, world, material: staticMaterial, spots: boatSpots, groundAt: groundHeight, mapObstacles });
+  if (boats) chunks.addMesh(boats);
 
   // The college gate across the North Road (after the terrain: it stands on it)
   if (gateGltf) {
@@ -3615,14 +3733,14 @@ async function loadWorld() {
   roads.buildPoles({
     scene, world, material: staticMaterial, mapObstacles, groundAt: groundHeight,
     blocked: (x, z) => houses.blocks(x, z, 1.2) || houses.inYard(x, z) || caveBlocks(x, z, 2) || nearGate(x, z, 1)
-      || nearParked(x, z, 2)
+      || nearParked(x, z, 2) || river.wet(x, z, 3) || farmland.blocks(x, z, 0.5) || city.blocks(x, z, 1) || plots.blocks(x, z, 0.5)
       || DEBRIS_SPOTS.some(([dx, dz]) => Math.hypot(dx - x, dz - z) < 4)
       || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2),
   });
 
   // Big trees stay out of houses (a scattered tree used to land on one)
   const keepClear = (list, pad) => list.filter(({ x, z }) => !houses.blocks(x, z, pad) && !caveBlocks(x, z, pad + 4)
-    && !roads.onRoad(x, z, pad) && !houses.inYard(x, z) && !nearGate(x, z, pad));
+    && !roads.onRoad(x, z, pad) && !houses.inYard(x, z) && !nearGate(x, z, pad) && !wetOrFarmed(x, z, pad));
   const treeAPositions = keepClear(scatterPositions(TREE_A_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 8), 5);
   const treeBPositions = keepClear(scatterPositions(TREE_B_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 7), 4);
 
@@ -3666,11 +3784,12 @@ async function loadWorld() {
   headlight = new THREE.SpotLight(0xffe6b8, 0, 52, 0.5, 0.5, 1.3);
   headlight.castShadow = false;
   scene.add(headlight, headlight.target);
-  const vehicleModels = { rickshaw: indiaModels.rickshaw ?? autoGltf?.scene ?? null, thar: indiaModels.thar ?? null };
+  const vehicleModels = { rickshaw: indiaModels.rickshaw ?? autoGltf?.scene ?? null, thar: indiaModels.thar ?? null, tractor: null };
+  const standIns = { thar: standInJeep, tractor: standInTractor };
   parked.forEach((spawn, index) => {
     const src = vehicleModels[spawn.kind];
     if (spawn.kind === "rickshaw" && !src) return;
-    const model = src ? src.clone(true) : standInJeep();
+    const model = src ? src.clone(true) : standIns[spawn.kind]();
     // The old free rickshaw model (the fallback) points its nose along +X
     const modelYaw = spawn.kind === "rickshaw" && !indiaModels.rickshaw ? -Math.PI / 2 : null;
     const v = new Vehicle({ scene, world, kind: spawn.kind, model, material: staticMaterial, spawn, index, standIn: !src, modelYaw });
@@ -3681,13 +3800,13 @@ async function loadWorld() {
   // Stones: boulders are solid and the same everywhere; pebbles follow the quality setting
   const keepOff = (x, z, pad) => Math.hypot(x, z) < 15 || houses.blocks(x, z, pad + 2) || nearObstacle(x, z, pad)
     || caveBlocks(x, z, pad + 2) || roads.onRoad(x, z, pad + 1) || houses.inYard(x, z) || nearGate(x, z, pad)
-    || nearParked(x, z, 3 + pad)
+    || nearParked(x, z, 3 + pad) || wetOrFarmed(x, z, pad)
     || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2 + pad)
     || fireSpots.some(f => Math.hypot(f.x - x, f.z - z) < 4 + pad);
   scatterRocks({
     scene, world, material: staticMaterial, mapObstacles,
     boulderRng: makeLCG(0xb01de55), pebbleRng: makeLCG(0x9ebb1e5), coverRng: makeLCG(0xc0fe12),
-    boulders: BOULDER_COUNT, pebbles: QUALITY.pebbles, cover: COVER_ROCK_COUNT, ringMin: 12, ringMax: 230,
+    boulders: BOULDER_COUNT, pebbles: QUALITY.pebbles, cover: COVER_ROCK_COUNT, ringMin: 12, ringMax: 440,
     blocked: (x, z, r) => keepOff(x, z, r),
   });
 
@@ -3695,16 +3814,60 @@ async function loadWorld() {
   plantDeadForest({
     scene, world, material: staticMaterial, rng: makeLCG(0x5eedf0e5),
     count: DEAD_TREE_COUNT, playerHeight: CHARACTER_HEIGHT, heightMul: DEAD_TREE_HEIGHT_MUL,
-    ringMin: 14, ringMax: 175, mapObstacles,
+    ringMin: 14, ringMax: 420, mapObstacles,
     blocked: (x, z) => Math.hypot(x, z) < 12 || houses.blocks(x, z, 4) || nearObstacle(x, z, 3.5) || caveBlocks(x, z, 4)
       || roads.onRoad(x, z, 3) || houses.inYard(x, z, -3) || nearGate(x, z, 2)
-      || nearParked(x, z, 5)
+      || nearParked(x, z, 5) || wetOrFarmed(x, z, 2)
       || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 3)
       || fireSpots.some(s => Math.hypot(s.x - x, s.z - z) < 5),
   });
+
+  // Rocks, dead trees and power poles were one instanced mesh each for the
+  // whole island: split them per map cell so far ones aren't drawn
+  const wide = [];
+  scene.traverse(o => { if (o.isInstancedMesh && o.userData.chunk) wide.push(o); });
+  for (const mesh of wide) for (const piece of splitInstanced(mesh)) chunks.addMesh(piece);
 }
 
 const DEBRIS_SPOTS = [[26, 12], [-31, 9], [9, -47], [-5, 39], [48, 30]];
+const FARM_TINT = new THREE.Color(0xe8dcc4);   // farm sheds: weathered whitewash
+
+/** True in the water, on a river bank, on the beach, in a field, the city or a plot (+ pad): no trees, rocks or loose loot there. */
+function wetOrFarmed(x, z, pad = 0) {
+  return !!river?.wet(x, z, pad) || !!farmland?.blocks(x, z, pad) || Math.hypot(x, z) > shoreRadius(x, z) - 14 - pad
+    || !!city?.inArea(x, z, pad) || !!plots?.blocks(x, z, pad);
+}
+
+/** Inside the city's box (before City is built: towns keep out of it). */
+function inCityBox(x, z, pad = 0) {
+  return x > CITY.x0 - 16 - pad && x < CITY.x1 + 16 + pad && z > CITY.z0 - 16 - pad && z < CITY.z1 + 16 + pad;
+}
+
+const _sand = new THREE.Color(1.0, 0.84, 0.55), _wetSand = new THREE.Color(0.62, 0.52, 0.38);
+const BEACH_SAND = 16;   // m of sand up from the waterline
+/** buildTerrain tint: a band of dry sand up from the waterline, wet sand under it. */
+function beachTint(x, z, c) {
+  const inland = shoreRadius(x, z) - Math.hypot(x, z);
+  if (inland > BEACH_SAND + 4) return;
+  const y = groundHeight(x, z);
+  c.lerp(_sand, THREE.MathUtils.smoothstep(BEACH_SAND + 4 - inland, 0, 5) * 0.92);
+  c.lerp(_wetSand, THREE.MathUtils.smoothstep(SEA_Y + 0.25 - y, 0, 0.6));
+}
+
+// World map colours: water (deep → shallow, flat) and each field's crop
+const MAP_WATER = [[24, 64, 82, 1], [44, 92, 98, 1]];
+const MAP_FIELD = { sugarcane: [70, 104, 40], wheat: [150, 128, 64], veg: [52, 86, 38], stubble: [128, 110, 70], ploughed: [96, 72, 50] };
+function mapSurface(x, z) {
+  const d = waterDepthAt(x, z);
+  if (d > 0.05) return MAP_WATER[d > 1.2 ? 0 : 1];
+  const f = farmland?._inField(x, z);
+  return f ? MAP_FIELD[f.kind] : null;
+}
+
+/** How deep the water is where you stand (sea, river or pond), 0 on dry land. */
+function waterDepthAt(x, z) {
+  return Math.max(0, seaDepth(x, z), river ? river.depthAt(x, z) : 0);
+}
 
 // ─── Tree LOD ─────────────────────────────────────────────────────────────────
 // The two tree models are ~85k and ~65k triangles: most of the frame's
@@ -4191,6 +4354,25 @@ const VEHICLE_SPAWNS = [
   { kind: "rickshaw", road: "North Road", near: [20, -134], side: 1 }, // Mill Creek
   { kind: "thar", road: "Highway", near: [-134, 11], side: -1 },      // Pine Hollow
   { kind: "rickshaw", road: "Highway", near: [-104, 5], side: 1 },
+  // Tractors at the farmsteads (appended: indices are on the wire)
+  { kind: "tractor", road: "Ring Road", near: [-112, 72], side: 1 },
+  { kind: "tractor", road: "Highway", near: [-168, 21], side: 1 },
+  { kind: "tractor", road: "Ring Road", near: [134, -90], side: -1 },
+  { kind: "tractor", road: "North Road", near: [3, 182], side: -1 },
+  { kind: "tractor", road: "Ring Road", near: [88, 64], side: 1 },
+  // Shivpur and the villages round the Outer Ring
+  { kind: "rickshaw", road: "Station Road", near: [316, 4], side: 1 },
+  { kind: "rickshaw", road: "Market Road", near: [366, -104], side: -1 },
+  { kind: "rickshaw", road: "Highway", near: [320, -51], side: 1 },
+  { kind: "thar", road: "Nehru Road", near: [342, -20], side: 1 },
+  { kind: "thar", road: "Outer Ring", near: [395, -70], side: -1 },
+  { kind: "rickshaw", road: "Highway", near: [-385, 45], side: 1 },
+  { kind: "thar", road: "North Road", near: [10, 340], side: -1 },
+  { kind: "rickshaw", road: "North Road", near: [38, -345], side: 1 },
+  { kind: "thar", road: "Outer Ring", near: [-330, 150], side: 1 },
+  { kind: "tractor", road: "Outer Ring", near: [-200, 295], side: 1 },
+  { kind: "tractor", road: "Outer Ring", near: [-140, -335], side: -1 },
+  { kind: "tractor", road: "Outer Ring", near: [240, 290], side: 1 },
 ];
 const PARK_OFFSET = 4.4;         // m from the road's centreline: on the shoulder, inside the power-pole line (5.9 m)
 const SEATED_HIP = 0.95;         // soldier hip height above the feet
@@ -4220,12 +4402,13 @@ function vehicleSpawns(roads) {
 /** True if a circle at (x, z) overlaps anything solid on the obstacle list (or the map edge). self: a vehicle to ignore. */
 function solidAt(x, z, r, self = null) {
   if (Math.hypot(x, z) > PLAY_RADIUS - r) return true;
+  if (seaDepth(x, z) > 0.7) return true; // nothing drives into the sea
   if (caves?.solidAt(x, z, r)) return true;
   for (const o of mapObstacles) {
     if (o.vehicle) continue;
     const dx = x - o.x, dz = z - o.z;
     if (o.type === "circle") {
-      const rr = o.r + r;
+      const rr = (o.hit ?? o.r) + r;
       if (dx * dx + dz * dz < rr * rr) return true;
       continue;
     }
@@ -4328,7 +4511,10 @@ function updateDriving(delta) {
     sfx.sputter();
     inventoryUI.feed(`Out of petrol! ${IS_TOUCH ? "Tap the petrol can in the hotbar" : "Press T with a petrol can"}`, "info", "fuel");
   }
-  const crash = car.drive(delta, { throttle, steer, handbrake: keys.jump }, solidAt);
+  const surf = surfaceAt(car.x, car.z);
+  const crash = car.drive(delta, { throttle, steer, handbrake: keys.jump, grip: surf.grip }, solidAt);
+  // Fording the river: the water drags at you
+  if (surf.water > 0.25) car.speed *= Math.exp(-Math.min(2.5, surf.water * 2) * delta);
   progress.drive(Math.abs(car.speed) * delta);
   jumpQueued = false;
   if (crash > 3) {
@@ -4391,10 +4577,30 @@ function vehicleAfterStep() {
 }
 
 /** Every vehicle's pose and lamps; the shared headlight goes to the closest one that's lit. */
+const dustFX = new DustFX(scene);
+const _surf = { grip: 1, amount: 0, color: DUST.dirt, smoke: DUST.smoke, water: 0 };
+/** What the wheels are on at (x, z): grip ×, how much dust it throws, its colour, water depth. */
+function surfaceAt(x, z) {
+  const s = _surf;
+  s.water = waterDepthAt(x, z);
+  if (s.water > 0.12) { s.grip = 0.55; s.amount = 0.8; s.color = DUST.splash; return s; }
+  if (roads?.distance(x, z) < ROAD_HALF - 0.3) { s.grip = 1; s.amount = 0; return s; }
+  if (groundHeight(x, z) < SEA_Y + 2.2) { s.grip = 0.6; s.amount = 0.9; s.color = DUST.sand; return s; }
+  if (farmland?.blocks(x, z)) { s.grip = 0.62; s.amount = 1; s.color = DUST.dry; return s; }
+  // Dirt shoulders and open country
+  const shoulder = roads?.onRoad(x, z, 0.5);
+  s.grip = shoulder ? 0.75 : 0.7;
+  s.amount = shoulder ? 1 : 0.7;
+  s.color = DUST.dirt;
+  return s;
+}
+
 function updateVehicles(delta) {
   let lit = null, litD = Infinity;
+  dustFX.update(delta, Math.min(1, 0.25 + sun.intensity * 0.3 + hemiLight.intensity * 0.3));
   for (const v of vehicles) {
     v.update(delta, env.darkness);
+    if (v.driver !== null && v.distanceTo(camera.position.x, camera.position.z) < 90) v.emitDust(dustFX, delta, surfaceAt(v.x, v.z));
     if (v.lightLevel > 0) {
       const d = v.distanceTo(camera.position.x, camera.position.z);
       if (d < litD) { lit = v; litD = d; }
@@ -4502,6 +4708,12 @@ function keepInBounds() {
     p.x *= PLAY_RADIUS / r;
     p.z *= PLAY_RADIUS / r;
   }
+  // The sea is too deep to wade past chest height: you're walked back toward the shore
+  if (!drive.on && seaDepth(p.x, p.z) > 1.1 && r > 1) {
+    let k = 1;
+    while (k > 0.6 && seaDepth(p.x * k, p.z * k) > 1.1) k -= 0.004;
+    p.x *= k; p.z *= k;
+  }
   if (drive.on || (isBR() && (br.ghost || br.flight === PHASE_PLANE))) return;
   const g = groundHeight(p.x, p.z);
   if (p.y < g + FEET_OFFSET - 0.6) {
@@ -4571,7 +4783,8 @@ const bots = new Bots({
   surfaceAt: (x, z, y, ground) => (houses ? houses.surfaceAt(x, z, y, ground) : ground),
   navigate: (x, z, tx, tz, out, y, ty) => (zombieManager?.navigate ? zombieManager.navigate(x, z, tx, tz, out, false, y, ty) : 0),
   solidAt: (x, z, r, self) => solidAt(x, z, r, self),
-  concealed: (a, b) => smokeFX.blocks(a, b),
+  // Smoke hides you, and so does standing deep in the sugarcane (unless they're right on top of you)
+  concealed: (a, b) => smokeFX.blocks(a, b) || (!!farmland?.inCane(b.x, b.z) && Math.hypot(a.x - b.x, a.z - b.z) > 8),
   shielded: (pos, x, y, z) => blastShielded(pos, x, y, z),
   now: () => clock.elapsedTime,
   dropSpots: () => pickups.active,
@@ -4809,6 +5022,8 @@ function brSpawnLoot(seed) {
   }
   for (const sp of caves?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   for (const sp of indiaBuildings?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
+  for (const sp of city?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
+  for (const sp of plots?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
     pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`, it.y ?? null);
   });
@@ -5819,7 +6034,8 @@ async function boot() {
     zombieManager.flyFloor = (x, z) => surfaceHeight(x, z);
     // House floors and stairs are walkable surfaces too (monsters follow you upstairs)
     zombieManager.surfaceAt = (x, z, y, ground) => houses.surfaceAt(x, z, y, ground);
-    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z);
+    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z)
+      && waterDepthAt(x, z) < 0.3 && Math.hypot(x, z) < shoreRadius(x, z) - 6 && !city?.blocks(x, z, 2);
     zombieManager.onDoorBang = (x, z) => {
       sfx.doorBang({ x, y: groundHeight(x, z) + 1.2, z });
     };

@@ -3,8 +3,9 @@ import * as CANNON from "cannon-es";
 import { groundHeight } from "../world/Terrain.js";
 import { GROUP_VEHICLE } from "../physicsGroups.js";
 import { mergeStaticMeshes } from "../world/MergeStatic.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
-// Drivable vehicles: the auto-rickshaw and the Mahindra Thar. Arcade handling
+// Drivable vehicles: the auto-rickshaw, the Mahindra Thar and a tractor. Arcade handling
 // (bicycle-model steering, no wheel physics): a vehicle follows the terrain by
 // sampling the ground under its wheels, and is stopped by anything on the
 // obstacle list (houses, trees, boulders). A kinematic box carries it in the
@@ -24,6 +25,10 @@ import { mergeStaticMeshes } from "../world/MergeStatic.js";
  * hits: collision probe circles along the length (z) and their radius.
  * box: collider half extents [x, y, z] and centre height. modelYaw: turn that
  * points the loaded model's nose at +z. tone: engine pitch (Sfx.setRickshaw).
+ * grip: sideways grip on asphalt (x g; the surface scales it, see drive()).
+ * slide: how fast it breaks into a slide past the grip. steerRate: how quickly
+ * the wheel turns. dust: puffs per m/s per wheel on loose ground (emitDust).
+ * spin: wheels built and spun by the vehicle itself [x, z, radius, width, front].
  */
 export const VEHICLES = {
   rickshaw: {
@@ -42,6 +47,7 @@ export const VEHICLES = {
     box: [0.66, 0.8, 1.3, 0.85],
     modelYaw: Math.PI,           // the Sketchfab tuk-tuk (public/models/india/autorickshaw.glb) faces −Z
     runOver: 5, tone: 1,
+    grip: 0.8, slide: 0.12, steerRate: 7, dust: 1.0,
   },
   thar: {
     label: "Thar",
@@ -59,6 +65,26 @@ export const VEHICLES = {
     box: [1.05, 1.05, 2.21, 1.11],
     modelYaw: Math.PI / 2,       // the Sketchfab Thar Roxx is modelled nose along −X
     runOver: 7, tone: 0.68,
+    grip: 0.95, slide: 0.14, steerRate: 7, dust: 1.4,
+  },
+  tractor: {
+    label: "tractor",
+    length: 3.7, width: 1.95,
+    maxSpeed: 11,         // m/s (~40 km/h): heavy and geared low
+    reverseSpeed: 4, accel: 3.4, brake: 7.5, coast: 0.9,
+    maxSteer: 0.62, wheelBase: 2.05,
+    fuelMax: 100, fuelStart: 70, burn: 0.7, idleBurn: 0.05, canFuel: 45,
+    enterRange: 3.6, headlight: 120,
+    seat: [0, 1.38, -0.62],
+    lamps: [[0.34, 1.22, 1.74], [-0.34, 1.22, 1.74]],
+    tails: [[0.62, 1.12, -1.5], [-0.62, 1.12, -1.5]],
+    wheels: { front: 1.2, rear: -0.85, track: 0.82 },
+    hits: { z: [-1.05, 0, 1.15], r: 0.98 },
+    box: [0.97, 0.95, 1.85, 1.0],
+    runOver: 6, tone: 0.5,
+    // Loose rear end: a sharp turn at speed on dirt swings the back out
+    grip: 0.72, slide: 0.2, steerRate: 4, dust: 2.4,
+    spin: [[0.86, -0.85, 0.78, 0.46, false], [-0.86, -0.85, 0.78, 0.46, false], [0.74, 1.2, 0.44, 0.28, true], [-0.74, 1.2, 0.44, 0.28, true]],
   },
 };
 
@@ -82,6 +108,61 @@ export function standInJeep() {
   for (const [x, z] of [[0.82, 1.3], [-0.82, 1.3], [0.82, -1.18], [-0.82, -1.18]]) {
     const w = new THREE.Mesh(wheel, dark); w.position.set(x, 0.4, z); g.add(w);
   }
+  return g;
+}
+
+/**
+ * A plain farm tractor (no brand): bonnet, cab frame, big rear wheels.
+ * The wheels are not in it: VEHICLES.tractor.spin has the vehicle build and turn them.
+ */
+export function standInTractor() {
+  const g = new THREE.Group();
+  const paint = new THREE.MeshStandardMaterial({ color: 0xb3261e, roughness: 0.55, metalness: 0.25 });
+  const metal = new THREE.MeshStandardMaterial({ color: 0x3a3c3e, roughness: 0.5, metalness: 0.6 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x1b1c1d, roughness: 0.85 });
+  const seatMat = new THREE.MeshStandardMaterial({ color: 0x2a2420, roughness: 0.9 });
+  const box = (w, h, d, x, y, z, m) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); g.add(o); return o; };
+  const cyl = (r, h, x, y, z, m, rotX = 0) => { const o = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 10), m); o.position.set(x, y, z); o.rotation.x = rotX; g.add(o); return o; };
+  box(0.78, 0.7, 1.75, 0, 1.0, 0.75, paint);            // bonnet
+  box(0.8, 0.12, 1.8, 0, 1.4, 0.73, paint);              // its lid
+  box(0.7, 0.45, 0.1, 0, 0.98, 1.66, dark);              // grille
+  box(0.64, 0.5, 1.5, 0, 0.6, 0.55, metal);              // engine block / frame
+  box(0.95, 0.6, 1.0, 0, 0.85, -0.55, metal);            // gearbox under the seat
+  for (const sx of [-1, 1]) {
+    box(0.5, 0.08, 1.3, 0.86 * sx, 1.62, -0.85, paint);  // rear mudguards
+    box(0.06, 0.5, 1.3, 0.62 * sx, 1.36, -0.85, paint);
+    box(0.06, 1.7, 0.08, 0.6 * sx, 2.25, -1.25, dark);   // roll frame posts
+  }
+  box(1.26, 0.08, 0.08, 0, 3.08, -1.25, dark);            // ...and its top bar
+  box(1.4, 0.06, 1.25, 0, 3.12, -0.75, paint);            // sun canopy
+  for (const sx of [-1, 1]) box(0.05, 0.05, 0.8, 0.6 * sx, 3.08, -0.85, dark);
+  box(0.52, 0.12, 0.48, 0, 1.25, -0.62, seatMat);         // seat
+  box(0.5, 0.45, 0.1, 0, 1.5, -0.88, seatMat);
+  cyl(0.035, 0.55, 0, 1.55, -0.05, dark, -0.6);           // steering column
+  const wheel = new THREE.Mesh(new THREE.TorusGeometry(0.19, 0.025, 6, 16), dark);
+  wheel.position.set(0, 1.78, -0.2); wheel.rotation.x = -Math.PI / 2 + 0.6; g.add(wheel);
+  cyl(0.05, 1.0, 0.28, 1.85, 1.15, metal);                // exhaust stack
+  cyl(0.07, 0.14, 0.28, 2.38, 1.15, dark);
+  box(1.6, 0.12, 0.12, 0, 0.55, 1.6, metal);              // front axle
+  box(0.4, 0.14, 0.2, 0, 0.5, -1.62, metal);              // tow hitch
+  return g;
+}
+
+const tyreMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.95 });
+const rimMat = new THREE.MeshStandardMaterial({ color: 0xc8a020, roughness: 0.5, metalness: 0.4 });
+
+/** A wheel the vehicle builds and turns itself (spec.spin): tyre, rim and lugs, merged. */
+function spinWheel(r, w) {
+  const parts = [new THREE.CylinderGeometry(r, r, w, 16).rotateZ(Math.PI / 2)];
+  // Lugs, so you can see it turning
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    parts.push(new THREE.BoxGeometry(w * 1.02, 0.07, r * 0.32).rotateX(-a).translate(0, Math.cos(a) * r, Math.sin(a) * r));
+  }
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(mergeGeometries(parts.map(p => p.toNonIndexed()), false), tyreMat));
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(r * 0.55, r * 0.55, w + 0.02, 10).rotateZ(Math.PI / 2), rimMat));
+  g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   return g;
 }
 
@@ -117,6 +198,17 @@ export class Vehicle {
     mergeStaticMeshes(holder); // one draw call per material, not per part
     this.root.add(holder);
     this.height = size.y * s;
+
+    // Wheels the vehicle turns itself (steer group > spinning tyre)
+    this.spinners = [];
+    for (const [x, z, r, w, front] of S.spin ?? []) {
+      const steer = new THREE.Group();
+      steer.position.set(x, r, z);
+      const tyre = spinWheel(r, w);
+      steer.add(tyre);
+      this.root.add(steer);
+      this.spinners.push({ steer, tyre, r, front });
+    }
 
     // Lamps just glow; the beam is a shared spotlight lent out by main.js (aimHeadlight),
     // since every light in the scene costs every pixel, lit or not
@@ -164,6 +256,9 @@ export class Vehicle {
     this.speed = 0;
     this.steer = 0;
     this.yawRate = 0;
+    this.slip = 0;            // m/s sideways (+ = to the left): the slide
+    this.skid = 0;            // how hard it's sliding (dust, tyre smoke)
+    this._dust = 0;
     this.fuel = this.spec.fuelStart;
     this.driver = null;
     this.throttle = 0;
@@ -185,7 +280,8 @@ export class Vehicle {
     const hR = groundHeight(this.x + fx * back - lx * track, this.z + fz * back - lz * track);
     const rear = (hL + hR) / 2;
     const pitch = Math.atan2(hF - rear, front - back);
-    const roll = Math.atan2(hL - hR, track * 2);
+    // Leans out of a slide (a little body roll you can feel)
+    const roll = Math.atan2(hL - hR, track * 2) - this.slip * 0.035;
     const y = rear + (hF - rear) * (-back / (front - back));
     if (delta > 0) {
       // A little suspension: ease into the new pose
@@ -201,9 +297,15 @@ export class Vehicle {
   }
 
   /**
-   * Local driving. input: { throttle −1..1, steer −1..1 (+ = left), handbrake }.
+   * Local driving. input: { throttle −1..1, steer −1..1 (+ = left), handbrake,
+   * grip: surface grip ×, 1 on asphalt (dirt, sand and water are lower) }.
    * blocked(x, z, r): true if a circle there hits something solid.
    * Returns the speed lost in a crash (0 if none).
+   *
+   * Steering is a bicycle model. When a turn asks for more sideways force than
+   * the tyres have (spec.grip × surface × g), the difference pushes the
+   * vehicle outward as `slip`, which the tyres then scrub off: a drift. The
+   * handbrake loosens the grip and lets the back step out.
    */
   drive(delta, input, blocked) {
     const R = this.spec;
@@ -225,17 +327,31 @@ export class Vehicle {
     v = Math.max(-R.reverseSpeed, Math.min(R.maxSpeed, v));
 
     const steerTarget = input.steer * R.maxSteer * (1 - 0.5 * Math.min(1, Math.abs(v) / R.maxSpeed));
-    this.steer += (steerTarget - this.steer) * (1 - Math.exp(-7 * delta));
-    const yawRate = (v * Math.tan(this.steer)) / R.wheelBase;
+    this.steer += (steerTarget - this.steer) * (1 - Math.exp(-(R.steerRate ?? 7) * delta));
+    const grip = (R.grip ?? 0.9) * (input.grip ?? 1) * (input.handbrake ? 0.5 : 1);
+    let yawRate = (v * Math.tan(this.steer)) / R.wheelBase;
+    // Sliding: the turn wants v·ω of sideways acceleration, the tyres give grip·g
+    const want = v * yawRate, have = grip * 9.8;
+    if (Math.abs(want) > have) {
+      this.slip -= Math.sign(want) * (Math.abs(want) - have) * (R.slide ?? 0.15) * delta;
+      if (input.handbrake) yawRate *= 1.15;
+    }
+    this.slip *= Math.exp(-grip * 2.6 * delta);
+    if (Math.abs(this.slip) < 0.01) this.slip = 0;
+    this.skid = Math.abs(this.slip);
     const yaw = this.yaw + yawRate * delta;
-    const nx = this.x + Math.sin(yaw) * v * delta;
-    const nz = this.z + Math.cos(yaw) * v * delta;
+    const sy = Math.sin(yaw), cy = Math.cos(yaw);
+    const nx = this.x + (sy * v + cy * this.slip) * delta;
+    const nz = this.z + (cy * v - sy * this.slip) * delta;
 
     let crash = 0;
-    if (this._blockedAt(nx, nz, yaw, blocked)) {
+    // Already wedged into something (parked, spawned or synced there): let it drive out, or it would never move again
+    const wedged = this._blockedAt(this.x, this.z, this.yaw, blocked);
+    if (!wedged && this._blockedAt(nx, nz, yaw, blocked)) {
       crash = Math.abs(v);
       this.speed = -v * 0.25; // bounce back a little
       this.yawRate = 0;
+      this.slip = 0;
     } else {
       this.x = nx; this.z = nz; this.yaw = yaw;
       this.speed = v;
@@ -311,6 +427,11 @@ export class Vehicle {
       b.aabbNeedsUpdate = true;
     }
 
+    for (const w of this.spinners) {
+      w.tyre.rotation.x += (this.speed / w.r) * delta;
+      if (w.front) w.steer.rotation.y = this.steer;
+    }
+
     const on = this.driver !== null && this.fuel > 0;
     const want = on && darkness > 0.4 ? 1 : 0;
     if (want || this.lightLevel > 0.001) {
@@ -329,6 +450,35 @@ export class Vehicle {
     light.target.position.set(0, 0.1, z + 14).applyMatrix4(this.root.matrixWorld);
     light.target.updateMatrixWorld();
     light.intensity = this.spec.headlight * this.lightLevel;
+  }
+
+  /**
+   * Dust behind the rear wheels. fx: DustFX. surface: { amount: 0 (asphalt)
+   * ... 1 (loose dirt), color, smoke } (DUST colours). Faster and sliding means
+   * more; on asphalt only a slide makes (tyre) smoke. Capped per frame.
+   */
+  emitDust(fx, delta, surface) {
+    const sp = Math.abs(this.speed);
+    const R = this.spec;
+    const rate = Math.max(0, sp - 1.2) * (R.dust ?? 1) * surface.amount + this.skid * (surface.amount > 0 ? 10 : 6);
+    if (rate <= 0.05) { this._dust = 0; return; }
+    this._dust = Math.min(6, this._dust + rate * 2 * delta);
+    const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
+    const { rear, track } = R.wheels;
+    const big = 0.7 + R.width * 0.25;
+    while (this._dust >= 1) {
+      this._dust -= 1;
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const x = this.x + sy * (rear - 0.3) + cy * track * side;
+      const z = this.z + cy * (rear - 0.3) - sy * track * side;
+      const back = -0.3 * this.speed, out = (Math.random() - 0.5) * 1.6 - this.slip * 0.4;
+      fx.emit(
+        x, this.y + 0.25, z,
+        sy * back + cy * out, 0.6 + Math.random() * 0.6, cy * back - sy * out,
+        big * (0.8 + Math.random() * 0.5) * (1 + this.skid * 0.12),
+        surface.amount > 0 ? surface.color : surface.smoke,
+      );
+    }
   }
 
   /** Re-pose and re-place the collider now (after a teleport: reset, a late joiner's world state). */

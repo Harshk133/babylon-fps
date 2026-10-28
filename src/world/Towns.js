@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { ROAD_HALF, SHOULDER } from "./Roads.js";
+import { shoreRadius } from "./Terrain.js";
 
 // The map's layout: the road network and the towns along it, in the spirit
 // of PUBG / Free Fire maps (named towns on a road grid, farmsteads between,
@@ -10,15 +11,50 @@ import { ROAD_HALF, SHOULDER } from "./Roads.js";
 // street), sits on its own levelled plateau, and walls some of its houses
 // into compounds with a gate toward the road.
 
-/** Road centrelines (control points), in metres. The map's playable radius is ~230 m. */
+/**
+ * Road centrelines (control points), in metres. The island's coast is ~430–505
+ * m out (Terrain.shoreRadius); open roads that reach the sea are cut back to
+ * END_INLAND short of it (toShore). The old middle of the map (Highway, North
+ * Road, Ring Road) is unchanged inside 232 m; the Outer Ring and Shivpur's
+ * streets serve the new country.
+ */
+const END_INLAND = 26;
 export const ROAD_DEFS = [
-  { name: "Highway", points: [[-232, 30], [-200, 25], [-120, 8], [-55, -4], [0, -6], [60, -12], [150, -30], [232, -42]] },
-  { name: "North Road", points: [[6, 232], [0, 170], [2, 128], [6, 70], [8, 20], [8, -6], [4, -60], [15, -110], [26, -150], [30, -232]] },
+  { name: "Highway", points: [[-470, 52], [-360, 44], [-290, 36], [-232, 30], [-200, 25], [-120, 8], [-55, -4], [0, -6], [60, -12], [150, -30], [232, -42], [300, -50], [380, -56], [470, -64]] },
+  { name: "North Road", points: [[14, 470], [12, 380], [8, 300], [6, 232], [0, 170], [2, 128], [6, 70], [8, 20], [8, -6], [4, -60], [15, -110], [26, -150], [30, -232], [36, -300], [40, -380], [44, -470]] },
   {
     name: "Ring Road", closed: true,
     points: [[2, 128], [50, 92], [115, 45], [150, -30], [125, -110], [26, -150], [-40, -120], [-75, -55], [-120, 8], [-110, 80], [-55, 120]],
   },
-];
+  {
+    name: "Outer Ring", closed: true,
+    points: [[395, 10], [395, -110], [300, -230], [170, -330], [30, -365], [-120, -340], [-250, -260], [-340, -130],
+      [-370, 20], [-330, 170], [-220, 280], [-80, 350], [60, 365], [200, 320], [310, 220], [380, 110]],
+  },
+  // Shivpur, the city: a grid of streets either side of the Highway (the Outer Ring is its east street)
+  { name: "Station Road", points: [[290, 4], [395, 4]] },
+  { name: "Market Road", points: [[290, -104], [395, -104]] },
+  { name: "Gandhi Road", points: [[290, 14], [290, -114]] },
+  { name: "Nehru Road", points: [[342, 14], [342, -114]] },
+].map(toShore);
+
+/** Pulls an open road's ends in to END_INLAND short of the coast (radially). */
+function toShore(def) {
+  if (def.closed) return def;
+  const pts = def.points.map(p => p.slice());
+  for (const i of [0, pts.length - 1]) {
+    const [x, z] = pts[i], r = Math.hypot(x, z), max = shoreRadius(x, z) - END_INLAND;
+    if (r > max) { pts[i][0] = x * max / r; pts[i][1] = z * max / r; }
+  }
+  return { ...def, points: pts };
+}
+
+/** The city: its centre and the box its blocks fill (City.js lays the buildings). */
+export const CITY = { name: "Shivpur", x: 342, z: -50, x0: 290, x1: 395, z0: -104, z1: 4, streets: ["Highway", "Station Road", "Market Road", "Gandhi Road", "Nehru Road", "Outer Ring"] };
+
+const KIND_WEIGHTS = [["house", 0.4], ["bungalow", 0.35], ["cabin", 0.25]];
+/** The fishing village: small one-room huts and bungalows. */
+const COAST_KINDS = [["cabin", 0.6], ["bungalow", 0.4]];
 
 /**
  * Towns: centre, the roads they line (± span metres of road), how full the
@@ -40,9 +76,19 @@ export const TOWNS = [
   { x: -180, z: 18, roads: [["Highway", 14]], density: 1, yards: 0.9 },
   { x: 205, z: -38, roads: [["Highway", 14]], density: 1, yards: 0.9 },
   { x: 2, z: 195, roads: [["North Road", 14]], density: 1, yards: 0.9 },
+  // The new country round the Outer Ring
+  { name: "Machhiwada", x: -400, z: 46, roads: [["Highway", 46], ["Outer Ring", 20]], density: 0.95, yards: 0.3, kinds: COAST_KINDS },
+  { name: "Rampur", x: 10, z: 360, roads: [["North Road", 40], ["Outer Ring", 34]], density: 0.9, yards: 0.5 },
+  { name: "Sonapur", x: 36, z: -362, roads: [["North Road", 40], ["Outer Ring", 34]], density: 0.9, yards: 0.5 },
+  { name: "Pahadi", x: -330, z: 170, roads: [["Outer Ring", 46]], density: 0.85, yards: 0.55 },
+  { x: -250, z: -260, roads: [["Outer Ring", 16]], density: 1, yards: 0.9 },
+  { x: 200, z: 320, roads: [["Outer Ring", 16]], density: 1, yards: 0.9 },
+  { x: -220, z: 280, roads: [["Outer Ring", 14]], density: 1, yards: 0.9 },
+  { x: 170, z: -330, roads: [["Outer Ring", 14]], density: 1, yards: 0.9 },
+  { x: -120, z: -340, roads: [["Outer Ring", 14]], density: 1, yards: 0.9 },
+  { x: 310, z: 220, roads: [["Outer Ring", 14]], density: 1, yards: 0.9 },
 ];
 
-const KIND_WEIGHTS = [["house", 0.4], ["bungalow", 0.35], ["cabin", 0.25]];
 const HOUSE_TINTS = [0xfff6e6, 0xffdcc0, 0xd6ead0, 0xd2e0f8, 0xf6d0cc, 0xf2e2b8, 0xffffff, 0xe8d8f0].map(c => new THREE.Color(c));
 const WALL_TINTS = [0xd9d2c4, 0xc7b29a, 0xb0a89c, 0xa86f55, 0xcfc6b0].map(c => new THREE.Color(c));
 const FRONT_GAP = 5.2;     // m between the road's edge and a house's front wall
@@ -63,10 +109,10 @@ export function layoutTowns({ roads, rng, halfSize, blocked, keepClear, heightAt
   const houses = [], yards = [], plateaus = [], labels = [];
   const at = {};
   const pick = list => list[Math.floor(rng() * list.length)];
-  const kindOf = () => {
+  const kindOf = (weights = KIND_WEIGHTS) => {
     let r = rng();
-    for (const [k, w] of KIND_WEIGHTS) { if ((r -= w) < 0) return k; }
-    return KIND_WEIGHTS[0][0];
+    for (const [k, w] of weights) { if ((r -= w) < 0) return k; }
+    return weights[0][0];
   };
 
   // Footprint corners of a house (or yard) in world space
@@ -106,7 +152,7 @@ export function layoutTowns({ roads, rng, halfSize, blocked, keepClear, heightAt
           else if (s < 0 || s > road.length) continue;
           roads.pointAt(road, s, at);
           const nx = at.tz, nz = -at.tx; // right of the road
-          const kind = kindOf();
+          const kind = kindOf(town.kinds);
           const { hw, hd } = halfSize(kind);
           const off = ROAD_HALF + SHOULDER + FRONT_GAP + hd;
           const x = at.x + nx * off * side, z = at.z + nz * off * side;
@@ -114,7 +160,7 @@ export function layoutTowns({ roads, rng, halfSize, blocked, keepClear, heightAt
           const rot = Math.atan2(-nx * side, -nz * side);
           const r = Math.hypot(hw, hd);
           if (town.clear && Math.hypot(x - town.x, z - town.z) < town.clear + r) continue;
-          if (Math.hypot(x, z) > 222 || blocked(x, z, r + 6)) continue;
+          if (blocked(x, z, r + 6)) continue;
           if (keepClear.some(k => Math.hypot(x - k.x, z - k.z) < k.r + r + 1.5)) continue;
           if (!clearOfRoads(corners(x, z, rot, hw, hd, 0.3))) continue;
           if ([...houses, ...placed].some(h => Math.hypot(h.x - x, h.z - z) < h.r + r + 3)) continue;

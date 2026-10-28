@@ -7,10 +7,10 @@
 // works with the real cursor, while the game keeps running underneath, as in
 // PUBG. Builds its own DOM and only redraws while open.
 
-import { groundHeight, PLAY_RADIUS } from "../world/Terrain.js";
+import { groundHeight, PLAY_RADIUS, SEA_Y } from "../world/Terrain.js";
 
-const WORLD_R   = 330;   // metres from the map centre to its edge at zoom 1
-const RELIEF_PX = 512;   // terrain picture resolution (rendered once, on first open)
+const WORLD_R   = 520;   // metres from the map centre to its edge at zoom 1
+const RELIEF_PX = 768;   // terrain picture resolution (rendered once, on first open)
 const REDRAW_HZ = 20;
 const PIN_HIT   = 24;    // px: tapping this close to your own pin lifts it
 const DRAG_PX   = 8;     // a press that moves further than this pans instead of pinning
@@ -46,6 +46,7 @@ export class WorldMap {
    *   br()        → { zone, next, route, plane } | null
    *   fights()    → [{ x, z, r }]                    red zones: players fighting
    *   height(x,z) → surface height for the relief (default: groundHeight)
+   *   surface(x,z) → [r, g, b] (0..255) to paint there instead (water, fields), or null
    *   caves()     → [{ name, x, z, tunnels: [[ax, az, bx, bz]], mouths: [{ x, z }] }]
    * opts: { touch, onPin(x, z), onClear(), onClose() }
    */
@@ -285,7 +286,7 @@ export class WorldMap {
         const v = (this.sources.height ?? groundHeight)(WORLD_R - (i + 0.5) * step, z);
         h[j * N + i] = v;
         // Height range of the playable land only (the edge ridges would wash it out)
-        if (Math.hypot(WORLD_R - (i + 0.5) * step, z) < PLAY_RADIUS) { if (v < lo) lo = v; if (v > hi) hi = v; }
+        if (Math.hypot(WORLD_R - (i + 0.5) * step, z) < PLAY_RADIUS && v > SEA_Y + 0.5) { if (v < lo) lo = v; if (v > hi) hi = v; }
       }
     }
     const span = Math.max(1, hi - lo);
@@ -301,6 +302,12 @@ export class WorldMap {
         // Low: dark olive grass; high: dry brown; a little contour banding
         let r = 46 + t * 70, gg = 58 + t * 46, b = 34 + t * 34;
         if (Math.abs(((h[k] - lo) % 4) - 2) < 0.12) { r *= 0.86; gg *= 0.86; b *= 0.86; }
+        // Water and fields have their own colours (water lies flat: no shading)
+        const paint = this.sources.surface?.(x, z);
+        if (paint) {
+          r = paint[0]; gg = paint[1]; b = paint[2];
+          if (paint[3]) { img.data[k * 4] = r; img.data[k * 4 + 1] = gg; img.data[k * 4 + 2] = b; img.data[k * 4 + 3] = 255; continue; }
+        }
         const out = Math.hypot(x, z) > PLAY_RADIUS;
         const dim = out ? 0.38 : 1;
         img.data[k * 4]     = Math.min(255, r * shade * dim);
@@ -337,7 +344,7 @@ export class WorldMap {
     ctx.strokeStyle = "rgba(255, 245, 225, 0.09)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let g = -300; g <= 300; g += cell) {
+    for (let g = -500; g <= 500; g += cell) {
       ctx.moveTo(X(g), 0); ctx.lineTo(X(g), S);
       ctx.moveTo(0, Y(g)); ctx.lineTo(S, Y(g));
     }

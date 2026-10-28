@@ -11,10 +11,10 @@ export const BR_WARMUP_RESPAWN = 3;       // dying in the warm-up just puts you 
 export const PLANE = {
   altitude: 95,        // metres
   speed: 34,           // m/s
-  halfLength: 270,     // route runs from −halfLength to +halfLength along its line
-  maxOffset: 70,       // how far the route may pass from the centre of the map
+  halfLength: 500,     // route runs from −halfLength to +halfLength along its line
+  maxOffset: 150,      // how far the route may pass from the centre of the map
   jumpDelay: 1.5,      // seconds before the door opens
-  ejectRadius: 200,    // past the centre, everyone still aboard is pushed out here (well inside the first zone)
+  ejectRadius: 360,    // past the centre, everyone still aboard is pushed out here (well inside the first zone)
 };
 export const FREEFALL = {
   fall: 20, dive: 34,           // m/s down: normal / holding W
@@ -26,10 +26,11 @@ export const FREEFALL = {
 export const CHUTE = { fall: 5.5, speed: 9, steer: 1.6 };
 
 // ── The zone ──────────────────────────────────────────────────────────────────
-export const ZONE_START_RADIUS = 250;
+export const ZONE_START_RADIUS = 470;
 /** wait: seconds before it moves · shrink: seconds to close to `radius` · dps outside. */
 export const ZONE_PHASES = [
-  { wait: 75, shrink: 45, radius: 150, dps: 2 },
+  { wait: 100, shrink: 70, radius: 260, dps: 1 },
+  { wait: 70, shrink: 55, radius: 150, dps: 2 },
   { wait: 50, shrink: 40, radius: 95,  dps: 3 },
   { wait: 40, shrink: 35, radius: 58,  dps: 5 },
   { wait: 32, shrink: 30, radius: 30,  dps: 8 },
@@ -45,16 +46,20 @@ export const PVP_HEADSHOT = { pistol: 1.8, smg: 1.6, shotgun: 1.4, rifle: 1.8, s
 export const PVP_HEAD_Y = 1.45;
 
 // ── Loot ─────────────────────────────────────────────────────────────────────
-/** Ground loot scattered over the map: kind → count. */
+/**
+ * Ground loot scattered over open country: kind → count. Most loot is
+ * indoors (BR_HOUSE_LOOT on every house, shed, shop and cave spot); this is
+ * only enough to make a long run across the fields worth a detour.
+ */
 export const BR_FIELD_LOOT = {
-  pistol: 8, smg: 8, shotgun: 7, rifle: 7, sniper: 3,
-  ammo: 26, grenade: 12, molotov: 10, smoke: 12, medkit: 16, fuel: 8, biscuit: 30, cash: 36,
-  helmet1: 8, helmet2: 5, helmet3: 2, vest1: 8, vest2: 5, vest3: 2, backpack1: 8, backpack2: 5, backpack3: 2,
-  reddot: 6, scope4x: 4, compensator: 4, suppressor: 3, extmag: 5, grip: 4,
+  pistol: 8, smg: 3, shotgun: 3, rifle: 2, sniper: 1,
+  ammo: 18, grenade: 5, molotov: 5, smoke: 6, medkit: 8, fuel: 16, biscuit: 20, cash: 24,
+  helmet1: 3, vest1: 3, backpack1: 3,
+  reddot: 1, compensator: 1, extmag: 1,
 };
 /** What a house spot can roll (weighted by repeats). */
 export const BR_HOUSE_LOOT = ["ammo", "ammo", "medkit", "medkit", "grenade", "molotov", "smoke", "helmet1", "vest1", "backpack1", "helmet2", "vest2", "reddot", "extmag", "grip", "smg", "shotgun", "rifle", "pistol", "sniper", "fuel", "biscuit", "biscuit", "cash", "cash"];
-export const BR_LOOT_RADIUS = 200;
+export const BR_LOOT_RADIUS = 420;
 /** Spare rounds that come with a gun found on the ground. */
 export const BR_GUN_RESERVE = { pistol: 24, smg: 64, shotgun: 10, rifle: 45, sniper: 6 };
 
@@ -104,7 +109,7 @@ export function zoneCircles(seed) {
     const a = rng() * Math.PI * 2, d = Math.sqrt(rng()) * room;
     let x = prev.x + Math.cos(a) * d, z = prev.z + Math.sin(a) * d;
     // …and stays over the part of the map that has things on it
-    const far = Math.hypot(x, z), lim = 150;
+    const far = Math.hypot(x, z), lim = 330;
     if (far > lim) { x *= lim / far; z *= lim / far; }
     circles.push({ x, z, r: p.radius });
   }
@@ -158,7 +163,7 @@ export function lootPlan(seed, houseSpots, isOpen) {
   const rng = makeRng(seed ^ 0x100ed);
   const out = [];
   for (const s of houseSpots) {
-    if (rng() < 0.25) continue;
+    if (rng() < 0.12) continue;
     out.push({ kind: BR_HOUSE_LOOT[Math.floor(rng() * BR_HOUSE_LOOT.length)], x: s.x, y: s.y, z: s.z });
   }
   for (const [kind, count] of Object.entries(BR_FIELD_LOOT)) {
