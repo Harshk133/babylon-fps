@@ -65,6 +65,18 @@ function part(group, geo, mat, x, y, z, rotZ = 0) {
 const box = (g, w, h, d, mat, x, y, z, rotZ) => part(g, boxGeo(w, h, d), mat, x, y, z, rotZ);
 const barrel = (g, r, len, mat, x, y, z) => part(g, cylGeo(r, r, len, true), mat, x, y, z);
 
+/** A scope: tube on two rings, a wider objective bell in front (+X), an eyepiece behind. */
+function opticTube(len, r, bell) {
+  const g = new THREE.Group();
+  barrel(g, r, len, MAT.polymer, 0, 0.034, 0);
+  barrel(g, bell, len * 0.24, MAT.polymer, len * 0.5, 0.034, 0);
+  barrel(g, r * 1.2, len * 0.18, MAT.polymer, -len * 0.5, 0.034, 0);
+  part(g, new THREE.CircleGeometry(bell * 0.86, 14).rotateY(Math.PI / 2), MAT.lens, len * 0.62 + 0.001, 0.034, 0);
+  for (const x of [-len * 0.22, len * 0.22]) box(g, 0.018, 0.028, r * 2.2, MAT.metal, x, 0.012, 0);
+  box(g, len * 0.7, 0.012, 0.024, MAT.metal, 0, 0, 0);
+  return g;
+}
+
 function gun(muzzleX, boreY, build) {
   const g = new THREE.Group();
   build(g);
@@ -161,6 +173,24 @@ const BUILDERS = {
     barrel(g, 0.026, 0.035, MAT.polymer, -0.07, 0.03, 0);
     part(g, new THREE.CircleGeometry(0.024, 12).rotateY(Math.PI / 2), MAT.lens, 0.091, 0.03, 0);
     box(g, 0.1, 0.02, 0.025, MAT.metal, 0, 0, 0);
+    return g;
+  },
+  holo: () => {
+    const g = new THREE.Group();
+    box(g, 0.08, 0.02, 0.04, MAT.polymer, 0, 0, 0);
+    // The open window: two posts and a hood, the glass between them
+    box(g, 0.012, 0.05, 0.006, MAT.polymer, 0.02, 0.035, 0.022);
+    box(g, 0.012, 0.05, 0.006, MAT.polymer, 0.02, 0.035, -0.022);
+    box(g, 0.05, 0.008, 0.05, MAT.polymer, 0.005, 0.062, 0);
+    box(g, 0.004, 0.038, 0.038, MAT.lens, 0.022, 0.036, 0);
+    part(g, new THREE.TorusGeometry(0.008, 0.0015, 4, 14).rotateY(Math.PI / 2), MAT.dot, 0.019, 0.036, 0);
+    return g;
+  },
+  scope2x: () => opticTube(0.11, 0.019, 0.022),
+  scope6x: () => opticTube(0.2, 0.023, 0.032),
+  scope8x: () => {
+    const g = opticTube(0.26, 0.024, 0.036);
+    barrel(g, 0.012, 0.03, MAT.metal, 0, 0.065, 0).rotation.set(0, 0, Math.PI / 2);   // elevation turret
     return g;
   },
   compensator: () => {

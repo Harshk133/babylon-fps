@@ -1,0 +1,71 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Soldier animation test</title>
+<style>html,body{margin:0;height:100%;background:#8aa;overflow:hidden}#lbl{position:fixed;left:8px;top:6px;font:14px monospace;color:#fff;text-shadow:0 1px 2px #000}</style></head>
+<body><div id="lbl"></div>
+<script type="module">
+// Dev test: one Soldier driven by the same update() input the game sends, on a
+// scripted timeline, with the camera behind the right shoulder like the game.
+//   window.run(script) — script: [[seconds, { fwd, right, aim, fire, stance, yawOff, pitch }]…]
+//   window.step(dt)    — advances one frame and renders
+//   ?char=0..3  ?view=back|side|front
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { Soldier } from "/src/player/Soldier.js";
+import { loadExtraAnimations } from "/src/player/MixamoAssets.js";
+
+const q = new URLSearchParams(location.search);
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8aa0b0);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.5); sun.position.set(2, 4, 5); scene.add(sun);
+const grid = new THREE.GridHelper(40, 40, 0x223344, 0x445566); scene.add(grid);
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+const s = new Soldier({ avatar: { char: +(q.get("char") ?? 0), top: 0, bottom: 0, shoes: 0, hair: 0 } });
+await s.load(loader);
+await loadExtraAnimations(loader);
+scene.add(s.root);
+window.__sol = s;
+window.__V3 = THREE.Vector3;
+const view = q.get("view") ?? "back";
+let input = { fwd: 0, right: 0, aim: false, fire: false, yawOff: 0, pitch: 0 };
+window.step = (dt = 1 / 60) => {
+  // Feet stay put on the grid (the grid moves instead), so the camera can stay fixed
+  grid.position.z = (grid.position.z - input.fwd * dt) % 1;
+  grid.position.x = (grid.position.x + input.right * dt) % 1;
+  s.stance = input.stance ?? "stand";
+  s.update(dt, { localForward: input.fwd, localRight: input.right, aiming: input.aim, firing: input.fire,
+    aimYawOffset: input.yawOff ?? 0, aimPitch: input.pitch ?? 0, health: 1, air: input.air ?? 0, swim: !!input.swim, throwHold: !!input.throwHold, noSpine: !!input.noSpine });
+  if (view === "side") camera.position.set(4.5, 1.4, 0.3);
+  else if (view === "front") camera.position.set(0.4, 1.5, 4);
+  else camera.position.set(-0.55, 1.75, -2.6);
+  camera.lookAt(view === "back" ? 0.2 : 0, 1.2, view === "back" ? 2 : 0);
+  renderer.render(scene, camera);
+  document.getElementById("lbl").textContent = JSON.stringify(input);
+};
+window.set = o => { input = { ...input, ...o }; };
+// ?laser: a red line along the barrel the aim code uses (Soldier.barrel), from the hand
+if (q.has("laser")) {
+  const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xff0000, depthTest: false }));
+  line.renderOrder = 9; scene.add(line);
+  const _step = window.step;
+  window.step = dt => {
+    const p = s.weapon.getWorldPosition(new THREE.Vector3());
+    const d = s.barrel.clone().applyQuaternion(s.weapon.getWorldQuaternion(new THREE.Quaternion()));
+    geo.attributes.position.setXYZ(0, p.x, p.y, p.z);
+    geo.attributes.position.setXYZ(1, p.x + d.x * 3, p.y + d.y * 3, p.z + d.z * 3);
+    geo.attributes.position.needsUpdate = true;
+    _step(dt);
+  };
+}
+if (q.has("unarmed")) s.setWeapon(null);
+if (q.get("gun")) s.setWeapon(q.get("gun"));
+window.ready = true;
+step(0);
+</script></body></html>

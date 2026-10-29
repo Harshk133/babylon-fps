@@ -2173,64 +2173,134 @@ body.touch #streak .streak-sub { font-size: 16px; }
 }
 body.touch #xp-toasts { top: 22%; zoom: 0.85; }
 
-/* ── Sniper scope ─────────────────────────────────────────────────────────── */
-/* The zoomed view fills the whole screen (as in PUBG / Free Fire): a fine
-   reticle over it, a faint lens ring and a soft vignette at the edges, never
-   a black mask. */
+/* ── Scopes (src/ui/ScopeOverlay.js) ──────────────────────────────────────── */
+/* The live zoomed view shows through a round lens; round it the scope tube
+   (--housing: how dark), blurred world where the tube is see-through enough.
+   --lens: lens radius (px). --k: 0..1 fade, --s: lens scale while the scope
+   comes up to the eye. */
 #scope-overlay {
-  --lens: min(46vw, 46vh);
+  --lens: 300px;
+  --housing: 0.9;
+  --k: 0;
+  --s: 1;
   position: fixed;
   inset: 0;
   z-index: 115;
   pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.1s linear;
-  background:
-    radial-gradient(ellipse at 50% 50%, transparent 58%, rgba(0, 6, 10, 0.32) 88%, rgba(0, 6, 10, 0.5) 100%);
+  opacity: var(--k);
+  visibility: hidden;
 }
-#scope-overlay.on { opacity: 1; }
-/* Lens ring: a thin glassy edge with a hint of chromatic tint, nothing outside it is hidden */
+#scope-overlay.on { visibility: visible; }
+#scope-overlay .scope-housing,
+#scope-overlay .scope-blur {
+  position: absolute;
+  inset: 0;
+}
+/* The tube: dark from just outside the lens, darkest at the screen edges */
+#scope-overlay .scope-housing {
+  background: radial-gradient(circle at 50% 50%,
+    transparent calc(var(--lens) * var(--s) - 1px),
+    rgba(4, 4, 5, var(--housing)) calc(var(--lens) * var(--s) + 2px),
+    rgba(0, 0, 0, calc(var(--housing) * 0.9 + 0.1)) calc(var(--lens) * var(--s) * 1.5));
+}
+#scope-overlay .scope-blur {
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  -webkit-mask: radial-gradient(circle at 50% 50%, transparent calc(var(--lens) * var(--s)), #000 calc(var(--lens) * var(--s) + 3px));
+  mask: radial-gradient(circle at 50% 50%, transparent calc(var(--lens) * var(--s)), #000 calc(var(--lens) * var(--s) + 3px));
+}
 #scope-overlay .scope-lens {
   position: absolute;
   left: 50%;
   top: 50%;
   width: calc(var(--lens) * 2);
   height: calc(var(--lens) * 2);
-  transform: translate(-50%, -50%);
+  margin: calc(var(--lens) * -1) 0 0 calc(var(--lens) * -1);
   border-radius: 50%;
+  transform: scale(var(--s));
+  /* Rim: a hard black edge, the tube's inner wall falling into shadow, a faint blue coating */
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.10),
-    0 0 0 3px rgba(0, 0, 0, 0.18),
-    inset 0 0 calc(var(--lens) * 0.12) rgba(120, 200, 255, 0.10);
+    0 0 0 2px #050505,
+    0 0 0 5px rgba(30, 30, 32, 0.95),
+    inset 0 0 0 1px rgba(120, 170, 255, 0.18),
+    inset 0 0 calc(var(--lens) * 0.035) calc(var(--lens) * 0.012) rgba(0, 0, 0, 0.92),
+    inset 0 0 calc(var(--lens) * 0.22) rgba(0, 0, 0, 0.55);
 }
-/* Reticle: fine wires through the centre with mil-dot ticks, heavier posts toward the screen edges */
-#scope-overlay .scope-h,
-#scope-overlay .scope-v { position: absolute; }
-#scope-overlay .scope-h {
-  left: 0; right: 0; top: 50%; height: 9px; margin-top: -4.5px;
+#scope-overlay .scope-reticle {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+/* Glass: a soft glint high on the left, a little darker low on the right */
+#scope-overlay .scope-glass {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
   background:
-    linear-gradient(90deg, rgba(8, 8, 8, 0.92) 0 calc(50% - var(--lens) * 0.55), transparent calc(50% - var(--lens) * 0.55) calc(50% + var(--lens) * 0.55), rgba(8, 8, 8, 0.92) calc(50% + var(--lens) * 0.55)) center / 100% 4px no-repeat,
-    linear-gradient(90deg, rgba(10, 10, 10, 0.9), rgba(10, 10, 10, 0.9)) center / 100% 1.4px no-repeat,
-    repeating-linear-gradient(90deg, transparent 0 calc(var(--lens) * 0.1 - 1.4px), rgba(10, 10, 10, 0.85) calc(var(--lens) * 0.1 - 1.4px) calc(var(--lens) * 0.1)) center / calc(var(--lens) * 1.1) 9px no-repeat;
+    radial-gradient(ellipse 60% 40% at 30% 22%, rgba(255, 255, 255, 0.07), transparent 70%),
+    radial-gradient(ellipse 70% 50% at 72% 80%, rgba(0, 10, 25, 0.12), transparent 70%);
 }
-#scope-overlay .scope-v {
-  top: 0; bottom: 0; left: 50%; width: 9px; margin-left: -4.5px;
-  background:
-    linear-gradient(180deg, transparent 0 calc(50% + var(--lens) * 0.55), rgba(8, 8, 8, 0.92) calc(50% + var(--lens) * 0.55)) center / 4px 100% no-repeat,
-    linear-gradient(180deg, rgba(10, 10, 10, 0.9), rgba(10, 10, 10, 0.9)) center / 1.4px 100% no-repeat,
-    repeating-linear-gradient(180deg, transparent 0 calc(var(--lens) * 0.1 - 1.4px), rgba(10, 10, 10, 0.85) calc(var(--lens) * 0.1 - 1.4px) calc(var(--lens) * 0.1)) center / 9px calc(var(--lens) * 1.1) no-repeat;
+#scope-overlay .scope-name,
+#scope-overlay .scope-range {
+  position: absolute;
+  bottom: 13%;
+  font: 600 15px/1 "Teko", "Arial Narrow", sans-serif;
+  letter-spacing: 0.08em;
+  color: rgba(10, 10, 10, 0.8);
+  text-shadow: 0 0 2px rgba(255, 255, 255, 0.35);
 }
-#scope-overlay .scope-dot {
+#scope-overlay .scope-name { left: 22%; }
+#scope-overlay .scope-range { right: 22%; }
+/* Hold breath (Shift): what's left */
+#scope-overlay .scope-breath {
   position: absolute;
   left: 50%;
-  top: 50%;
-  width: 5px;
-  height: 5px;
-  margin: -2.5px 0 0 -2.5px;
-  border-radius: 50%;
-  background: #ff2a2a;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 6px #ff2a2a;
+  bottom: calc(var(--lens) * -0.12);
+  width: 120px;
+  height: 4px;
+  margin-left: -60px;
+  background: rgba(255, 255, 255, 0.15);
+  opacity: 0;
+  transition: opacity 0.2s;
 }
+#scope-overlay .scope-breath.on { opacity: 1; }
+#scope-overlay .scope-breath i {
+  display: block;
+  height: 100%;
+  background: #cfe6ff;
+  transform-origin: left center;
+}
+
+/* Red dot / holographic: their reticle at the shoulder aim, in place of the crosshair */
+#optic-reticle {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  z-index: 114;
+  width: 64px;
+  height: 64px;
+  margin: -32px 0 0 -32px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+#optic-reticle.on { opacity: 1; }
+#optic-reticle svg { width: 100%; height: 100%; overflow: visible; }
+
+/* Scoped look speed (pause screen) */
+.scope-sens {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.8);
+  pointer-events: auto;
+  cursor: default;
+}
+.scope-sens input { width: 160px; accent-color: #e2a42b; cursor: pointer; }
+.scope-sens output { min-width: 3.2em; font-variant-numeric: tabular-nums; }
 
 /* ── Grenade cook countdown ───────────────────────────────────────────────── */
 #grenade-cook {

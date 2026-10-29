@@ -17,7 +17,10 @@ export const SHOP_ITEMS = [
   { id: "helmet2",  give: "gear",        price: 2500, label: "Helmet Lv. 2" },
   { id: "vest2",    give: "gear",        price: 3000, label: "Vest Lv. 2" },
   { id: "backpack2", give: "gear",       price: 2000, label: "Backpack Lv. 2" },
+  { id: "holo",     give: "attachment",  price: 1200, label: "Holographic Sight" },
+  { id: "scope2x",  give: "attachment",  price: 1500, label: "2x Scope" },
   { id: "scope4x",  give: "attachment",  price: 3000, label: "4x Scope" },
+  { id: "scope6x",  give: "attachment",  price: 4500, label: "6x Scope" },
   { id: "rifle",    give: "gun",         price: 4000, label: "Assault Rifle" },
   { id: "sniper",   give: "gun",         price: 8000, label: "Sniper Rifle" },
 ];

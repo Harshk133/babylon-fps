@@ -51,8 +51,8 @@ export const WEAPONS = {
     reloadTime: 2.8, damage: 160, pellets: 1, headshotMultiplier: 3, range: 300,
     spreadHip: 0.05, spreadAim: 0.0, spreadMove: 0.03, spreadAir: 0.06,
     bloomPerShot: 0, bloomMax: 0, bloomRecovery: 0.12,
-    // scope: aiming looks down a real scope (overlay, first-person, ~9x zoom)
-    recoilPitch: 0.07, recoilYaw: 0.01, push: 5, alertRadius: 60, aimFov: 7, scope: true,
+    // optic: its own 8x scope (another optic attached replaces it)
+    recoilPitch: 0.07, recoilYaw: 0.01, push: 5, alertRadius: 60, aimFov: 30, optic: "scope8x",
     sound: "sniper", tracersPerShot: 1,
   },
 };
@@ -152,11 +152,36 @@ export const VEST_BLAST_SHARE = 0.6;
  */
 export const ATTACHMENTS = {
   reddot:      { slot: "optic",  name: "Red Dot Sight",  fits: ["pistol", "smg", "shotgun", "rifle"], mods: { aimFovMul: 0.86, spreadAimMul: 0.65 } },
-  scope4x:     { slot: "optic",  name: "4x ACOG Scope",  fits: ["smg", "rifle", "sniper"],            mods: { aimFov: 12, spreadAimMul: 0.5, scope: true } },
+  scope4x:     { slot: "optic",  name: "4x ACOG Scope",  fits: ["smg", "rifle", "sniper"],            mods: { spreadAimMul: 0.5 } },
   compensator: { slot: "muzzle", name: "Compensator",    fits: ["smg", "rifle", "sniper"],            mods: { recoilMul: 0.68 } },
   suppressor:  { slot: "muzzle", name: "Suppressor",     fits: ["pistol", "smg", "rifle", "sniper"],  mods: { alertMul: 0.4, recoilMul: 0.9, suppressed: true } },
   extmag:      { slot: "mag",    name: "Extended Mag",   fits: ["pistol", "smg", "rifle", "sniper"],  mods: { magMul: 1.5 } },
   grip:        { slot: "grip",   name: "Vertical Grip",  fits: ["smg", "rifle"],                      mods: { recoilMul: 0.8, bloomMul: 0.7, spreadHipMul: 0.85 } },
+  // (appended: older ones keep their place)
+  holo:        { slot: "optic",  name: "Holographic Sight", fits: ["pistol", "smg", "shotgun", "rifle"], mods: { aimFovMul: 0.84, spreadAimMul: 0.6 } },
+  scope2x:     { slot: "optic",  name: "2x Scope",       fits: ["smg", "shotgun", "rifle", "sniper"], mods: { spreadAimMul: 0.55 } },
+  scope6x:     { slot: "optic",  name: "6x Scope",       fits: ["rifle", "sniper"],                   mods: { spreadAimMul: 0.45 } },
+  scope8x:     { slot: "optic",  name: "8x Sniper Scope", fits: ["sniper"],                           mods: { spreadAimMul: 0.4 } },
+};
+
+/**
+ * How each optic looks through and zooms (by attachment id; a gun's own optic
+ * is WEAPONS[id].optic). mag: magnification over the normal view (the scope's
+ * FOV is worked out from the hip FOV in main.js, so 4x really is 4x).
+ * scope: aiming goes on into the scope view (first person, the overlay); the
+ * others show their reticle at the shoulder aim instead of the crosshair.
+ * lens: lens radius as a share of half the screen's short side.
+ * housing: how dark the tube round the lens is (0 clear … 1 black).
+ * sens: look-speed multiplier on top of the zoom's own (1 = matches the zoom).
+ * sway: how much the view drifts while scoped (× the zoom).
+ */
+export const OPTICS = {
+  reddot:  { name: "Red dot",     mag: 1,   scope: false, reticle: "dot" },
+  holo:    { name: "Holographic", mag: 1,   scope: false, reticle: "holo" },
+  scope2x: { name: "2x",          mag: 2,   scope: true,  reticle: "x2",   lens: 0.92, housing: 0.6,  sens: 1,    sway: 0.5 },
+  scope4x: { name: "4x ACOG",     mag: 4,   scope: true,  reticle: "acog", lens: 0.86, housing: 0.85, sens: 1,    sway: 0.8 },
+  scope6x: { name: "6x",          mag: 6,   scope: true,  reticle: "x6",   lens: 0.82, housing: 0.92, sens: 1,    sway: 1 },
+  scope8x: { name: "8x",          mag: 8,   scope: true,  reticle: "mil",  lens: 0.8,  housing: 0.97, sens: 1,    sway: 1.15 },
 };
 export const ATTACH_SLOTS = ["optic", "muzzle", "mag", "grip"];
 export const ATTACH_SLOT_NAMES = { optic: "Optic", muzzle: "Muzzle", mag: "Magazine", grip: "Grip" };
@@ -166,6 +191,7 @@ export const ATTACH_SLOT_NAMES = { optic: "Optic", muzzle: "Muzzle", mag: "Magaz
 export const ITEM_WEIGHT = {
   grenade: 18, molotov: 18, smoke: 14, medkit: 20, fuel: 30, biscuit: 5,
   reddot: 10, scope4x: 15, compensator: 10, suppressor: 12, extmag: 15, grip: 10,
+  holo: 10, scope2x: 12, scope6x: 18, scope8x: 20,
 };
 /** Capacity with no backpack and no vest (backpacks / vests add GEAR[…].capacity). */
 export const BASE_CAPACITY = 100;

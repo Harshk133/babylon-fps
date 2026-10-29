@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import { attachRelay } from "./server/relay.mjs";
+import { mixamoTools } from "./tools/mixamo/devPlugin.mjs";
 
 // Co-op: the WebSocket relay rides on the same server/port as the game at /ws,
 // so friends only need one URL (works through a single tunnel too).
@@ -14,7 +15,8 @@ const coopRelay = {
 export default defineConfig({
   // Serve from project root so /models, /trees, /texture paths work.
   publicDir: "public",
-  plugins: [coopRelay],
+  // mixamoTools: dev server only (tools/mixamo/convert.html saves its output through it)
+  plugins: [coopRelay, mixamoTools()],
   // Expose RELAY_URL as well as VITE_* (some hosts' dashboards reject the VITE_ name)
   envPrefix: ["VITE_", "RELAY_"],
 

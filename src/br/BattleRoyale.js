@@ -55,10 +55,10 @@ export const BR_FIELD_LOOT = {
   pistol: 8, smg: 3, shotgun: 3, rifle: 2, sniper: 1,
   ammo: 18, grenade: 5, molotov: 5, smoke: 6, medkit: 8, fuel: 16, biscuit: 20, cash: 24,
   helmet1: 3, vest1: 3, backpack1: 3,
-  reddot: 1, compensator: 1, extmag: 1,
+  reddot: 1, holo: 1, scope2x: 1, compensator: 1, extmag: 1,
 };
 /** What a house spot can roll (weighted by repeats). */
-export const BR_HOUSE_LOOT = ["ammo", "ammo", "medkit", "medkit", "grenade", "molotov", "smoke", "helmet1", "vest1", "backpack1", "helmet2", "vest2", "reddot", "extmag", "grip", "smg", "shotgun", "rifle", "pistol", "sniper", "fuel", "biscuit", "biscuit", "cash", "cash"];
+export const BR_HOUSE_LOOT = ["ammo", "ammo", "medkit", "medkit", "grenade", "molotov", "smoke", "helmet1", "vest1", "backpack1", "helmet2", "vest2", "reddot", "holo", "scope2x", "scope4x", "scope6x", "extmag", "grip", "smg", "shotgun", "rifle", "pistol", "sniper", "fuel", "biscuit", "biscuit", "cash", "cash"];
 export const BR_LOOT_RADIUS = 420;
 /** Spare rounds that come with a gun found on the ground. */
 export const BR_GUN_RESERVE = { pistol: 24, smg: 64, shotgun: 10, rifle: 45, sniper: 6 };

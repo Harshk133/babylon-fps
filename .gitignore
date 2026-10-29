@@ -59,3 +59,9 @@ public/models/india/*.glb
 !public/models/india/*.opt.glb
 public/models/india/*.zip
 public/models/india/*/
+
+# Mixamo downloads (Adobe's terms forbid redistributing the raw files): only the
+# game's optimized GLBs are committed; tools/mixamo/convert.html makes raw/ from them
+public/models/mixamo/characters/
+public/models/mixamo/anims/
+public/models/mixamo/raw/

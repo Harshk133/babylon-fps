@@ -217,7 +217,7 @@ export class PostFX {
   }
 
   /**
-   * s: { darkness 0..1, bloodMoon, health 0..1, dead, slowmo 0..1, frenzy 0..1, heartbeat 0..1, cave 0..1 }
+   * s: { darkness 0..1, bloodMoon, health 0..1, dead, slowmo 0..1, frenzy 0..1, heartbeat 0..1, cave 0..1, scope 0..1 }
    * dt: real (unscaled) seconds.
    */
   update(dt, s) {
@@ -284,6 +284,12 @@ export class PostFX {
       vig += 0.35 * s.freefall;
       contrast += 0.06 * s.freefall;
       sat += 0.08 * s.freefall;
+    }
+
+    // Looking down a scope: a little lens fringing at the edge of the glass, crisper contrast
+    if (s.scope > 0) {
+      chroma += 0.7 * s.scope;
+      contrast += 0.04 * s.scope;
     }
 
     if (s.dead) { sat = 0; contrast = 1.18; vig = 0.7; red = 0; chroma = 0; scan = 0; _c1.setRGB(1, 1, 1); }

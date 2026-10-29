@@ -4,7 +4,7 @@
 
 import {
   WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, MEDKIT, BISCUIT, FUEL_CAN, PICKUP_KINDS,
-  GEAR, ATTACHMENTS, ATTACH_SLOTS, ITEM_WEIGHT,
+  GEAR, ATTACHMENTS, ATTACH_SLOTS, ITEM_WEIGHT, OPTICS,
 } from "../combat/weapons.js";
 
 /** Display order of the backpack groups. */
@@ -81,15 +81,14 @@ for (const [id, g] of Object.entries(GEAR)) {
 for (const [id, a] of Object.entries(ATTACHMENTS)) {
   ITEMS[id] = {
     id, name: a.name, type: "attachment", group: "Attachments", icon: id, maxStack: 99, weight: ITEM_WEIGHT[id] ?? 10,
-    rarity: id === "scope4x" || id === "suppressor" ? "rare" : "uncommon", equipmentSlot: null,
+    rarity: id === "scope8x" ? "epic" : ["scope4x", "scope6x", "suppressor"].includes(id) ? "rare" : "uncommon", equipmentSlot: null,
     compatibleSlots: [a.slot], fits: a.fits, stackable: true,
-    desc: `${describeMods(a.mods)} · Fits: ${a.fits.map(w => WEAPONS[w].short).join(", ")}`,
+    desc: `${[OPTICS[id] && (OPTICS[id].scope ? `${OPTICS[id].mag}x zoom` : `${OPTICS[id].name.toLowerCase()} reticle`), describeMods(a.mods)].filter(Boolean).join(", ")} · Fits: ${a.fits.map(w => WEAPONS[w].short).join(", ")}`,
   };
 }
 
 function describeMods(m) {
   const out = [];
-  if (m.aimFov) out.push("4x zoom");
   if (m.aimFovMul) out.push("closer aim");
   if (m.spreadAimMul) out.push(`${Math.round((1 - m.spreadAimMul) * 100)}% tighter aim`);
   if (m.recoilMul) out.push(`${Math.round((1 - m.recoilMul) * 100)}% less recoil`);
@@ -126,7 +125,6 @@ export function weaponStats(id, att) {
     const a = att?.[s] ? ATTACHMENTS[att[s]] : null;
     if (!a) continue;
     const m = a.mods;
-    if (m.aimFov) d.aimFov = Math.min(d.aimFov, m.aimFov);
     if (m.aimFovMul) d.aimFov *= m.aimFovMul;
     if (m.spreadAimMul) d.spreadAim *= m.spreadAimMul;
     if (m.spreadHipMul) d.spreadHip *= m.spreadHipMul;
@@ -135,8 +133,13 @@ export function weaponStats(id, att) {
     if (m.alertMul) d.alertRadius *= m.alertMul;
     if (m.magMul) d.magSize = Math.round(d.magSize * m.magMul);
     if (m.suppressed) d.suppressed = true;
-    if (m.scope) d.scope = true;
   }
+  // The optic: an attached one, else the gun's own. A magnified one sets the scope zoom
+  // (scopeFov in main.js turns mag into a FOV); d.scope keeps meaning "aims down a scope"
+  d.optic = att?.optic ?? base.optic ?? null;
+  const o = d.optic ? OPTICS[d.optic] : null;
+  d.opticDef = o ?? null;
+  d.scope = !!o?.scope;
   _stats.set(key, d);
   return d;
 }

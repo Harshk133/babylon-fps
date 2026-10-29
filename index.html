@@ -19,7 +19,7 @@
     <!-- The biggest models start downloading while the game's scripts load and parse, instead of
          after (low priority: the scripts come first). Same mode as three's loaders, so they're reused. -->
     <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/india/truck.opt.glb" />
-    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/soldier/soldier.opt.glb" />
+    <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/mixamo/anims.opt.glb" />
     <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/zombie_dog_animation.opt.glb" />
     <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/india/autorickshaw.opt.glb" />
     <link rel="preload" as="fetch" crossorigin="anonymous" fetchpriority="low" href="/models/md2/ogro/ogro.md2" />
@@ -349,10 +349,12 @@
       <main class="lb-main">
         <section class="lb-side">
           <h1 class="lb-logo"><span>Survive</span><span>the Horde</span></h1>
+          <div id="lobby-look" class="lobby-look"></div>
           <div id="lobby-progress" class="lobby-progress"></div>
         </section>
 
         <section class="lb-deploy">
+          <div id="lobby-stage" class="lb-stage" aria-hidden="true"></div>
           <h2 class="lb-heading">Choose your fight</h2>
           <div class="lobby-modes" role="radiogroup" aria-label="Game mode">
             <button id="lobby-solo" class="lobby-mode" data-mode="solo" role="radio" style="--mode:#e0383e">
@@ -410,7 +412,8 @@
         <div><kbd>Shift</kbd><span>Sprint</span></div>
         <div><kbd>Mouse</kbd><span>Look / aim</span></div>
         <div><kbd>LMB</kbd><span>Fire</span></div>
-        <div><kbd>RMB</kbd><span>Aim down sights</span></div>
+        <div><kbd>RMB</kbd><span>Aim down sights (scopes zoom in)</span></div>
+        <div><kbd>Shift</kbd><span>While scoped: hold your breath, steadies the aim</span></div>
         <div><kbd>R</kbd><span>Reload</span></div>
         <div><kbd>Space</kbd><span>Jump (or stand up)</span></div>
         <div><kbd>C</kbd><span>Crouch</span></div>
@@ -429,6 +432,7 @@
         <div><kbd>M</kbd><span>Map: click to pin a spot</span></div>
         <div><kbd>Esc</kbd><span>Pause</span></div>
       </div>
+      <label class="scope-sens">Scoped look speed <input id="scope-sens" type="range" min="0.3" max="2" step="0.05"><output id="scope-sens-out"></output></label>
       <p class="start-tip br-tip">Battle royale: <kbd>Space</kbd> jumps from the plane, then opens your parachute. Hold <kbd>W</kbd> to dive. Stay inside the blue zone; it keeps shrinking.</p>
       <p class="start-tip horde-tip">Monsters hunt by sight and sound; hellhounds hunt by scent. Crouch and go prone to stay unseen; step inside a house to switch to first person. Clear each level to face worse.</p>
     </div>

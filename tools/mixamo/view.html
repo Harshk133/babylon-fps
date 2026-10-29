@@ -1,0 +1,61 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Mixamo viewer</title>
+<style>html,body{margin:0;height:100%;background:#8aa;overflow:hidden}#lbl{position:fixed;left:8px;top:6px;font:14px monospace;color:#fff;text-shadow:0 1px 2px #000}</style></head>
+<body><div id="lbl"></div>
+<script type="module">
+// Dev viewer: every character side by side, posed by one clip at one moment.
+//   ?clip=walk&t=0.25        clip name, normalized time (0..1)
+//   ?mode=full|upper|lower   which half of the clip
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { loadAnimations, loadExtraAnimations, loadCharacter, cloneCharacter, clipSetFor } from "/src/player/MixamoAssets.js";
+import { CHARACTERS } from "/src/player/Avatar.js";
+
+const q = new URLSearchParams(location.search);
+const clipName = q.get("clip") ?? "idle", t = +(q.get("t") ?? 0), mode = q.get("mode") ?? "full";
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8aa0b0);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.5); sun.position.set(2, 4, 5); scene.add(sun);
+const grid = new THREE.GridHelper(20, 20, 0x223344, 0x445566); scene.add(grid);
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 100);
+const view = q.get("view") ?? "front";
+if (view === "side") camera.position.set(9, 1.2, 0); else camera.position.set(0, 1.2, 9);
+camera.lookAt(0, 0.95, 0);
+
+const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+await loadAnimations(loader);
+const anims = await loadExtraAnimations(loader);
+// ?strip=0,0.2,0.4…&char=ch15: one character at several moments of the clip (a filmstrip)
+const strip = q.get("strip")?.split(",").map(Number);
+const list = strip ? strip.map(st => ({ def: CHARACTERS.find(c => c.id === (q.get("char") ?? "ch15")), st })) : CHARACTERS.map(def => ({ def, st: t }));
+let x = -(list.length - 1) * 1.2 / 2;
+const info = [];
+for (const { def, st } of list) {
+  const tpl = await loadCharacter(loader, def);
+  const model = cloneCharacter(tpl);
+  const s = def.height / tpl.height;
+  model.scale.setScalar(s);
+  const holder = new THREE.Group();
+  holder.add(model);
+  model.position.y = -tpl.floor * s;
+  holder.position.x = view === "side" ? 0 : x;
+  holder.position.z = view === "side" ? x : 0;
+  scene.add(holder);
+  x += 1.2;
+  const set = clipSetFor(tpl, anims);
+  const clip = set[mode].get(clipName);
+  const mixer = new THREE.AnimationMixer(model);
+  if (clip) { const a = mixer.clipAction(clip); a.play(); mixer.setTime(st * clip.duration); }
+  info.push(`${def.id}: h ${tpl.height.toFixed(2)} hipsY ${tpl.hipsY.toFixed(2)}`);
+  (window.__models ??= []).push({ id: def.id, holder, model });
+}
+document.getElementById("lbl").textContent = `${clipName} @ ${strip ? strip.join(' ') : t} (${mode})  dur ${anims.clips.get(clipName)?.duration.toFixed(2)}s  speed ${anims.speed[clipName]?.toFixed(1)} u/s  |  ${info.join("  ")}`;
+renderer.render(scene, camera);
+window.__ready = true;
+</script></body></html>

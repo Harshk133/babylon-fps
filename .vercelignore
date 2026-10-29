@@ -12,3 +12,6 @@ public/trees/*.glb
 public/models/soldier/soldier.glb
 public/texture/grass2.jpg
 public/texture/ratamahatta.png
+public/models/mixamo/characters/
+public/models/mixamo/anims/
+public/models/mixamo/raw/

@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Mixamo inspect</title></head>
+<body><pre id="out">inspecting…</pre>
+<script type="module">
+import * as THREE from "three";
+import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+const out = document.getElementById("out");
+const report = {};
+const list = await (await fetch("/__mixamo/list")).json();
+const loader = new FBXLoader();
+for (const f of list.characters) {
+  const obj = await loader.loadAsync(`/models/mixamo/characters/${encodeURIComponent(f)}`);
+  const r = { meshes: [], bones: 0, box: null, scale: obj.scale.toArray(), anims: obj.animations.map(a => a.name) };
+  obj.traverse(o => {
+    if (o.isBone) r.bones++;
+    if (o.isMesh) {
+      const g = o.geometry, tris = (g.index ? g.index.count : g.attributes.position.count) / 3;
+      const mats = [].concat(o.material).map(m => ({ type: m.type, name: m.name, map: m.map?.image ? `${m.map.image.width}x${m.map.image.height}` : null, normal: m.normalMap?.image ? `${m.normalMap.image.width}` : null, spec: m.specularMap ? 1 : 0, transparent: m.transparent }));
+      r.meshes.push({ name: o.name, skinned: o.isSkinnedMesh, tris, verts: g.attributes.position.count, attrs: Object.keys(g.attributes), mats });
+    }
+  });
+  obj.updateMatrixWorld(true);
+  const b = new THREE.Box3().setFromObject(obj);
+  r.box = [b.min.toArray().map(v => +v.toFixed(2)), b.max.toArray().map(v => +v.toFixed(2))];
+  report[f] = r;
+  out.textContent = JSON.stringify(report, null, 1);
+}
+for (const f of list.anims) {
+  const obj = await loader.loadAsync(`/models/mixamo/anims/${encodeURIComponent(f)}`);
+  const clip = obj.animations[0];
+  const hips = clip?.tracks.find(t => /Hips\.position$/.test(t.name));
+  let range = null;
+  if (hips) {
+    const v = hips.values, mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9];
+    for (let i = 0; i < v.length; i += 3) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], v[i + k]); mx[k] = Math.max(mx[k], v[i + k]); }
+    range = { min: mn.map(x => +x.toFixed(1)), max: mx.map(x => +x.toFixed(1)), first: [v[0], v[1], v[2]].map(x => +x.toFixed(1)), last: [v[v.length - 3], v[v.length - 2], v[v.length - 1]].map(x => +x.toFixed(1)) };
+  }
+  let meshes = 0; obj.traverse(o => { if (o.isMesh) meshes++; });
+  report[f] = { clips: obj.animations.length, name: clip?.name, dur: +clip?.duration.toFixed(2), tracks: clip?.tracks.length, kinds: [...new Set(clip?.tracks.map(t => t.name.split(".").pop()))], hips: range, meshes, firstTrack: clip?.tracks[0]?.name };
+  out.textContent = JSON.stringify(report, null, 1);
+}
+window.__report = report;
+out.textContent = JSON.stringify(report, null, 1);
+</script></body></html>

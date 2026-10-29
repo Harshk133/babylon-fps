@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { Soldier } from "../player/Soldier.js";
+import { avatarFromId, encodeAvatar } from "../player/Avatar.js";
 import { GROUP_PLAYER, GROUP_NONE } from "../physicsGroups.js";
 import { createParachute, setSkydivePose } from "../br/BrVisuals.js";
 import { STANCES, STANCE_NAMES, setCapsuleStance } from "../player/Stance.js";
@@ -14,6 +15,9 @@ const POS_SMOOTH  = 14;    // exp rate toward the latest (extrapolated) position
 const MAX_EXTRAP  = 0.25;  // seconds of dead reckoning between packets
 const TAG_HEIGHT  = 2.25;  // metres above the feet
 const PVP_TAG_RANGE = 45;  // battle royale: enemy names only show up close (and not through walls)
+const LOD_FAR     = 35;    // m: past this a soldier draws its far mesh (~25% of the triangles)
+const ANIM_MID    = 40;    // m: past this its animation updates every other frame…
+const ANIM_FAR    = 80;    // …and past this every fourth (with the time it skipped)
 
 // Drop phase from the state packet (battle royale)
 export const PHASE_GROUND = 0, PHASE_PLANE = 1, PHASE_FALL = 2, PHASE_CHUTE = 3;
@@ -118,17 +122,28 @@ export class RemotePlayers {
     body.playerTarget = p.target;
     this.players.set(id, p);
 
-    const soldier = new Soldier();
+    // Their look: what they chose (st.av), else one picked from their id (bots, older clients)
+    this._build(p, encodeAvatar(avatarFromId(id)));
+    return p;
+  }
+
+  /** Loads (or swaps to) the soldier for an avatar code; the old one stays until the new one is ready. */
+  _build(p, code) {
+    if (p.avatarCode === code) return;
+    p.avatarCode = code;
+    const soldier = new Soldier({ avatar: code });
     soldier.load(this.loader).then(() => {
-      if (!this.players.has(id)) return;
-      root.add(soldier.root);
+      if (!this.players.has(p.id) || p.avatarCode !== code) return;
+      if (p.soldier) p.root.remove(p.soldier.root);
+      p.root.add(soldier.root);
       soldier.setWeapon(p.weapon);
       soldier.stance = p.stance;
+      soldier.seated = !!p.driving;
       if (p.dead) soldier.die();
       p.soldier = soldier;
+      p.gearShown = -1;
       p.ready = true;
-    });
-    return p;
+    }).catch(err => console.warn(err));
   }
 
   remove(id) {
@@ -173,6 +188,8 @@ export class RemotePlayers {
     p.bodyYaw = s.by; p.aimYaw = s.ay; p.aimPitch = s.ap;
     p.aim = !!s.aim; p.fire = !!s.fire;
     p.hp = s.hp; p.vis = s.vis ?? 1; p.kills = s.k ?? 0;
+    p.swim = !!s.swm; p.air = s.air ? 1 : 0;
+    if (s.av !== undefined && s.av !== p.avatarCode) this._build(p, s.av);
     if (s.w !== p.weapon) { p.weapon = s.w; p.soldier?.setWeapon(s.w); }
     const dead = !!s.dead;
     if (dead !== p.dead) {
@@ -285,18 +302,29 @@ export class RemotePlayers {
           const g = p.gearCode;
           p.soldier.setGear({ helmet: Math.floor(g / 100), vest: Math.floor(g / 10) % 10, backpack: g % 10 });
         }
-        p.root.updateMatrixWorld(true);
-        const yaw = p.root.rotation.y;
-        const sy = Math.sin(yaw), cy = Math.cos(yaw);
-        p.soldier.update(delta, {
-          localForward: p.vx * sy + p.vz * cy,
-          localRight: -p.vx * cy + p.vz * sy,
-          aiming: !p.dead && (p.aim || p.fire || p.stance === "prone"),
-          firing: p.fire,
-          aimYawOffset: angleDiff(p.aimYaw, yaw),
-          aimPitch: p.aimPitch,
-          health: p.hp / 100,
-        });
+        // Far away: the light mesh, and the animation stepped less often (with the time it skipped)
+        const far = camera.position.distanceTo(p.root.position);
+        p.soldier.setDetail(far > LOD_FAR ? 1 : 0);
+        p.animAcc = (p.animAcc ?? 0) + delta;
+        p.animTick = ((p.animTick ?? 0) + 1) % 4;
+        const every = far > ANIM_FAR ? 4 : far > ANIM_MID ? 2 : 1;
+        if (p.animTick % every === 0 && p.root.visible) {
+          p.root.updateMatrixWorld(true);
+          const yaw = p.root.rotation.y;
+          const sy = Math.sin(yaw), cy = Math.cos(yaw);
+          p.soldier.update(p.animAcc, {
+            localForward: p.vx * sy + p.vz * cy,
+            localRight: -p.vx * cy + p.vz * sy,
+            aiming: !p.dead && (p.aim || p.fire || p.stance === "prone"),
+            firing: p.fire,
+            aimYawOffset: angleDiff(p.aimYaw, yaw),
+            aimPitch: p.aimPitch,
+            health: p.hp / 100,
+            air: p.air,
+            swim: p.swim,
+          });
+          p.animAcc = 0;
+        }
       }
 
       // Battle royale: no name tag or health bar over enemies

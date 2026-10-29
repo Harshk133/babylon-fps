@@ -7,6 +7,10 @@ import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
 import { Soldier } from "./player/Soldier.js";
+import { encodeAvatar } from "./player/Avatar.js";
+import { AvatarPicker } from "./ui/AvatarPicker.js";
+import { ScopeOverlay } from "./ui/ScopeOverlay.js";
+import { loadExtraAnimations } from "./player/MixamoAssets.js";
 import { Effects } from "./combat/Effects.js";
 import { Sfx } from "./combat/Sfx.js";
 import { Throwables } from "./combat/Throwables.js";
@@ -123,6 +127,12 @@ const CAPSULE_HALF_HEIGHT = CAPSULE_HEIGHT / 2;
 const FEET_OFFSET         = CAPSULE_HALF_HEIGHT + CHARACTER_RADIUS;
 const GROUND_SNAP_DISTANCE = 0.08;
 const STEP_UP             = 0.3;   // the controller climbs ledges this high (stairs, door sills)
+// Swimming: deeper than SWIM_DEPTH you float with your feet SWIM_FLOAT under the surface
+const SWIM_DEPTH          = 1.3;
+const SWIM_FLOAT          = 1.32;
+const SWIM_SPEED          = 2.4;   // m/s (holding sprint: SWIM_FAST)
+const SWIM_FAST           = 3.4;
+const SEA_SWIM_DEPTH      = 5;     // the sea turns you back past this depth
 const MOVE_ACCEL          = 14;    // exp-blend rates: a little weight, still responsive
 const MOVE_DECEL          = 12;
 const AIR_CONTROL         = 2;
@@ -244,6 +254,7 @@ function updateThreatUI() {
  */
 function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX = null, srcZ = null, kind = "raw") {
   if (playerHealth <= 0 || (isBR() && (br.ghost || br.flight === PHASE_PLANE))) return;
+  lastHit.x = srcX; lastHit.z = srcZ; lastHit.head = kind === "head";
   amount = armorAbsorb(amount, kind);
   playerHealth = Math.max(0, playerHealth - amount);
   if (srcX !== null) {
@@ -304,12 +315,21 @@ function regenPlayerHealth(amount) {
   }
 }
 
+const lastHit = { x: null, z: null, head: false };
+/** Which way the killing hit came from, in the body's frame: the death falls away from it. */
+function deathInfo() {
+  if (lastHit.x === null) return null;
+  const a = angleDiff(Math.atan2(lastHit.x - characterBody.position.x, lastHit.z - characterBody.position.z), bodyYaw);
+  const from = Math.abs(a) < Math.PI / 4 ? "front" : Math.abs(a) > Math.PI * 0.75 ? "back" : a < 0 ? "right" : "left";
+  return { from, head: lastHit.head };
+}
+
 function onPlayerDeath() {
   cancelClimb();
   killStreak.reset();
   setStance("stand", true);
   cameraTrauma = 1;
-  soldier.die();
+  soldier.die(deathInfo());
   sfx.hurt();
   cancelThrow();
   setInventoryOpen(false);
@@ -438,7 +458,13 @@ function updateCombatHUD(delta) {
     hud.gap = gap;
     crosshairEl?.style.setProperty("--gap", `${gap}px`);
   }
-  const hideCrosshair = sprinting || playerHealth <= 0 || !currentDef() || brAirborne() || drive.on || scopeShown;
+  const def = currentDef();
+  const busy = sprinting || playerHealth <= 0 || !def || brAirborne() || drive.on;
+  // Red dot / holo: their reticle replaces the crosshair at the shoulder aim
+  const o = def?.opticDef;
+  const dotSight = !busy && !scopeShown && o && !o.scope && aimBlend > 0.55 && fpBlend < 0.5 ? o.reticle : null;
+  scopeOverlay.aimReticle(dotSight);
+  const hideCrosshair = busy || scopeShown || !!dotSight;
   if (hideCrosshair !== hud.crosshairHidden) {
     hud.crosshairHidden = hideCrosshair;
     crosshairEl?.classList.toggle("hidden", hideCrosshair);
@@ -452,7 +478,6 @@ function updateCombatHUD(delta) {
     }
   }
 
-  const def = currentDef();
   const slot = inventory.currentSlot;
   const mag = def ? def.magSize : 1;
   const ammo = slot ? slot.ammo : 0, reserve = slot ? slot.reserve : 0;
@@ -974,24 +999,85 @@ const FP_NEAR    = 0.05;         // near plane in first person, so the gun in yo
 const TP_NEAR    = 0.5;
 const SCOPE_AIM_FOV = 32;        // a scoped gun's shoulder-aim FOV on the way into the scope
 
-// Scope view: the lens overlay, and your own body hidden (the camera sits in
-// your head). Touched only when it flips.
-const scopeEl = document.createElement("div");
-scopeEl.id = "scope-overlay";
-scopeEl.innerHTML = '<div class="scope-lens"></div><i class="scope-h"></i><i class="scope-v"></i><i class="scope-dot"></i>';
-document.body.append(scopeEl);
+// ── Optics: the scope view and the red dot / holo reticles ────────────────────
+// A magnified optic (OPTICS[…].scope: 2x–8x) takes the shoulder aim on into the
+// scope: the camera moves to the eye and narrows to the optic's real
+// magnification, the overlay draws the tube and reticle round the live view.
+// The reticle's centre is the screen centre, which is where every shot goes
+// (fireShot traces along the camera), sway included: it moves the camera.
+const scopeOverlay = new ScopeOverlay({ blur: !IS_TOUCH && QUALITY_NAME === "high" });
 let scopeShown = false;
-function updateScopeView() {
-  const on = scopeBlend > 0.6;
-  if (on === scopeShown) return;
-  scopeShown = on;
-  scopeEl.classList.toggle("on", on);
-  if (soldier.root) soldier.root.visible = !on;
+let rigDef = null;                  // the weapon stats the camera rig was set up for
+const SCOPE_SENS_KEY = "babylon-fps:scopeSens";
+let scopeSens = 1;                  // player setting: scoped look speed × (pause screen)
+try { scopeSens = THREE.MathUtils.clamp(+(localStorage.getItem(SCOPE_SENS_KEY) ?? 1) || 1, 0.3, 2); } catch { /* storage blocked */ }
+
+/** The vertical FOV that magnifies the normal (hip) view mag times. */
+function scopeFov(mag) {
+  return THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(cameraRig.hip.fov) / 2) / mag));
 }
 
-/** Looking down a scope slows the mouse / gyro to match the zoom. */
+/** Points the camera rig and overlays at the held gun's optic (again when it changes). */
+function syncOptic() {
+  const def = currentDef() ?? null;
+  if (def === rigDef) return;
+  rigDef = def;
+  const o = def?.opticDef;
+  // Scoped guns: a wide shoulder aim, then the real zoom inside the scope
+  cameraRig.aim.fov = def ? (def.scope ? Math.max(def.aimFov, SCOPE_AIM_FOV) : def.aimFov) : 50;
+  cameraRig.scope.fov = def?.scope ? scopeFov(o.mag) : cameraRig.aim.fov;
+  scopeOverlay.setOptic(def?.scope ? def.optic : null, def?.scope ? o : null);
+}
+
+function updateScopeView() {
+  const on = scopeBlend > 0.6;
+  if (on !== scopeShown) {
+    scopeShown = on;
+    // Your own body would fill the lens (the camera sits in your head)
+    if (soldier.root) soldier.root.visible = !on;
+  }
+  scopeOverlay.update(scopeBlend, crosshairWant < CROSSHAIR_FAR_SCOPED ? crosshairDist : null, breath.left, breath.holding);
+}
+
+/**
+ * Looking down a scope slows the mouse / gyro to match the zoom: the same mouse
+ * movement moves the reticle over the same share of the screen at every
+ * magnification (× the optic's own sens and the player's setting).
+ */
 function scopeLookScale() {
-  return 1 - scopeBlend * (1 - Math.min(1, cameraRig.scope.fov / SCOPE_AIM_FOV));
+  if (scopeBlend <= 0) return 1;
+  const ratio = Math.tan(THREE.MathUtils.degToRad(cameraRig.scope.fov) / 2) / Math.tan(THREE.MathUtils.degToRad(cameraRig.aim.fov) / 2);
+  return THREE.MathUtils.lerp(1, ratio * (rigDef?.opticDef?.sens ?? 1) * scopeSens, scopeBlend);
+}
+
+// Scope sway and holding your breath (Shift while scoped): the view drifts in a slow
+// figure, more when moving, less crouched or prone; a held breath steadies it for a
+// few seconds, then you gasp (wider sway) until half your breath is back.
+const SWAY_BASE = 0.0011;          // rad, standing still
+const BREATH_HOLD = 4.5;           // s of steady aim from a full breath
+const BREATH_RECOVER = 6;          // s from empty to full
+const SWAY_STANCE = { stand: 1, crouch: 0.65, prone: 0.38 };
+const breath = { left: 1, holding: false, gasp: false };
+const scoping = { far: false, swayYaw: 0, swayPitch: 0, amp: 0, t: 0 };
+function updateSway(delta, scoped) {
+  const o = rigDef?.opticDef;
+  const wantHold = scoped && keys.run && !breath.gasp && breath.left > 0;
+  breath.holding = wantHold;
+  if (wantHold) {
+    breath.left -= delta / BREATH_HOLD;
+    if (breath.left <= 0) { breath.left = 0; breath.gasp = true; breath.holding = false; }
+  } else {
+    breath.left = Math.min(1, breath.left + delta / BREATH_RECOVER);
+    if (breath.gasp && breath.left > 0.5) breath.gasp = false;
+  }
+  const moving = Math.min(1, Math.hypot(characterBody.velocity.x, characterBody.velocity.z) / 3);
+  const target = scoped && o ? SWAY_BASE * (o.sway ?? 1) * (SWAY_STANCE[stance] ?? 1) * (1 + 2.5 * moving)
+    * (breath.holding ? 0.12 : breath.gasp ? 1.9 : 1) : 0;
+  scoping.amp += (target - scoping.amp) * (1 - Math.exp(-4 * delta));
+  scoping.t += delta;
+  const t = scoping.t, a = scoping.amp * scopeBlend;
+  scoping.swayYaw = a * (Math.sin(t * 0.9) + 0.45 * Math.sin(t * 2.1 + 1.3));
+  scoping.swayPitch = a * 0.75 * (Math.sin(t * 1.3 + 0.7) + 0.4 * Math.sin(t * 2.7));
 }
 let camFrac = 1;                 // 0..1 of the desired boom length after collision
 let recoilPitch = 0, recoilYaw = 0;
@@ -1229,6 +1315,8 @@ function updateTouch() {
 
 // ─── Ground Check ─────────────────────────────────────────────────────────────
 let groundRayHit = false;   // checkGrounded's ray, reused by snapCharacterToGround (same spot)
+let swimming = false;       // in water deeper than SWIM_DEPTH
+let swimBob = 0;
 function checkGrounded() {
   onGround = false;
   rayOrigin.set(characterBody.position.x, characterBody.position.y + 0.05,          characterBody.position.z);
@@ -1278,12 +1366,18 @@ function updateCharacterMovement(delta) {
   const analog = Math.min(1, len); // keys always give 1; the joystick less near its centre
   if (movingInput) { ix /= len; iz /= len; }
 
-  sprinting = alive && (keys.run || !!touch?.sprint) && iz > 0.5 && !input.fire && !input.aim;
+  // In deep water you swim: standing, the gun on your back, no jumping (a little hysteresis at the edge)
+  const depth = waterDepthAt(characterBody.position.x, characterBody.position.z);
+  swimming = alive && !drive.on && !climb.active && !brAirborne() && depth > (swimming ? SWIM_DEPTH - 0.15 : SWIM_DEPTH);
+  if (swimming && stance !== "stand") setStance("stand", true);
+  sprinting = alive && !swimming && (keys.run || !!touch?.sprint) && iz > 0.5 && !input.fire && !input.aim;
   // Sprinting gets you up off the ground first
   if (sprinting && stance !== "stand" && !setStance("stand")) sprinting = false;
 
   let speed = 0;
-  if (sprinting) {
+  if (swimming) {
+    speed = movingInput ? ((keys.run || touch?.sprint) ? SWIM_FAST : SWIM_SPEED) * analog : 0;
+  } else if (sprinting) {
     speed = SPRINT_SPEED;
   } else if (movingInput) {
     const ax = Math.abs(ix), az = Math.abs(iz);
@@ -1293,8 +1387,7 @@ function updateCharacterMovement(delta) {
     speed *= analog;
   }
   // Wading: knee-deep water halves your pace
-  const wade = waterDepthAt(characterBody.position.x, characterBody.position.z);
-  if (wade > 0.15) speed *= 1 - Math.min(0.55, wade * 0.6);
+  if (!swimming && depth > 0.15) speed *= 1 - Math.min(0.55, depth * 0.6);
 
   // forward = (sin yaw, cos yaw), right = (−cos yaw, sin yaw)
   const sy = Math.sin(aimYaw), cy = Math.cos(aimYaw);
@@ -1302,7 +1395,7 @@ function updateCharacterMovement(delta) {
   const targetZ = (iz * cy + ix * sy) * speed;
 
   // Knockback rides on top of the input-driven velocity and decays on its own
-  const rate = onGround ? (movingInput ? MOVE_ACCEL : MOVE_DECEL) : AIR_CONTROL;
+  const rate = onGround || swimming ? (movingInput ? MOVE_ACCEL : MOVE_DECEL) * (swimming ? 0.45 : 1) : AIR_CONTROL;
   const blend = 1 - Math.exp(-rate * delta);
   moveVelocity.x += (targetX - moveVelocity.x) * blend;
   moveVelocity.z += (targetZ - moveVelocity.z) * blend;
@@ -1314,6 +1407,13 @@ function updateCharacterMovement(delta) {
   knockbackVel.z *= knockDecay;
   characterBody.velocity.x = moveVelocity.x + knockbackVel.x;
   characterBody.velocity.z = moveVelocity.z + knockbackVel.z;
+  // Afloat: a spring holds you at the surface (it outweighs gravity), with a slow bob
+  if (swimming) {
+    swimBob += delta;
+    const surface = waterSurfaceAt(characterBody.position.x, characterBody.position.z);
+    const floatY = surface - SWIM_FLOAT + FEET_OFFSET + Math.sin(swimBob * 2.1) * 0.04;
+    characterBody.velocity.y = (floatY - characterBody.position.y) * 9;
+  }
   // Guide the player through doorways instead of snagging on the jamb
   if (houses?.doorAssist(characterBody.position.x, characterBody.position.z, moveVelocity.x, moveVelocity.z, _doorPull)) {
     characterBody.velocity.x += _doorPull.x;
@@ -1325,7 +1425,7 @@ function updateCharacterMovement(delta) {
   if (jumpQueued && alive && climb.offer) startClimb();
   // Jump from a crouch stands you up; from prone, to a crouch
   else if (jumpQueued && alive && stance !== "stand") setStance(stance === "prone" ? "crouch" : "stand");
-  else if (jumpQueued && onGround && alive) {
+  else if (jumpQueued && onGround && alive && !swimming) {
     characterBody.velocity.y = JUMP_VELOCITY;
     jumpGrace = 0.8;
     onGround = false;
@@ -1465,6 +1565,34 @@ const playerAnim = {
   },
 };
 
+// What the crosshair is on: the gun aims at that point, not along the camera (the camera
+// sits beside the shoulder, so a barrel parallel to it always lands off the crosshair).
+// The direction comes from the camera every frame; only the distance needs a ray (~0.5 ms
+// over the terrain tiles), so it is cast 8 times a second and eased in between.
+const crosshairPoint = new THREE.Vector3();
+const _chFrom = new CANNON.Vec3(), _chTo = new CANNON.Vec3(), _chRes = new CANNON.RaycastResult();
+const chOpts = { collisionFilterMask: GROUP_WORLD | GROUP_ZOMBIE, skipBackfaces: true };
+const CROSSHAIR_FAR = 80;
+const CROSSHAIR_FAR_SCOPED = 300;     // a scope reads the range out that far
+const CROSSHAIR_RAY_EVERY = 0.125;
+let crosshairDist = 30, crosshairWant = 30, crosshairT = 0;
+function updateCrosshairPoint(delta) {
+  camera.getWorldDirection(_aimDir);
+  crosshairT -= delta;
+  if (crosshairT <= 0) {
+    crosshairT = CROSSHAIR_RAY_EVERY;
+    _chFrom.set(camera.position.x, camera.position.y, camera.position.z);
+    const far = scoping.far ? CROSSHAIR_FAR_SCOPED : CROSSHAIR_FAR;
+    _chTo.set(_chFrom.x + _aimDir.x * far, _chFrom.y + _aimDir.y * far, _chFrom.z + _aimDir.z * far);
+    _chRes.reset();
+    // Past the player: whatever is between the camera and the player doesn't count
+    const near = camera.position.distanceTo(camPivot) + 0.6;
+    crosshairWant = world.raycastClosest(_chFrom, _chTo, chOpts, _chRes) && _chRes.distance > near ? Math.max(_chRes.distance, 3) : far;
+  }
+  crosshairDist += (crosshairWant - crosshairDist) * (1 - Math.exp(-10 * delta));
+  return crosshairPoint.copy(camera.position).addScaledVector(_aimDir, crosshairDist);
+}
+
 function updateSoldier(delta) {
   characterRoot.updateMatrixWorld(true);
   const inAir = !onGround && !climb.active && !drive.on && !brAirborne() && Math.abs(characterBody.velocity.y) > 1.2;
@@ -1481,9 +1609,13 @@ function updateSoldier(delta) {
     aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone" || fpBlend > 0.5),
     firing: timeSinceShot < 0.12,
     aimYawOffset: angleDiff(aimYaw + recoilYaw, bodyYaw),
+    // First person aims from the eye anyway: the camera direction is right there
+    aimPoint: alive && !drive.on && fpBlend < 0.5 && soldier.aimWeight > 0.02 ? updateCrosshairPoint(delta) : null,
     aimPitch: aimPitch + recoilPitch,
     health: playerHealth / MAX_HEALTH,
     air: airPose,
+    swim: swimming,
+    throwHold: throwAiming && alive,
   });
 }
 
@@ -1689,10 +1821,13 @@ function updateThirdPersonCamera(delta) {
   aimBlend    += ((input.aim && alive && !sprinting && !brAirborne() ? 1 : 0) - aimBlend) * (1 - Math.exp(-12 * delta));
   sprintBlend += ((sprinting ? 1 : 0) - sprintBlend) * (1 - Math.exp(-4 * delta));
   // A scoped gun goes on into the scope once it's up at the shoulder
-  const scoped = aimBlend > 0.8 && input.aim && alive && !!currentDef()?.scope && !drive.on && !climb.active
+  syncOptic();
+  const scoped = aimBlend > 0.8 && input.aim && alive && !!rigDef?.scope && !drive.on && !climb.active && !swimming
     && weapon.switchTimer <= 0 && !weapon.reloading && !throwAiming;
-  scopeBlend  += ((scoped ? 1 : 0) - scopeBlend) * (1 - Math.exp(-18 * delta));
+  scopeBlend  += ((scoped ? 1 : 0) - scopeBlend) * (1 - Math.exp(-14 * delta));
   if (!scoped && scopeBlend < 0.01) scopeBlend = 0;
+  scoping.far = scopeBlend > 0;
+  updateSway(delta, scoped);
   updateScopeView();
   blendAirRig(isBR() ? br.flight : PHASE_GROUND, delta, drive.on);
   // Inside a house the camera moves into your head; outside it's the shoulder camera again
@@ -1713,13 +1848,15 @@ function updateThirdPersonCamera(delta) {
 
   recoilPitch *= Math.exp(-10 * delta);
   recoilYaw   *= Math.exp(-12 * delta);
-  placeCamera(aimYaw + recoilYaw, aimPitch + recoilPitch, delta);
+  placeCamera(aimYaw + recoilYaw + scoping.swayYaw, aimPitch + recoilPitch + scoping.swayPitch, delta);
 }
 
 /** Battle royale spectator: the same shoulder camera, riding another player's aim. */
 function updateSpectatorCamera(delta, p) {
   aimBlend    += (0 - aimBlend) * (1 - Math.exp(-12 * delta));
   scopeBlend = 0;
+  scoping.swayYaw = scoping.swayPitch = scoping.amp = 0;
+  scoping.far = false;
   updateScopeView();
   fpBlend = 0;
   soldier.setFirstPerson(false);
@@ -1827,9 +1964,7 @@ function equipWeapon(id) {
 function onWeaponChanged(withSound = true) {
   const def = currentDef();
   soldier.setWeapon(inventory.current);
-  // Scoped guns: a wide shoulder aim, then the real zoom inside the scope
-  cameraRig.aim.fov = def ? (def.scope ? Math.max(def.aimFov, SCOPE_AIM_FOV) : def.aimFov) : 50;
-  cameraRig.scope.fov = def?.scope ? def.aimFov : cameraRig.aim.fov;
+  syncOptic();
   weapon.reloading = false;
   soldier.stopGesture("reload");
   weapon.bloom = 0;
@@ -2038,7 +2173,7 @@ function computeThrow() {
 }
 
 function beginThrow() {
-  if (throwCooldown > 0 || throwAiming || brAirborne() || drive.on) return;
+  if (throwCooldown > 0 || throwAiming || brAirborne() || drive.on || swimming) return;
   const kind = inventory.selectedThrowable;
   if (inventory.throwables[kind] <= 0) {
     inventoryUI.feed(`No ${THROWABLES[kind].name}s — ${IS_TOUCH ? "tap ⇄" : "press Q"} to switch`, "info", kind);
@@ -2070,6 +2205,7 @@ function launchThrow(fuse) {
   const color = kind === "smoke" ? Math.floor(Math.random() * SMOKE_COLORS.length) : 0;
   if (kind === "smoke") sfx.pin();
   throwables.throw(kind, _throwFrom, _throwVel, localTarget.id, color, fuse);
+  playerAnim.gesture("throw", 0.45);
   if (net.connected) {
     net.send({
       t: "throw", k: kind, c: color, f: fuse === undefined ? undefined : +fuse.toFixed(2),
@@ -2219,14 +2355,28 @@ function useHeal(kind = null) {
   if (!ok) { inventoryUI.feed(kind === "medkit" ? "No medkits" : "No Parle-G left", "info", kind); return; }
   const heal = kind === "medkit" ? MEDKIT.heal : BISCUIT.heal;
   playerHealth = Math.min(MAX_HEALTH, playerHealth + heal);
-  // A Parle-G goes in the mouth; a medkit gets put on
+  // A Parle-G goes in the mouth; a medkit's tonic gets drunk
   if (kind === "biscuit") {
     if (!soldier.handProps.eat) soldier.setHandProp("eat", cloneItem("biscuit"));
     playerAnim.gesture("eat", 1.5);
+  } else {
+    if (!soldier.handProps.heal) soldier.setHandProp("heal", makeTonicBottle());
+    playerAnim.gesture("heal", 1.8);
   }
-  else playerAnim.clip("interact", 1.2);
   sfx.heal();
   inventoryUI.feed(`+${heal} health${kind === "biscuit" ? " · Parle-G" : ""}`, "medkit", kind);
+}
+
+/** A little green tonic bottle for the healing animation (the medkit's contents). */
+function makeTonicBottle() {
+  const g = new THREE.Group();
+  const glass = new THREE.MeshStandardMaterial({ color: 0x3f8a4a, roughness: 0.25, metalness: 0.1 });
+  const cap = new THREE.MeshStandardMaterial({ color: 0xd8d8d8, roughness: 0.5 });
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.03, 0.13, 10), glass));
+  const top = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.016, 0.03, 8), cap);
+  top.position.y = 0.08;
+  g.add(top);
+  return g;
 }
 
 // ─── Pickups ──────────────────────────────────────────────────────────────────
@@ -2385,7 +2535,7 @@ function spawnDrop(k, x, z, life, y = groundHeight(x, z), data = pickupData(k)) 
   net.send({ t: "drop", k, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), l: life, ...packLoot(data) });
 }
 
-const BOSS_STASH   = ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov", "helmet3", "scope4x"];
+const BOSS_STASH   = ["sniper", "rifle", "medkit", "medkit", "ammo", "ammo", "grenade", "molotov", "helmet3", "scope6x"];
 const DRAGON_STASH = ["medkit", "medkit", "ammo", "ammo", "ammo", "grenade", "vest3", "backpack3"];
 
 function rollZombieDrop(zombie) {
@@ -2433,6 +2583,7 @@ const WORLD_LOOT = {
   ammo: 14, grenade: 10, molotov: 10, medkit: 8, fuel: 6, biscuit: 12, cash: 14,
   helmet1: 4, helmet2: 2, vest1: 4, vest2: 2, backpack1: 4, backpack2: 2,
   reddot: 3, scope4x: 2, compensator: 2, suppressor: 2, extmag: 3, grip: 2,
+  holo: 2, scope2x: 3, scope6x: 1,
 };
 const _lootFrom = new CANNON.Vec3();
 const _lootTo = new CANNON.Vec3();
@@ -2454,7 +2605,7 @@ function isOpenGround(x, z) {
 }
 
 const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag", "biscuit", "cash", "biscuit"];
-const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov", "helmet3", "vest3", "backpack3", "scope4x", "suppressor"];
+const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov", "helmet3", "vest3", "backpack3", "scope4x", "scope6x", "scope8x", "suppressor"];
 
 function spawnWorldLoot() {
   const lootRng = makeLCG(0x10070bad);
@@ -2597,6 +2748,7 @@ function updatePostFx(realDt) {
     slowmo: THREE.MathUtils.clamp((1 - timeScale) / (1 - WHEEL_SLOWMO), 0, 1),
     frenzy: killStreak.frenzy,
     cave: caveDepth,
+    scope: scopeBlend,
     // Battle royale moments: outside the zone (deeper = stronger), and the skydive
     zone: isBR() && br.outside && playerHealth > 0 ? THREE.MathUtils.clamp(0.55 + br.outsideBy / 40, 0.55, 1) : 0,
     freefall: isBR() && br.flight === PHASE_FALL ? 1 : isBR() && br.flight === PHASE_CHUTE ? 0.25 : 0,
@@ -3823,6 +3975,12 @@ function mapSurface(x, z) {
   return f ? MAP_FIELD[f.kind] : null;
 }
 
+/** Height of the water's surface at (x, z): the river / pond there, else the sea. */
+function waterSurfaceAt(x, z) {
+  const w = river?.waterAt(x, z);
+  return w ? w.y : SEA_Y;
+}
+
 /** How deep the water is where you stand (sea, river or pond), 0 on dry land. */
 function waterDepthAt(x, z) {
   return Math.max(0, seaDepth(x, z), river ? river.depthAt(x, z) : 0);
@@ -4164,6 +4322,7 @@ net.on("anim", msg => {
 });
 net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz, "monster"));
 net.on("throw", msg => {
+  remotePlayers.players.get(msg.b ?? msg.from)?.soldier?.playGesture("throw", 0.45);
   throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.b ?? msg.from, msg.c ?? 0, msg.f);
 });
 net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
@@ -4311,6 +4470,7 @@ function netTick(delta) {
       aim: input.aim ? 1 : 0, fire: timeSinceShot < 0.15 ? 1 : 0,
       w: inventory.current, hp: Math.max(0, Math.round(playerHealth)), dead: playerHealth <= 0 ? 1 : 0,
       vis: +playerVisibility().toFixed(2), k: killsThisLife, sn: STANCE_RANK[stance], g: _gearCode || undefined,
+      av: encodeAvatar(soldier.avatar), swm: swimming ? 1 : undefined, air: airPose > 0.5 ? 1 : undefined,
       ph: isBR() ? (br.ghost ? PHASE_PLANE : br.flight) : PHASE_GROUND,
       veh: drive.on
         ? [+drive.car.x.toFixed(2), +drive.car.z.toFixed(2), +drive.car.yaw.toFixed(3), +drive.car.speed.toFixed(2), +drive.car.fuel.toFixed(1), drive.car.index]
@@ -4751,10 +4911,10 @@ function keepInBounds() {
     p.x *= PLAY_RADIUS / r;
     p.z *= PLAY_RADIUS / r;
   }
-  // The sea is too deep to wade past chest height: you're walked back toward the shore
-  if (!drive.on && seaDepth(p.x, p.z) > 1.1 && r > 1) {
+  // You can swim out from the beach, but not out to sea: past SEA_SWIM_DEPTH you're turned back
+  if (!drive.on && seaDepth(p.x, p.z) > SEA_SWIM_DEPTH && r > 1) {
     let k = 1;
-    while (k > 0.6 && seaDepth(p.x * k, p.z * k) > 1.1) k -= 0.004;
+    while (k > 0.6 && seaDepth(p.x * k, p.z * k) > SEA_SWIM_DEPTH) k -= 0.004;
     p.x *= k; p.z *= k;
   }
   if (drive.on || (isBR() && (br.ghost || br.flight === PHASE_PLANE))) return;
@@ -5541,6 +5701,47 @@ const lobby = new Lobby({
   },
 });
 
+// Your look: applied to your soldier (in the world behind the lobby) and the inventory screen's
+const lookEl = document.getElementById("lobby-look");
+if (lookEl) new AvatarPicker(lookEl, soldier.avatar, a => {
+  soldier.setAvatar(a).catch(err => console.warn(err));
+  lootScreen.preview?.soldier?.setAvatar(a).catch(err => console.warn(err));
+});
+
+// While the lobby is up, the inventory screen's 3D character (canvas, renderer and all) stands
+// in the lobby's stage, so you see your look as you pick it; it goes back when the lobby closes
+const lobbyStage = document.getElementById("lobby-stage");
+let previewHome = null;
+function updateLobbyStage(dt) {
+  const preview = lootScreen.preview, canvas = preview?.canvas;
+  if (!lobbyStage || !canvas) return;
+  const show = lobby.open && preview.ready;
+  if (show && canvas.parentNode !== lobbyStage) {
+    previewHome = [canvas.parentNode, canvas.nextSibling];
+    lobbyStage.appendChild(canvas);
+  } else if (!show && previewHome && canvas.parentNode === lobbyStage) {
+    previewHome[0].insertBefore(canvas, previewHome[1]);
+    previewHome = null;
+  }
+  if (!show) return;
+  preview.sync(inventory.current, inventory.gearLevels());
+  preview.render(dt);
+}
+
+// Scoped look speed (pause screen): × the zoom-matched speed, saved
+const scopeSensEl = document.getElementById("scope-sens"), scopeSensOut = document.getElementById("scope-sens-out");
+if (scopeSensEl) {
+  const show = () => { scopeSensOut.textContent = `${scopeSens.toFixed(2)}×`; };
+  scopeSensEl.value = String(scopeSens);
+  show();
+  scopeSensEl.addEventListener("input", () => {
+    scopeSens = +scopeSensEl.value;
+    show();
+    try { localStorage.setItem(SCOPE_SENS_KEY, String(scopeSens)); } catch { /* storage blocked */ }
+  });
+  for (const ev of ["click", "pointerdown", "mousedown"]) scopeSensEl.parentElement.addEventListener(ev, e => e.stopPropagation());
+}
+
 // Graphics quality: applied at startup, so a change reloads the page
 const qualityEl = document.getElementById("lobby-quality");
 if (qualityEl) {
@@ -5744,6 +5945,7 @@ function animate() {
   syncGearModel();
   expireLootClaims();
   if (inventoryOpen) lootScreen.update(realDelta);
+  else updateLobbyStage(realDelta);
 
   timeSinceHit += delta;
   cameraTrauma = Math.max(0, cameraTrauma - delta * 1.6);
@@ -6117,13 +6319,15 @@ async function boot() {
     // its programs compile in the background before it can ever appear
     zombieManager.pool.loadLazy().then(warmLazyMonsters).catch(err => console.warn(err));
     plantTrees().catch(err => console.warn(err));
+    // The animation clips nobody needs in the first seconds (deaths, swimming, climbing, throws…)
+    loadExtraAnimations(gltfLoader).catch(err => console.warn(err));
 
     setupGui();
 
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     if (BENCH_ENABLED) startBenchmark();

@@ -175,6 +175,58 @@
 }
 .lobby-progress:empty { display: none; }
 
+/* Your look (src/ui/AvatarPicker.js) */
+.lobby-look {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--fill);
+  box-shadow: inset 0 0 0 1px var(--edge), inset 0 3px 0 var(--mode);
+  clip-path: polygon(0 0, calc(100% - var(--cut)) 0, 100% var(--cut), 100% 100%, 0 100%);
+}
+.lobby-look:empty { display: none; }
+.av-head { display: flex; align-items: center; justify-content: space-between; }
+.av-head h2 { font: 500 22px/1 var(--font-hud); letter-spacing: 0.04em; color: #fff; }
+.lobby-look button { font: inherit; color: inherit; cursor: pointer; border: 0; }
+.av-random {
+  padding: 3px 10px;
+  font: 600 12px/1.4 "Segoe UI", system-ui, sans-serif !important;
+  letter-spacing: 0.06em;
+  color: var(--bone-dim) !important;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1px var(--edge);
+}
+.av-random:hover { color: #fff !important; }
+.av-chars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.av-char {
+  min-height: 34px;
+  padding: 4px 6px;
+  font: 500 17px/1 var(--font-hud) !important;
+  letter-spacing: 0.04em;
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px var(--edge);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.av-char:hover { background: rgba(255, 255, 255, 0.1); }
+.av-char.on { color: #fff; background: color-mix(in srgb, var(--mode) 30%, transparent); box-shadow: inset 0 0 0 1px var(--mode); }
+.av-row { display: flex; align-items: center; gap: 10px; }
+.av-slot { width: 64px; flex: none; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--bone-dim); }
+.av-row, .av-swatches { overflow: visible !important; }
+.av-swatches { display: flex; flex-wrap: wrap; gap: 6px; padding: 3px; }
+.av-sw {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.4);
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+/* The untouched texture: a split disc */
+.av-sw.orig { background: conic-gradient(#d9c7a8 0 50%, #5a4a3a 0); }
+.av-sw:hover { transform: scale(1.12); }
+.av-sw.on { box-shadow: 0 0 0 2px var(--fill), 0 0 0 4px #fff; }
+
 .pg-daily-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .pg-daily-head h2 { font: 500 22px/1 var(--font-hud); letter-spacing: 0.04em; color: #fff; }
 .pg-done { margin-left: 4px; color: var(--amber); }
@@ -223,8 +275,11 @@
 .pg-bonus.claimed { color: #4dff88; }
 
 /* ── Deploy: modes, room, Play ───────────────────────────────────────────── */
-.lb-deploy { display: flex; flex-direction: column; gap: clamp(10px, 2vh, 18px); min-width: 0; }
+.lb-deploy { display: flex; flex-direction: column; gap: clamp(10px, 2vh, 18px); min-width: 0; align-self: stretch; justify-content: flex-end; }
 .lb-heading { font: 500 clamp(22px, 3.4vh, 30px)/1 var(--font-hud); letter-spacing: 0.04em; color: #fff; }
+/* Your character, above the mode cards (the inventory screen's preview canvas, moved in) */
+.lb-stage { flex: 1 1 0; min-height: 0; margin-bottom: -2vh; display: flex; justify-content: center; }
+.lb-stage canvas { width: min(100%, 46vh); height: 100%; }
 
 .lobby-modes {
   display: grid;
@@ -387,12 +442,17 @@
   .lb-logo span:first-child { font-size: 20px; }
   .lb-logo span:last-child { font-size: 42px; }
   .lobby-progress { padding: 10px 12px; gap: 6px; }
+  .lobby-look { padding: 8px 12px; gap: 5px; }
+  .av-head h2 { font-size: 18px; }
+  .av-char { min-height: 28px; font-size: 15px !important; }
+  .av-sw { width: 18px; height: 18px; }
   .pg-daily-head h2 { font-size: 18px; }
   .pg-list { gap: 6px; }
   .pg-ch { font-size: 12px; }
   .pg-bonus { display: none; }
   .lb-deploy { justify-content: flex-end; gap: 8px; }
   .lb-heading { display: none; }
+  .lb-stage { margin-bottom: 0; }
   .lobby-mode { min-height: 0; flex: 1; padding: 10px 12px; gap: 4px; }
   .lobby-modes { flex: 1; min-height: 0; }
   .mode-icon { width: 34px; height: 34px; }
@@ -425,7 +485,9 @@
   .lb-logo { order: -1; align-items: center; text-align: center; }
   .lb-logo span:last-child { font-size: clamp(44px, 14vw, 72px); }
   .lb-deploy { order: 0; }
+  .lb-stage { display: none; }
   .lobby-progress { order: 1; flex-shrink: 0; overflow: visible !important; }
+  .lobby-look { order: 1; }
   .lobby-modes { grid-template-columns: 1fr; gap: 8px; }
   /* Cards turn into rows: icon on the left */
   .lobby-mode {

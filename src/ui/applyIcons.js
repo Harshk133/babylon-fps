@@ -38,7 +38,7 @@ export function applyStaticIcons() {
 }
 
 /** Gear and item ids that share an icon. */
-const ITEM_ICON = { helmet1: "helmet", helmet2: "helmet", helmet3: "helmet", vest1: "vest", vest2: "vest", vest3: "vest", backpack1: "backpack", backpack2: "backpack", backpack3: "backpack" };
+const ITEM_ICON = { helmet1: "helmet", helmet2: "helmet", helmet3: "helmet", vest1: "vest", vest2: "vest", vest3: "vest", backpack1: "backpack", backpack2: "backpack", backpack3: "backpack", holo: "reddot", scope2x: "scope4x", scope6x: "scope4x", scope8x: "scope4x" };
 
 /** The game-icons version of an item's icon (white, tinted by CSS), or null if the set has none. */
 export function gameItemIcon(id) {
