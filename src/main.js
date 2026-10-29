@@ -263,6 +263,11 @@ function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX =
     const right = dx * -Math.cos(aimYaw) + dz * Math.sin(aimYaw);
     const fwd = dx * Math.sin(aimYaw) + dz * Math.cos(aimYaw);
     gameHud.hitFrom(Math.atan2(right, fwd), amount / 15);
+    // Battle royale: shots land as a ripple off that side of the screen
+    if (isBR() && kind !== "raw") {
+      const a = Math.atan2(right, fwd);
+      postFx.shockwave(0.5 + Math.sin(a) * 0.62, 0.5 + Math.cos(a) * 0.62, Math.min(0.8, amount / 30), 0xff3a2a, 0.9, 0.45);
+    }
   }
   sfx.hurt();
   postFx.hurt(Math.min(1, amount / 30));
@@ -2308,6 +2313,7 @@ function onGrenadeExplode(pos, owner = null) {
   }
   if (isBR() && net.isHost) bots.blast(pos, by, GRENADE.playerRadius, GRENADE.playerMaxDamage);
   cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - pd / 35, 0, 1) * 0.8);
+  if (isBR()) worldShockwave(pos.x, pos.y + 0.5, pos.z, THREE.MathUtils.clamp(1.1 - camera.position.distanceTo(pos) / 45, 0, 1), 0xffb070);
   sfx.explosion(pos);
   if (!net.isClient) zombieManager?.noise(pos.x, pos.z, GRENADE.alertRadius, "explosion");
 }
@@ -2752,9 +2758,38 @@ function updatePostFx(realDt) {
     // Battle royale moments: outside the zone (deeper = stronger), and the skydive
     zone: isBR() && br.outside && playerHealth > 0 ? THREE.MathUtils.clamp(0.55 + br.outsideBy / 40, 0.55, 1) : 0,
     freefall: isBR() && br.flight === PHASE_FALL ? 1 : isBR() && br.flight === PHASE_CHUTE ? 0.25 : 0,
+    ...brPostFx(),
     // Faster as health drops
     heartbeat: low ? 0.5 + 0.5 * Math.sin(performance.now() / 1000 * (6 + 6 * (1 - playerHealth / (MAX_HEALTH * 0.4)))) : 0,
   });
+}
+
+const _brFx = { fallSpeed: 0, feed: 0, showdown: 0, victory: 0 };
+/** Battle royale grade: skydive speed, spectator feed, final circle, victory. */
+function brPostFx() {
+  const f = _brFx;
+  f.fallSpeed = f.feed = f.showdown = f.victory = 0;
+  if (!isBR()) return f;
+  if (br.flight === PHASE_FALL) f.fallSpeed = THREE.MathUtils.clamp((-br.vy - 8) / (FREEFALL.dive - 8), 0, 1);
+  const watching = brWatching();
+  f.feed = watching ? 1 : 0;
+  // Switching who you watch tears the signal for a moment
+  const watched = watching ? br.spectating : null;
+  if (watched !== br.fxWatch) {
+    if (watched !== null && br.fxWatch !== null) postFx.glitch(0.55);
+    br.fxWatch = watched;
+  }
+  if (br.state === "match" && br.inMatch && playerHealth > 0 && br.started >= 3 && br.alive.size <= 3) f.showdown = 1;
+  if (br.state === "end" && br.won) f.victory = 1;
+  return f;
+}
+
+const _waveAt = new THREE.Vector3();
+/** A shockwave ring on screen where a world point is (or from below, when it's close behind you). */
+function worldShockwave(x, y, z, strength, color) {
+  _waveAt.set(x, y, z).project(camera);
+  if (_waveAt.z > 1) postFx.shockwave(0.5, -0.1, strength * 0.6, color);
+  else if (Math.abs(_waveAt.x) < 1.4 && Math.abs(_waveAt.y) < 1.4) postFx.shockwave(_waveAt.x * 0.5 + 0.5, _waveAt.y * 0.5 + 0.5, strength, color);
 }
 
 function wheelAmmo(id) {
@@ -4963,6 +4998,9 @@ const br = {
   spectating: null,
   outside: false,
   outsideBy: 0,
+  won: false,            // the post-match screen is our win (golden grade)
+  shrinking: false,      // last frame's zone state, for the shockwave when it starts closing
+  fxWatch: null,         // whom the spectator feed showed last frame (glitch on switch)
   zoneTick: 1,
   respawnTimer: 0,
   atkId: null, atkW: "", atkHs: false, atkAt: -99, // who hurt you last (kill credit)
@@ -5145,6 +5183,7 @@ function brEnterWarmup() {
   br.alive.clear();
   br.route = null; br.circles = null;
   br.spectating = null; br.respawnTimer = 0; br.outside = false;
+  br.won = false; br.shrinking = false;
   br.flight = PHASE_GROUND;
   myChute.visible = false;
   zoneWall.hide();
@@ -5326,6 +5365,8 @@ function brOpenChute() {
 }
 
 function brLand() {
+  // Touchdown: a dust ring off the bottom of the screen, harder from a freefall
+  postFx.shockwave(0.5, 0.0, br.flight === PHASE_FALL ? 0.9 : 0.35, 0xd8c8a0, 0.9, 0.6);
   br.flight = PHASE_GROUND;
   br.vy = 0;
   myChute.visible = false;
@@ -5454,12 +5495,14 @@ function brHandleElim({ v, k, w, hs }) {
     onLocalKill(!!hs);
     showHitMarker(!!hs, true);
     sfx.kill();
+    postFx.shockwave(0.5, 0.5, hs ? 0.8 : 0.55, hs ? 0xffd27a : 0xffffff, 1.3, 0.6);
   }
   if (br.state !== "match" || !br.alive.has(v)) return;
   br.alive.delete(v);
   if (v === net.id) {
     br.inMatch = false;
     postFx.kick(0.4, 0xff2a1a);
+    postFx.glitch(1); // signal lost, then the spectator feed
     const place = br.placement || br.alive.size + 1;
     progress.brFinished(place, br.started);
     brHud.showResult({
@@ -5493,6 +5536,7 @@ function brShowEnd(w) {
   br.outside = false;
   zoneWall.hide();
   dropPlane.visible = false;
+  br.won = w === net.id;
   if (w === net.id) progress.brFinished(1, br.started);
   const lines = [["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`], ["XP", `+${progress.runXp}`]];
   if (w === net.id) {
@@ -5532,6 +5576,9 @@ function brUpdate(delta) {
     br.t += delta;
     zoneAt(br.circles, br.t, br.zone);
     zoneWall.set(br.zone.x, br.zone.z, br.zone.r, br.t);
+    // The zone starts closing: a cold ring sweeps the screen
+    if (br.zone.shrinking && !br.shrinking && br.t > 1) { postFx.shockwave(0.5, 0.5, 0.7, 0x4da3ff, 0.9, 1.2); postFx.kick(0.15, 0x4da3ff); }
+    br.shrinking = br.zone.shrinking;
     brUpdatePlane(delta);
     brZoneDamage(delta);
     // Out of the fight: follow somebody who's still in it
