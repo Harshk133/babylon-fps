@@ -189,6 +189,7 @@ export class RemotePlayers {
     p.aim = !!s.aim; p.fire = !!s.fire;
     p.hp = s.hp; p.vis = s.vis ?? 1; p.kills = s.k ?? 0;
     p.swim = !!s.swm; p.air = s.air ? 1 : 0;
+    p.throwHold = s.th ?? null;   // the throwable they're holding ready, if any
     if (s.av !== undefined && s.av !== p.avatarCode) this._build(p, s.av);
     if (s.w !== p.weapon) { p.weapon = s.w; p.soldier?.setWeapon(s.w); }
     const dead = !!s.dead;
@@ -322,6 +323,8 @@ export class RemotePlayers {
             health: p.hp / 100,
             air: p.air,
             swim: p.swim,
+            throwHold: !!p.throwHold && !p.dead,
+            throwKind: p.throwHold,
           });
           p.animAcc = 0;
         }

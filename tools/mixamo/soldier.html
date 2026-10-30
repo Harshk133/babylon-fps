@@ -7,7 +7,7 @@
 // scripted timeline, with the camera behind the right shoulder like the game.
 //   window.run(script) — script: [[seconds, { fwd, right, aim, fire, stance, yawOff, pitch }]…]
 //   window.step(dt)    — advances one frame and renders
-//   ?char=0..3  ?view=back|side|front
+//   ?char=0..3  ?view=back|side|front|rside|back3q
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
@@ -40,9 +40,11 @@ window.step = (dt = 1 / 60) => {
   grid.position.x = (grid.position.x + input.right * dt) % 1;
   s.stance = input.stance ?? "stand";
   s.update(dt, { localForward: input.fwd, localRight: input.right, aiming: input.aim, firing: input.fire,
-    aimYawOffset: input.yawOff ?? 0, aimPitch: input.pitch ?? 0, health: 1, air: input.air ?? 0, swim: !!input.swim, throwHold: !!input.throwHold, noSpine: !!input.noSpine });
+    aimYawOffset: input.yawOff ?? 0, aimPitch: input.pitch ?? 0, health: 1, air: input.air ?? 0, swim: !!input.swim, throwHold: !!input.throwHold, throwKind: input.throwKind, noSpine: !!input.noSpine });
   if (view === "side") camera.position.set(4.5, 1.4, 0.3);
   else if (view === "front") camera.position.set(0.4, 1.5, 4);
+  else if (view === "rside") camera.position.set(-4.5, 1.4, 0.3);
+  else if (view === "back3q") camera.position.set(-2.2, 1.8, -2.4);
   else camera.position.set(-0.55, 1.75, -2.6);
   camera.lookAt(view === "back" ? 0.2 : 0, 1.2, view === "back" ? 2 : 0);
   renderer.render(scene, camera);

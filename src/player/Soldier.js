@@ -19,15 +19,16 @@ import { loadAnimations, loadCharacter, cloneCharacter, clipSetFor } from "./Mix
 //              Upper body: with a gun, the rifle pose (low ready → aim → fire
 //              by aim and trigger); empty-handed, the same clips as the legs.
 //   stances    prone (lie / crawl) and swimming (tread / swim) are whole-body.
-//   overlays   upper body, faded in and out: reload, throw (held wind-up,
-//              then the release), drink / eat / heal.
+//   overlays   upper body, faded in and out: reload, drink / eat / heal.
 //   overrides  whole body (legs only with a gun up): jump take-off, air and
 //              landing, hard landing after a long fall, climb / vault, death
 //              (picked by where the shot came from).
 //   procedural after the clips: the spine turns the gun onto the aim, hips
-//              turned for strafing, legs bent in a driving seat, the arm
-//              reaching over the shoulder to swap guns, a wounded hunch, a
-//              flinch when hit, the hand reaching for a door.
+//              turned for strafing, legs bent in a driving seat, the right
+//              hand (arm IK) putting guns into the back slings and drawing
+//              them, and the whole throw (gun away, the throwable out of the
+//              pouch, pin, wind-up, swing, follow-through, gun back), a
+//              wounded hunch, a flinch when hit, the hand reaching for a door.
 // Only actions with weight are kept playing (an idle mixer action still costs).
 
 const SMG_URL = "/models/soldier/smg.glb";   // the held SMG model ("Submachine Gun", CC0, Quaternius)
@@ -57,19 +58,30 @@ const HIP_YAW_MAX = 0.95;   // rad the legs turn toward a sideways move
 const BACK_IN     = 1.85;   // rad off forward where the legs switch to backwards…
 const BACK_OUT    = 1.6;    // …and back to forwards (hysteresis: no flip-flopping on a diagonal)
 const LOCO = ["walk", "run", "sprint", "walk_back", "crouch_walk", "run_rev", "crouch_rev"];
-const SWAP_TIME   = 0.5;    // s to swing a gun off the back
+// Guns into and out of the back sling, throwables out of the hip pouch (s). The right hand
+// is driven along curves by arm IK; a gun follows the hand and settles exactly into the sling
+const HOLSTER_TIME = 0.3;   // the held gun over the shoulder into the sling
+const DRAW_TIME    = 0.36;  // a gun off the sling, over the shoulder into both hands
+export const SWAP_TIME = HOLSTER_TIME + DRAW_TIME;
+const REACH_TIME   = 0.22;  // the empty hand back to the sling (after a throw)
+const FETCH_TIME   = 0.5;   // to the pouch, the throwable out, the pin pulled in front of the chest, up into the wind-up
+export const THROW_RECOVER = REACH_TIME + DRAW_TIME * 0.75;   // s after the throw gesture until the gun is up again
+// The throw itself is procedural (the Mixamo throw is a full-body pitch with no overhand
+// wind-up): over the shoulder to the release point in front of the head by this fraction of
+// the gesture, then the follow-through across to the left hip
+const THROW_RELEASE = 0.36;
 // Clip segments (fractions of the clip) used for the game's moves
 const SEG = {
-  throwHold: 0.42, throwFrom: 0.45, throwTo: 0.8,
   drinkFrom: 0.22, drinkTo: 0.62,
   climbFrom: 0.2, climbTo: 0.98, vaultFrom: 0.32, vaultTo: 0.85,
   jumpUp: 0.32, jumpApex: 0.5, jumpLand: 0.7, jumpEnd: 0.95,
   landFrom: 0.45, landTo: 0.95,
 };
 // Gestures with nothing in the hands: the gun goes on the back meanwhile
-const GUN_AWAY = new Set(["eat", "drink", "heal", "throw", "vault", "climb"]);
+// (throwing stows the gun itself: see _updateToss)
+const GUN_AWAY = new Set(["eat", "drink", "heal", "vault", "climb"]);
 // Upper-body clip overlays (gesture → clip)
-const OVERLAY = { reload: "reload", throw: "throw", eat: "drink", drink: "drink", heal: "drink" };
+const OVERLAY = { reload: "reload", eat: "drink", drink: "drink", heal: "drink" };
 const DEATHS = { front: "death_front", back: "death_back", right: "death_right", left: "death", head_front: "death_head_front", head_back: "death_head_back" };
 
 const _q0 = new THREE.Quaternion(), _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _q3 = new THREE.Quaternion(), _qStep = new THREE.Quaternion();
@@ -119,6 +131,46 @@ function turnBone(bone, axis, angle) {
   rotateBoneInWorld(bone, _qStep.setFromAxisAngle(axis, angle));
 }
 
+const _ia = new THREE.Vector3(), _ib = new THREE.Vector3(), _ic = new THREE.Vector3(), _id = new THREE.Vector3(), _ie = new THREE.Vector3(), _if = new THREE.Vector3();
+const _iq = new THREE.Quaternion(), _iq2 = new THREE.Quaternion();
+/**
+ * Two-bone IK: bends the elbow so the wrist can reach T (world), swings the upper arm onto
+ * it, then turns the arm round the shoulder → target line so the elbow points along pole
+ * (a world direction), by pw. w blends it all over the clip's pose.
+ */
+function armIK(upper, fore, hand, T, w, pole = null, pw = 1) {
+  if (!upper || !fore || !hand || w < 0.01) return;
+  const A = upper.getWorldPosition(_ia), B = fore.getWorldPosition(_ib), C = hand.getWorldPosition(_ic);
+  const la = A.distanceTo(B), lb = B.distanceTo(C);
+  const d = THREE.MathUtils.clamp(A.distanceTo(T), Math.abs(la - lb) + 1e-3, la + lb - 1e-3);
+  const ba = _id.subVectors(A, B).normalize(), bc = _ie.subVectors(C, B).normalize();
+  const cur = Math.acos(THREE.MathUtils.clamp(ba.dot(bc), -1, 1));
+  const want = Math.acos(THREE.MathUtils.clamp((la * la + lb * lb - d * d) / (2 * la * lb), -1, 1));
+  const axis = _if.crossVectors(bc, ba);
+  if (axis.lengthSq() > 1e-8) rotateBoneInWorld(fore, _iq.setFromAxisAngle(axis.normalize(), (cur - want) * w));
+  hand.getWorldPosition(C);
+  _iq.setFromUnitVectors(_id.subVectors(C, A).normalize(), _ie.subVectors(T, A).normalize());
+  rotateBoneInWorld(upper, _iq2.identity().slerp(_iq, w));
+  if (!pole || pw < 0.01) return;
+  const line = _id.subVectors(T, A).normalize();
+  const e = _ie.subVectors(fore.getWorldPosition(B), A);
+  e.addScaledVector(line, -e.dot(line));
+  const p = _if.copy(pole).addScaledVector(line, -pole.dot(line));
+  if (e.lengthSq() < 1e-8 || p.lengthSq() < 1e-8) return;
+  e.normalize(); p.normalize();
+  const ang = Math.atan2(_ic.crossVectors(e, p).dot(line), e.dot(p));
+  rotateBoneInWorld(upper, _iq.setFromAxisAngle(line, ang * w * pw));
+}
+
+/** Quadratic Bézier a → b pulled toward c (out must not be one of them). */
+function bezier(out, a, c, b, u) {
+  const v = 1 - u;
+  return out.set(0, 0, 0).addScaledVector(a, v * v).addScaledVector(c, 2 * u * v).addScaledVector(b, u * u);
+}
+const ease = u => { u = THREE.MathUtils.clamp(u, 0, 1); return u * u * (3 - 2 * u); };
+const _h = Array.from({ length: 14 }, () => new THREE.Vector3());
+const _hq0 = new THREE.Quaternion(), _hq1 = new THREE.Quaternion(), _hm0 = new THREE.Matrix4();
+
 /** Shows / hides a part; a hidden one leaves its bone (hidden objects still cost a matrix update). */
 function showPart(obj, on) {
   obj.visible = on;
@@ -167,7 +219,11 @@ export class Soldier {
     this.gearMeshes = { helmet: [], vest: [], backpack: [] };
     this.firstPerson = false;
     this.woundW = 0;
-    this.swap = null;             // { t, from, to }
+    this.swap = null;             // { t, from, to, switched, start, grab }: holster one gun, draw the other
+    this.toss = null;             // { phase, t, gun, kind, start, grab, g }: a grenade / smoke / molotov in hand
+    this.tossKind = "grenade";    // what a throw without a hold (someone else's) shows in the hand
+    this._lastHand = new THREE.Vector3();   // where the right hand was last driven (the body's frame)
+    this._ikOn = false;
     this.lod = 0;
   }
 
@@ -246,6 +302,9 @@ export class Soldier {
     this.mixer.uncacheRoot(this.model);
     this.root.remove(this.model);
     for (const [, obj] of props) obj.removeFromParent();
+    for (const obj of Object.values(this._tossProps ?? {})) obj.removeFromParent();
+    this._tossProps = null; this._propShown = null;
+    this.toss = null;
     this.model = this.mixer = null;
     this.acts = this._byKey = this._shown = this._clipOwner = null;
     this.guns = {};
@@ -312,7 +371,8 @@ export class Soldier {
       const a = this.mixer.clipAction(clip);
       a.enabled = true;
       a.setLoop(THREE.LoopRepeat, Infinity);
-      const e = { a, w: 0, v: 0, target: 0, dur: clip.duration, key, playing: false };
+      const layer = map === full ? "f" : map === lower ? "l" : "u";
+      const e = { a, w: 0, v: 0, target: 0, dur: clip.duration, key, layer, playing: false };
       this.acts.push(e);
       this._byKey.set(id, e);
       return e;
@@ -463,8 +523,8 @@ export class Soldier {
 
   _wear(group, bone, slot) {
     group.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = false; } });
-    this.model.add(group);
-    group.updateMatrixWorld(true);
+    // Placed in world space (metres): attached from there, not added under the model first
+    // (its 0.01 scale would read those metres as centimetres: tiny, at the feet)
     bone.attach(group);
     this.gearMeshes[slot].push(group);
     showPart(group, false);
@@ -551,25 +611,31 @@ export class Soldier {
     tmp.stopAllAction();
     tmp.uncacheRoot(this.model);
 
-    // Back sling, in the bind pose: muzzle down toward the right hip, top of the gun outward
+    // Back slings, in the bind pose: diagonal across the back, the grip up behind the right
+    // shoulder (where the right hand reaches over for it), muzzle down toward the left hip,
+    // top of the gun outward. The second one sits just outside the first: the gun put away
+    // for a throw while the spare stays slung.
+    this._holdLocal = { p: hand.position.clone(), q: hand.quaternion.clone(), s: hand.scale.clone() };
     this.mixer.stopAllAction();
     for (const e of this.acts) e.a.stop();
     this._restPose();
-    const back = new THREE.Group();
     const bf = this._backFrame;
-    const barrel = new THREE.Vector3(-0.5, -0.86, 0).normalize().applyQuaternion(bf.frame);
+    const barrel = new THREE.Vector3(0.5, -0.86, 0).normalize().applyQuaternion(bf.frame);
     const outward = new THREE.Vector3(0, 0, -1).applyQuaternion(bf.frame);
     const bz = new THREE.Vector3().crossVectors(barrel, outward);
     const backQ = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(barrel, outward, bz));
     const centre = new THREE.Vector3(bf.torso.cx, 0, bf.torso.back - 0.07).applyQuaternion(bf.frame).add(bf.chestP);
     centre.y = bf.abdY + bf.height * 0.45;
-    back.quaternion.copy(backQ);
-    back.position.copy(centre).addScaledVector(barrel, -0.28);
-    this.model.add(back);
-    back.updateMatrixWorld(true);
-    b.spine2.attach(back);
-    const onBack = build(back);
-    for (const id of Object.keys(inHand)) this.guns[id] = { model: inHand[id].model, back: onBack[id].model, muzzle: inHand[id].muzzle };
+    this.slings = [];
+    const onBack = [0, 1].map(i => {
+      const back = new THREE.Group();
+      back.quaternion.copy(backQ);
+      back.position.copy(centre).addScaledVector(barrel, -0.28 + i * 0.05).addScaledVector(outward, i * 0.07);
+      b.spine2.attach(back);   // (from world space, like the gear)
+      this.slings.push(back);
+      return build(back);
+    });
+    for (const id of Object.keys(inHand)) this.guns[id] = { model: inHand[id].model, back: onBack.map(o => o[id].model), muzzle: inHand[id].muzzle };
   }
 
   /** Bones back to their rest transforms. */
@@ -578,32 +644,149 @@ export class Soldier {
     this.root.updateMatrixWorld(true);
   }
 
-  /** The gun in the hand (null: empty hands). The one it replaces goes on the back, with a reach over the shoulder. */
+  /**
+   * The gun in the hand (null: empty hands). The right hand carries the old one over the
+   * shoulder into the sling, takes the new one off it and brings it round into both hands.
+   */
   setWeapon(id) {
     if (id !== null && !this.guns[id]) return;
     const from = this.currentGun;
     if (from === id) { if (id) this.muzzle.position.copy(this.guns[id].muzzle); this._showGuns(); return; }
-    if (from && id && this.mixer && !this.dead) this.swap = { t: 0, from, to: id, switched: false };
-    if (from) this.backGun = from;
+    const sw = this.swap;
+    if (sw && !sw.switched) {
+      // Still putting the first gun away: draw this one instead
+      sw.to = id;
+    } else if (this.mixer && !this.dead && !this.toss && !this._handsBusy()) {
+      // (Changed mind while drawing: put that one back from about where the hand is)
+      const t = sw ? Math.max(0, HOLSTER_TIME * (1 - (sw.t - HOLSTER_TIME) / DRAW_TIME)) : 0;
+      this.swap = { t, from, to: id, switched: false, start: null, grab: null };
+    }
+    if (from) this.backGun = sw && !sw.switched ? sw.from ?? from : from;
     this.currentGun = id;
-    if (!this.swap) this._showGuns();
+    this._showGuns();
     if (id) this.muzzle.position.copy(this.guns[id].muzzle);
   }
 
-  /** Which gun shows where: the held one in the hand (or on the back while the hands are busy), the other on the back. */
+  /**
+   * Which gun shows where: in the hand, in the main sling (the spare, or the one about to
+   * be drawn) and in the outer sling (put away for a throw, or for both hands while busy).
+   */
   _showGuns() {
     if (!this.mixer) return;
-    const busy = this._handsBusy();
-    const swapping = this.swap && !this.swap.switched;
-    const inHand = busy ? null : swapping ? this.swap.from : this.currentGun;
-    let onBack = busy ? this.currentGun ?? this.backGun : swapping ? this.swap.to : this.backGun;
-    if (onBack === inHand) onBack = null;
-    if (this._shown?.hand === inHand && this._shown?.back === onBack) return;
-    this._shown = { hand: inHand, back: onBack };
-    for (const [gid, g] of Object.entries(this.guns)) {
-      showPart(g.model, gid === inHand);
-      showPart(g.back, gid === onBack);
+    const sw = this.swap, T = this.toss, cur = this.currentGun;
+    let hand = cur, a = this.backGun, b = null;
+    if (this._handsBusy()) { hand = null; a = cur ?? this.backGun; b = cur ? this.backGun : null; }
+    else if (sw) { hand = sw.switched ? sw.to : sw.from; a = sw.switched ? sw.from : sw.to; }
+    else if (T) {
+      const away = this._tossAway();
+      hand = T.phase === "stow" ? T.gun : away ? null : cur;
+      b = away ? T.gun : null;
     }
+    if (a === hand) a = null;
+    if (b === hand || b === a) b = null;
+    const sh = this._shown;
+    if (sh && sh.hand === hand && sh.a === a && sh.b === b) return;
+    this._shown = { hand, a, b };
+    for (const [gid, g] of Object.entries(this.guns)) {
+      showPart(g.model, gid === hand);
+      showPart(g.back[0], gid === a);
+      showPart(g.back[1], gid === b);
+    }
+  }
+
+  /** The gun is off the hand for a throw (put away, the throwable out). */
+  _tossAway() {
+    const T = this.toss;
+    return !!T && T.phase !== "stow" && T.phase !== "draw";
+  }
+
+  /** The throwable is out and wound up, ready to go (or there is no animation to wait for). */
+  get throwReady() {
+    return !this.mixer || this.dead || !this.toss || this.toss.phase === "ready";
+  }
+
+  /**
+   * A throw, start to finish (s.throwHold: the throw is being held; the "throw" gesture: the
+   * release): stow — the gun over the shoulder into the outer sling; fetch — the hand down
+   * to the hip pouch, the throwable out, the off hand pulls the pin in front of the chest,
+   * up into the wind-up; ready — held there, leaning with the aim; throw — the swing, the
+   * throwable leaving the hand at THROW_RELEASE; reach — back over the shoulder; draw.
+   * Someone else's throw arrives as the gesture alone and starts at "throw".
+   */
+  _updateToss(dt, s) {
+    const g = this.gesture, throwing = g?.name === "throw";
+    let T = this.toss;
+    if (T && (this._handsBusy() || this.dead)) { this.toss = null; this._showTossProp(null); this._showGuns(); return; }
+    if (!T) {
+      if (!(s.throwHold || throwing) || this._handsBusy() || this.dead || !this.mixer) return;
+      // A swap under way gives way: whichever gun is in the hand is the one put away
+      const sw = this.swap;
+      const gun = sw ? (sw.switched ? sw.to : sw.from) : this.currentGun;
+      this.swap = null;
+      T = this.toss = { phase: throwing ? "throw" : gun ? "stow" : "fetch", t: 0, gun, kind: this.tossKind, start: this._handAt(), grab: null, g: throwing ? g : null };
+      this._showGuns();
+    }
+    if (s.throwKind) T.kind = s.throwKind;
+    T.t += dt;
+    const next = phase => { T.phase = phase; T.t = 0; T.start = this._handAt(); T.grab = null; this._showGuns(); };
+    switch (T.phase) {
+      case "stow": if (T.t >= HOLSTER_TIME) next("fetch"); break;
+      case "fetch": if (throwing) { T.g = g; next("throw"); } else if (T.t >= FETCH_TIME) next("ready"); break;
+      case "ready":
+        if (throwing) { T.g = g; next("throw"); }
+        else if (!s.throwHold) next("reach");        // called off: put it away
+        break;
+      case "throw":
+        if (!throwing || g !== T.g) next("reach");
+        break;
+      case "reach":
+        if (throwing && g !== T.g) { T.g = g; next("throw"); }
+        else if (s.throwHold && T.t > 0.05) next("fetch");
+        else if (T.t >= REACH_TIME) {
+          if (this.currentGun) next("draw");
+          else { this.toss = null; this._showGuns(); }
+        }
+        break;
+      case "draw":
+        if (s.throwHold) {
+          // Another throw straight away: the gun goes back from where it is
+          const k = Math.min(1, T.t / DRAW_TIME);
+          next("stow");
+          T.gun = this.currentGun;
+          T.t = HOLSTER_TIME * (1 - k);
+        } else if (T.t >= DRAW_TIME) { this.toss = null; this._showGuns(); }
+        break;
+    }
+  }
+
+  /** Where the right hand was last driven to (the body's frame), to start the next move from; null: from the clip. */
+  _handAt() {
+    return this._ikOn ? this._lastHand.clone() : null;
+  }
+
+  /** The throwable shown in the right hand (null: none). */
+  _showTossProp(kind) {
+    if (this._propShown === kind) return;
+    const props = this._tossProps ??= {};
+    if (this._propShown && props[this._propShown]) props[this._propShown].visible = false;
+    this._propShown = kind;
+    if (!kind || !this.b?.rHand) return;
+    let o = props[kind];
+    if (!o) {
+      try { o = cloneItem(kind); } catch { return; }
+      const k = 1 / (this.model?.scale.x || 1);
+      o.traverse(c => { if (c.isMesh) c.castShadow = false; });
+      o.position.set(0, 0.08 * k, 0.04 * k);
+      o.scale.multiplyScalar(k);
+      this.b.rHand.add(o);
+      props[kind] = o;
+    }
+    o.visible = true;
+  }
+
+  /** Seconds from the start of a throw gesture of dur seconds to the frame the throwable leaves the hand. */
+  throwReleaseDelay(dur) {
+    return dur * THROW_RELEASE;
   }
 
   _handsBusy() {
@@ -623,6 +806,8 @@ export class Soldier {
     this.dead = true;
     this.gesture = null;
     this.swap = null;
+    this.toss = null;
+    this._showTossProp(null);
     let name = info?.from ? DEATHS[info.head && (info.from === "front" || info.from === "back") ? `head_${info.from}` : info.from] : null;
     if (!name || !this.F?.[name]) name = ["death", "dying", "death_front"][Math.floor(Math.random() * 3)];
     this.deathAct = this.F?.[name] ?? null;
@@ -697,11 +882,14 @@ export class Soldier {
     if (g) { g.t += dt; if (g.t >= g.dur) { this.gesture = null; this._showGuns(); } }
     const os = this.oneShot;
     if (os) { os.t += dt; if (os.t >= os.dur) this.oneShot = null; }
-    if (this.swap) {
-      this.swap.t += dt;
-      if (!this.swap.switched && this.swap.t >= SWAP_TIME * 0.5) { this.swap.switched = true; this._showGuns(); }
-      if (this.swap.t >= SWAP_TIME) { this.swap = null; this._showGuns(); }
+    const sw = this.swap;
+    if (sw) {
+      sw.t += dt;
+      // The hand is at the sling: the old gun stays there, the new one comes away with the hand
+      if (!sw.switched && sw.t >= HOLSTER_TIME) { sw.switched = true; sw.start = this._handAt(); sw.grab = null; this._showGuns(); }
+      if (sw.t >= SWAP_TIME || this._handsBusy() || this.dead) { this.swap = null; this._showGuns(); }
     }
+    this._updateToss(dt, s);
     for (const n in this.handProps) this.handProps[n].visible = this.gesture?.name === n;
     this.woundW += ((1 - THREE.MathUtils.smoothstep(s.health ?? 1, 0.22, 0.6)) - this.woundW) * (1 - Math.exp(-3 * dt));
 
@@ -717,7 +905,7 @@ export class Soldier {
 
     for (const e of this.acts) e.target = 0;
     const speed = Math.hypot(s.localForward, s.localRight);
-    const armed = !!this.currentGun && !this._busyFlag;
+    const armed = !!this.currentGun && !this._busyFlag && !this._tossAway();
     const aimTarget = armed && (s.aiming || (g && g.name === "reload")) ? 1 : 0;
     spring(this, "aimWeight", "aimV", aimTarget, AIM_RATE, dt);
     this.aimWeight = THREE.MathUtils.clamp(this.aimWeight, 0, 1);
@@ -796,14 +984,8 @@ export class Soldier {
       const k = g.t / g.dur;
       overlay = Math.min(1, g.t / 0.15, (g.dur - g.t) / 0.25);
       if (g.name === "reload") overlayTime = k * overlayAct.dur;
-      else if (g.name === "throw") overlayTime = THREE.MathUtils.lerp(SEG.throwFrom, SEG.throwTo, k) * overlayAct.dur;
       else overlayTime = THREE.MathUtils.lerp(SEG.drinkFrom, SEG.drinkTo, k) * overlayAct.dur;
-    } else if (s.throwHold && this.O.throw) {
-      overlayAct = this.O.throw;
-      overlay = 1;
-      overlayTime = SEG.throwHold * overlayAct.dur;
     }
-    this._throwHoldW = s.throwHold ? 1 : 0;
     if (overlayAct) { overlayAct.target = overlay; overlayAct.manual = true; overlayAct.time = overlayTime; }
     const upperRest = 1 - overlay;
     if (armed) {
@@ -895,16 +1077,28 @@ export class Soldier {
     return none;
   }
 
-  /** Eases every action toward its target; plays the ones with weight, stops the rest. */
+  /**
+   * Eases every action toward its target; plays the ones with weight, stops the rest.
+   * The mixer fills whatever a bone's weights leave short of 1 with the bind pose (a
+   * T-pose), and blends easing at different rates (the rifle pose is quicker than the
+   * legs) can dip below 1 mid-transition: so each half of the body is topped back up.
+   */
   _blend(dt, rate) {
+    let full = 0, lower = 0, upper = 0;
     for (const e of this.acts) {
       spring(e, "w", "v", e.target, e.rate ?? rate, dt);
       if (e.w < 0) { e.w = 0; e.v = 0; }
       if (e.target === 0 && e.w < 0.002) { e.w = 0; e.v = 0; }
+      if (e.layer === "f") full += e.w; else if (e.layer === "l") lower += e.w; else upper += e.w;
+    }
+    const room = Math.max(0, 1 - full);
+    const kLower = lower > 0.02 && lower < room ? room / lower : 1;
+    const kUpper = upper > 0.02 && upper < room ? room / upper : 1;
+    for (const e of this.acts) {
       const a = e.a;
       if (e.w > 0) {
         if (!e.playing) { a.play(); e.playing = true; }
-        a.setEffectiveWeight(e.w);
+        a.setEffectiveWeight(e.w * (e.layer === "l" ? kLower : e.layer === "u" ? kUpper : 1));
         if (e.manual) { a.time = e.time; a.timeScale = 0; }
         else if (a.timeScale === 0) a.timeScale = 1;
       } else if (e.playing) {
@@ -921,7 +1115,7 @@ export class Soldier {
    */
   _leftHandIK(dt, armed) {
     const b = this.b, g = this.gesture, sup = SUPPORT[this.currentGun];
-    const on = armed && sup && !this.swap && !(g && OVERLAY[g.name]) && this.sw.swim < 0.5 && !this.dead;
+    const on = armed && sup && !this.swap && !this.toss && !(g && OVERLAY[g.name]) && this.sw.swim < 0.5 && !this.dead;
     const st = this._ik ??= { w: 0, v: 0 };
     spring(st, "w", "v", on ? 1 : 0, 14, dt);
     const w = Math.min(1, st.w);
@@ -949,9 +1143,208 @@ export class Soldier {
     rotateBoneInWorld(b.lArm, _q3.identity().slerp(_qStep, w));   // (_q0 / _q1 are rotateBoneInWorld's own)
   }
 
+  /**
+   * The right hand through a swap or a throw: arm IK along curves between the clip's hand,
+   * the top of the shoulder, a sling's grip, the hip pouch, the chest and the throw's
+   * wind-up, release and follow-through points. A gun going away settles from the grip into
+   * its sling pose exactly (then the slung model takes over, no pop); a gun coming off is
+   * carried from where it lay and turns into the grip on the way. Also: the throwable in the
+   * hand, the off hand pulling the pin and then pointing at the target, the chest winding up
+   * and whipping round into the throw.
+   */
+  _handsProcedural(dt, s, left, fwd) {
+    const b = this.b, sw = this.swap, T = this.toss, h = this.weapon, hl = this._holdLocal;
+    const g = this.gesture, sm = THREE.MathUtils.smoothstep;
+    const ph = T?.phase;
+    // How far through the swing (0..1)
+    const k = ph === "throw" ? (g?.name === "throw" ? Math.min(1, g.t / g.dur) : 1) : 0;
+    const pitch = THREE.MathUtils.clamp(s.aimPitch ?? 0, -0.45, 0.9);
+
+    // The body: winding up turns the chest right and back (further back for a long lob),
+    // the swing whips it round to the left and over the front foot
+    const body = this._tossBody ??= { yaw: 0, yv: 0, lean: 0, lv: 0 };
+    let yawT = 0, leanT = 0, rate = 9;
+    if (ph === "ready" || (ph === "fetch" && T.t > FETCH_TIME * 0.75)) { yawT = -0.42; leanT = -0.1 - pitch * 0.3; }
+    else if (ph === "throw") {
+      const e = sm(k, 0.05, 0.6);
+      yawT = THREE.MathUtils.lerp(-0.42, 0.38, e);
+      leanT = THREE.MathUtils.lerp(-0.1 - pitch * 0.3, 0.3 - pitch * 0.15, e);
+      rate = 30;
+    }
+    spring(body, "yaw", "yv", yawT, rate, dt);
+    spring(body, "lean", "lv", leanT, rate, dt);
+    if (Math.abs(body.yaw) > 1e-3 || Math.abs(body.lean) > 1e-3) {
+      turnBone(b.spine, _up, body.yaw * 0.3);
+      turnBone(b.spine1, _up, body.yaw * 0.35);
+      turnBone(b.spine2, _up, body.yaw * 0.35);
+      turnBone(b.spine1, left, body.lean * 0.5);
+      turnBone(b.spine2, left, body.lean * 0.5);
+    }
+
+    // The throwable: out of the pouch until it leaves the hand on the release
+    let prop = false;
+    if (ph === "ready") prop = true;
+    else if (ph === "fetch") prop = T.t / FETCH_TIME > 0.3;
+    else if (ph === "throw") prop = k < THROW_RELEASE;
+    this._showTossProp(prop ? T.kind : null);
+
+    // The off hand points at the target through the wind-up, tucks in for the swing
+    const lw = this._leftToss ??= { w: 0, v: 0 };
+    spring(lw, "w", "v", ph === "ready" || (ph === "fetch" && T.t > FETCH_TIME * 0.8) || (ph === "throw" && k < 0.75) ? 1 : 0, 12, dt);
+
+    this._ikOn = false;
+    if ((!sw && !T && lw.w < 0.01) || !b.rArm || !b.rFore || !b.rHand || !this.slings) return;
+
+    const right = _h[0].copy(left).negate();
+    const shoulder = b.rArm.getWorldPosition(_h[1]);
+    const over = _h[2].copy(shoulder).addScaledVector(_up, 0.34).addScaledVector(right, 0.06).addScaledVector(fwd, -0.03);
+    const clipHand = b.rHand.getWorldPosition(_h[3]);
+    const target = _h[4];
+    const startOf = st => {
+      if (!st.start) st.start = this.root.worldToLocal(clipHand.clone());
+      return this.root.localToWorld(_h[5].copy(st.start));
+    };
+    const gripOf = sl => sl.localToWorld(_h[6].copy(this._gripLocal));
+    // Elbow out and up when reaching over the shoulder
+    const poleOver = _h[7].copy(right).addScaledVector(_up, 0.6).addScaledVector(fwd, 0.15);
+    // Wound up: the throwable behind the right ear
+    const holdP = () => _h[10].copy(shoulder).addScaledVector(_up, 0.13).addScaledVector(fwd, -0.2).addScaledVector(right, 0.06);
+    let w = 0, pole = poleOver, pw = 1, dock = 0, carry = -1, slot = null, pin = 0;
+    const st = sw ?? T;
+    // A move that starts where the last one left the hand keeps its elbow; one that starts
+    // from the clip's pose eases the elbow in
+    const fromIK = !!st?.start;
+
+    if (sw) {
+      slot = this.slings[0];
+      if (!sw.switched) {
+        const u = sw.t / HOLSTER_TIME;
+        bezier(target, startOf(sw), over, gripOf(slot), ease(u));
+        if (sw.from) dock = sm(u, 0.55, 1);
+        pw = fromIK ? 1 : sm(u, 0, 0.3);
+      } else {
+        const u = (sw.t - HOLSTER_TIME) / DRAW_TIME;
+        bezier(target, startOf(sw), over, clipHand, ease(u));
+        if (sw.to) carry = ease((u - 0.1) / 0.75);
+        pw = 1 - sm(u, 0.6, 1);
+      }
+      w = 1;
+    } else if (ph === "stow" || ph === "reach") {
+      slot = this.slings[1];
+      const u = T.t / (ph === "stow" ? HOLSTER_TIME : REACH_TIME);
+      bezier(target, startOf(T), over, gripOf(slot), ease(u));
+      if (ph === "stow" && T.gun) dock = sm(u, 0.55, 1);
+      pw = fromIK ? 1 : sm(u, 0, 0.3);
+      w = 1;
+    } else if (ph === "draw") {
+      slot = this.slings[1];
+      const u = T.t / DRAW_TIME;
+      bezier(target, startOf(T), over, clipHand, ease(u));
+      carry = ease((u - 0.1) / 0.75);
+      pw = 1 - sm(u, 0.6, 1);
+      w = 1;
+    } else if (ph === "fetch") {
+      // Down to the pouch on the right hip, the throwable up in front of the chest (the pin),
+      // then up and back into the wind-up
+      const u = T.t / FETCH_TIME;
+      const pouch = b.hips.getWorldPosition(_h[8]).addScaledVector(right, 0.19).addScaledVector(fwd, 0.07).addScaledVector(_up, -0.04);
+      const chest = b.spine2.getWorldPosition(_h[9]).addScaledVector(fwd, 0.3).addScaledVector(right, 0.06).addScaledVector(_up, -0.1);
+      const polePouch = _h[11].copy(right).addScaledVector(fwd, -0.4);
+      const poleChest = _h[12].copy(right).multiplyScalar(0.7).addScaledVector(_up, -0.7);
+      if (u < 0.3) {
+        const e = ease(u / 0.3), a = startOf(T);
+        bezier(target, a, _h[13].addVectors(a, pouch).multiplyScalar(0.5).addScaledVector(right, 0.15), pouch, e);
+        pole = poleOver.lerp(polePouch, e);
+        pw = fromIK ? 1 : sm(u / 0.3, 0, 0.4);
+      } else if (u < 0.55) {
+        const e = ease((u - 0.3) / 0.25);
+        bezier(target, pouch, _h[13].addVectors(pouch, chest).multiplyScalar(0.5).addScaledVector(fwd, 0.12), chest, e);
+        pole = polePouch.lerp(poleChest, e);
+      } else if (u < 0.75) {
+        target.copy(chest);
+        pole = poleChest;
+      } else {
+        const e = ease((u - 0.75) / 0.25);
+        bezier(target, chest, _h[13].copy(chest).addScaledVector(_up, 0.3), holdP(), e);
+        pole = poleChest.lerp(poleOver, e);
+      }
+      w = 1;
+      // The off hand comes over and pulls the pin (lights the rag) while it's at the chest
+      pin = bump((u - 0.45) / 0.37, 0, 1, 0.35);
+    } else if (ph === "ready") {
+      target.copy(holdP());
+      w = 1;
+    } else if (ph === "throw") {
+      // Accelerating over the shoulder to the release point in front of the head (where the
+      // throwable is launched from), then slowing across the body to the left hip
+      const a = startOf(T);
+      const rel = _h[8].copy(shoulder).addScaledVector(fwd, 0.4).addScaledVector(_up, 0.2).addScaledVector(right, 0.02);
+      if (k < THROW_RELEASE) {
+        const u = k / THROW_RELEASE;
+        bezier(target, a, _h[9].copy(shoulder).addScaledVector(_up, 0.36).addScaledVector(fwd, 0.02).addScaledVector(right, 0.04), rel, u * u);
+      } else {
+        const u = (k - THROW_RELEASE) / (1 - THROW_RELEASE);
+        const follow = b.hips.getWorldPosition(_h[11]).addScaledVector(fwd, 0.3).addScaledVector(left, 0.12).addScaledVector(_up, 0.05);
+        bezier(target, rel, _h[12].copy(rel).addScaledVector(fwd, 0.2).addScaledVector(_up, -0.15), follow, 1 - (1 - u) * (1 - u));
+        pole = poleOver.lerp(_h[13].copy(right).addScaledVector(_up, -0.4).addScaledVector(fwd, -0.2), ease(u));
+      }
+      pw = fromIK ? 1 : sm(k, 0, 0.2);
+      w = 1;
+    }
+
+    if (w > 0) {
+      armIK(b.rArm, b.rFore, b.rHand, target, w, pole, pw);
+      this._ikOn = true;
+      this.root.worldToLocal(this._lastHand.copy(target));
+    }
+    if (b.lArm && b.lFore && b.lHand) {
+      if (pin > 0.01) {
+        const at = b.rHand.getWorldPosition(_h[8]).addScaledVector(_up, 0.07).addScaledVector(left, 0.03);
+        armIK(b.lArm, b.lFore, b.lHand, at, pin, _h[9].copy(left).addScaledVector(_up, -0.5), 1);
+      }
+      if (lw.w > 0.01) {
+        const ls = b.lArm.getWorldPosition(_h[8]);
+        const point = _h[9].copy(ls).addScaledVector(fwd, 0.5 * Math.cos(pitch)).addScaledVector(_up, 0.08 + 0.5 * Math.sin(pitch)).addScaledVector(left, 0.05);
+        const tuck = b.spine2.getWorldPosition(_h[10]).addScaledVector(left, 0.2).addScaledVector(fwd, 0.15).addScaledVector(_up, -0.12);
+        point.lerp(tuck, ph === "throw" ? sm(k, 0.05, 0.4) : 0);
+        armIK(b.lArm, b.lFore, b.lHand, point, lw.w, _h[11].copy(left).addScaledVector(_up, -0.6), 1);
+      }
+    }
+
+    // The gun: into the sling (blended in world space onto the slung pose), or off it
+    // (carried as grabbed, turning into the grip)
+    if (!h || !hl || !slot || (dock <= 0 && carry < 0)) return;
+    b.rHand.updateWorldMatrix(true, false);
+    slot.updateWorldMatrix(true, false);
+    const P = _h[10], S = _h[11], P2 = _h[12], S2 = _h[13];
+    if (dock > 0) {
+      _hm0.compose(hl.p, hl.q, hl.s).premultiply(b.rHand.matrixWorld).decompose(P, _hq0, S);
+      slot.matrixWorld.decompose(P2, _hq1, S2);
+      P.lerp(P2, dock); _hq0.slerp(_hq1, dock); S.lerp(S2, dock);
+      _hm0.compose(P, _hq0, S).premultiply(_m0.copy(b.rHand.matrixWorld).invert());
+      _hm0.decompose(h.position, h.quaternion, h.scale);
+    } else {
+      if (!st.grab) {
+        _hm0.copy(b.rHand.matrixWorld).invert().multiply(slot.matrixWorld);
+        st.grab = { p: new THREE.Vector3(), q: new THREE.Quaternion(), s: new THREE.Vector3() };
+        _hm0.decompose(st.grab.p, st.grab.q, st.grab.s);
+      }
+      h.position.lerpVectors(st.grab.p, hl.p, carry);
+      h.quaternion.slerpQuaternions(st.grab.q, hl.q, carry);
+      h.scale.lerpVectors(st.grab.s, hl.s, carry);
+    }
+    this._holderMoved = true;
+  }
+
   // ── Procedural layer (after the clips) ─────────────────────────────────────
   _procedural(dt, s, armed, speed) {
     const b = this.b;
+    // The gun back on the grip (carried into / out of a sling last frame); the aim and the support hand read it
+    const hl = this._holdLocal;
+    if (this._holderMoved && this.weapon && hl) {
+      this.weapon.position.copy(hl.p); this.weapon.quaternion.copy(hl.q); this.weapon.scale.copy(hl.s);
+      this._holderMoved = false;
+    }
     this.root.getWorldQuaternion(_q2);
     const side = _v0.copy(_xAxis).applyQuaternion(_q2);          // the body's left (+x), right-handed
     const fwd = _v1.set(0, 0, 1).applyQuaternion(_q2);
@@ -983,7 +1376,7 @@ export class Soldier {
     // actually blended in, so the correction never runs ahead of the clip.
     const rifle = (this.R.aim?.w ?? 0) + (this.R.fire?.w ?? 0);
     const posed = THREE.MathUtils.smoothstep(Math.min(1, rifle / Math.max(0.3, this.sw.stand + this.sw.crouch)), 0, 0.75);
-    const aimW = posed * (this.sw.stand + this.sw.crouch + this.sw.prone * 0.6) * (this.swap ? 0.4 : 1);
+    const aimW = posed * (this.sw.stand + this.sw.crouch + this.sw.prone * 0.6) * (this.swap || this.toss ? 0.4 : 1);
     if (armed && aimW > 0.01 && !s.noSpine && this.weapon) {
       // Followed by a very quick spring: a flick of the mouse turns the chest, not a one-frame snap
       // Aim at the point under the crosshair (seen from the gun), else along the camera
@@ -1023,14 +1416,7 @@ export class Soldier {
     side.copy(_xAxis).applyQuaternion(_q2);   // (the IK used these vectors)
     fwd.set(0, 0, 1).applyQuaternion(_q2);
 
-    // Swapping guns: the right hand reaches over the shoulder to the sling and back
-    if (this.swap) {
-      const k = this.swap.t / SWAP_TIME;
-      const reach = Math.sin(Math.min(1, k) * Math.PI);
-      turnBone(b.rArm, side, -1.9 * reach);
-      turnBone(b.rArm, _up, -0.5 * reach);
-      turnBone(b.rFore, side, -1.2 * reach);
-    }
+    this._handsProcedural(dt, s, side, fwd);
 
     // Procedural one-shots: reach for a door / switch, flinch when hit
     const os = this.oneShot;

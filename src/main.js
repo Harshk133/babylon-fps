@@ -6,7 +6,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
-import { Soldier } from "./player/Soldier.js";
+import { Soldier, SWAP_TIME, THROW_RECOVER } from "./player/Soldier.js";
 import { encodeAvatar } from "./player/Avatar.js";
 import { AvatarPicker } from "./ui/AvatarPicker.js";
 import { ScopeOverlay } from "./ui/ScopeOverlay.js";
@@ -162,10 +162,12 @@ const MONSTER_ANG_DAMPING      = 1.0;
 
 // ─── Weapons & Items ──────────────────────────────────────────────────────────
 // Gun stats live in combat/weapons.js; the inventory tracks what's carried.
-const SWITCH_TIME    = 0.4;   // weapon draw time after a swap
+// Weapon draw time after a swap: until the new gun is round from the sling and nearly up
+const SWITCH_TIME    = SWAP_TIME * 0.9;
 const THROW_SPEED    = 15;
 const THROW_LOFT     = 4.5;
 const THROW_COOLDOWN = 0.6;
+const THROW_GESTURE  = 0.45;  // s of the throw clip from the wind-up to the follow-through
 const DROP_LIFETIME  = 45;    // zombie loot despawns after this many seconds
 
 const inventory = new Inventory();
@@ -1433,6 +1435,7 @@ function updateCharacterMovement(delta) {
   else if (jumpQueued && onGround && alive && !swimming) {
     characterBody.velocity.y = JUMP_VELOCITY;
     jumpGrace = 0.8;
+    jumpedAir = true;
     onGround = false;
   }
   jumpQueued = false;
@@ -1554,6 +1557,11 @@ function cancelClimb() {
 // Animations beyond the clips the soldier walks and aims with (Soldier.playClip / playGesture).
 // Teammates see them too: each one goes out as an "anim" message.
 let airPose = 0;                 // eased 0..1: knees tucked in the air
+// Sprinting over hills loses ground contact for a frame or two (a crest, a steep climb):
+// the legs keep running through that, and only a jump or a real fall shows the air pose
+let offGroundTime = 0;
+let jumpedAir = false;           // set by a jump, cleared on touchdown
+const AIR_POSE_DELAY = 0.22;     // s off the ground before a fall counts as airborne
 const playerAnim = {
   clip(name, dur, weight = 1) {
     soldier.playClip(name, dur, weight);
@@ -1600,15 +1608,19 @@ function updateCrosshairPoint(delta) {
 
 function updateSoldier(delta) {
   characterRoot.updateMatrixWorld(true);
-  const inAir = !onGround && !climb.active && !drive.on && !brAirborne() && Math.abs(characterBody.velocity.y) > 1.2;
+  if (onGround || swimming || climb.active || drive.on) { offGroundTime = 0; jumpedAir = false; }
+  else offGroundTime += delta;
+  const airborne = jumpedAir || offGroundTime > AIR_POSE_DELAY;
+  const inAir = airborne && !climb.active && !drive.on && !brAirborne() && Math.abs(characterBody.velocity.y) > 1.2;
   airPose += ((inAir ? 1 : 0) - airPose) * (1 - Math.exp(-10 * delta));
+  const footed = !airborne;
   const vx = characterBody.velocity.x - knockbackVel.x;
   const vz = characterBody.velocity.z - knockbackVel.z;
   const sy = Math.sin(bodyYaw), cy = Math.cos(bodyYaw);
   const alive = playerHealth > 0;
   soldier.update(delta, {
-    localForward: onGround ? vx * sy + vz * cy : 0,
-    localRight:   onGround ? -vx * cy + vz * sy : 0,
+    localForward: footed ? vx * sy + vz * cy : 0,
+    localRight:   footed ? -vx * cy + vz * sy : 0,
     // Prone always holds the gun up (the arms are what you lie on)
     // First person holds it up too, so the gun is in front of you
     aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone" || fpBlend > 0.5),
@@ -1621,6 +1633,7 @@ function updateSoldier(delta) {
     air: airPose,
     swim: swimming,
     throwHold: throwAiming && alive,
+    throwKind: inventory.selectedThrowable,
   });
 }
 
@@ -2191,13 +2204,25 @@ function beginThrow() {
   if (cookTime === 0) sfx.pin();
 }
 
+// Letting go before the throwable is out and wound up (the gun is still going onto the back)
+// queues the throw for that moment; then the arm swings, and the throwable leaves the hand on
+// the clip's release frame, along the trajectory shown at that moment
+let throwQueued  = false;
+let pendingThrow = -1;      // s until the swinging hand lets go, −1 = none
+
 function releaseThrow() {
   if (!throwAiming) return;
+  if (!soldier.throwReady) { throwQueued = true; return; }
+  throwQueued = false;
   throwAiming = false;
   throwables.hidePreview();
-  if (playerHealth <= 0) { setCookCountdown(0); return; }
-  computeThrow();
-  launchThrow(cookTime >= 0 ? Math.max(0.05, GRENADE.cookTime - cookTime) : undefined);
+  if (playerHealth <= 0) { setCookCountdown(0); cookTime = -1; return; }
+  const delay = soldier.throwReleaseDelay(THROW_GESTURE);
+  playerAnim.gesture("throw", THROW_GESTURE);
+  pendingThrow = delay;
+  throwCooldown = THROW_COOLDOWN + delay;
+  // No shooting until the gun is back off the sling
+  if (inventory.current) weapon.switchTimer = Math.max(weapon.switchTimer, THROW_GESTURE + THROW_RECOVER);
 }
 
 /** Throws the selected item from _throwFrom at _throwVel (fuse: a cooked grenade's time left). */
@@ -2210,7 +2235,6 @@ function launchThrow(fuse) {
   const color = kind === "smoke" ? Math.floor(Math.random() * SMOKE_COLORS.length) : 0;
   if (kind === "smoke") sfx.pin();
   throwables.throw(kind, _throwFrom, _throwVel, localTarget.id, color, fuse);
-  playerAnim.gesture("throw", 0.45);
   if (net.connected) {
     net.send({
       t: "throw", k: kind, c: color, f: fuse === undefined ? undefined : +fuse.toFixed(2),
@@ -2223,6 +2247,7 @@ function launchThrow(fuse) {
 
 function cancelThrow() {
   throwAiming = false;
+  throwQueued = false;
   cookTime = -1;
   setCookCountdown(0);
   throwables.hidePreview();
@@ -2249,7 +2274,19 @@ function selectThrowable(kind) {
 
 function updateThrowAim(delta) {
   throwCooldown = Math.max(0, throwCooldown - delta);
+  if (pendingThrow >= 0) {
+    // The arm is swinging: the fuse keeps burning until the grenade leaves the hand
+    if (cookTime >= 0) cookTime += delta;
+    pendingThrow -= delta;
+    if (playerHealth <= 0) { pendingThrow = -1; cookTime = -1; setCookCountdown(0); return; }
+    if (pendingThrow > 0) return;
+    pendingThrow = -1;
+    computeThrow();
+    launchThrow(cookTime >= 0 ? Math.max(0.05, GRENADE.cookTime - cookTime) : undefined);
+    return;
+  }
   if (!throwAiming) return;
+  if (throwQueued && soldier.throwReady) { releaseThrow(); return; }
   if (playerHealth <= 0 || !isLocked()) { cancelThrow(); return; }
   computeThrow();
   if (cookTime >= 0) {
@@ -4357,7 +4394,9 @@ net.on("anim", msg => {
 });
 net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz, "monster"));
 net.on("throw", msg => {
-  remotePlayers.players.get(msg.b ?? msg.from)?.soldier?.playGesture("throw", 0.45);
+  // (Players send the swing as an "anim" first and this on the release frame: don't restart it)
+  const s = remotePlayers.players.get(msg.b ?? msg.from)?.soldier;
+  if (s) { s.tossKind = msg.k; if (s.gesture?.name !== "throw") s.playGesture("throw", THROW_GESTURE); }
   throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.b ?? msg.from, msg.c ?? 0, msg.f);
 });
 net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
@@ -4506,6 +4545,7 @@ function netTick(delta) {
       w: inventory.current, hp: Math.max(0, Math.round(playerHealth)), dead: playerHealth <= 0 ? 1 : 0,
       vis: +playerVisibility().toFixed(2), k: killsThisLife, sn: STANCE_RANK[stance], g: _gearCode || undefined,
       av: encodeAvatar(soldier.avatar), swm: swimming ? 1 : undefined, air: airPose > 0.5 ? 1 : undefined,
+      th: throwAiming && playerHealth > 0 ? inventory.selectedThrowable : undefined,
       ph: isBR() ? (br.ghost ? PHASE_PLANE : br.flight) : PHASE_GROUND,
       veh: drive.on
         ? [+drive.car.x.toFixed(2), +drive.car.z.toFixed(2), +drive.car.yaw.toFixed(3), +drive.car.speed.toFixed(2), +drive.car.fuel.toFixed(1), drive.car.index]
