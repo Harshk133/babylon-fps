@@ -70,12 +70,15 @@ export const THROW_RECOVER = REACH_TIME + DRAW_TIME * 0.75;   // s after the thr
 // wind-up): over the shoulder to the release point in front of the head by this fraction of
 // the gesture, then the follow-through across to the left hip
 const THROW_RELEASE = 0.36;
+/** Seconds the parachute landing plays (main.js holds you still for most of it). */
+export const LAND_FROM_HEIGHT = 1.35;
 // Clip segments (fractions of the clip) used for the game's moves
 const SEG = {
   drinkFrom: 0.22, drinkTo: 0.62,
   climbFrom: 0.2, climbTo: 0.98, vaultFrom: 0.32, vaultTo: 0.85,
   jumpUp: 0.32, jumpApex: 0.5, jumpLand: 0.7, jumpEnd: 0.95,
   landFrom: 0.45, landTo: 0.95,
+  chuteFrom: 0.26, chuteTo: 0.96,   // the landing from height: the last of the fall, the impact crouch, standing up
 };
 // Gestures with nothing in the hands: the gun goes on the back meanwhile
 // (throwing stows the gun itself: see _updateToss)
@@ -91,6 +94,15 @@ const _m0 = new THREE.Matrix4();
 const _up = new THREE.Vector3(0, 1, 0), _xAxis = new THREE.Vector3(1, 0, 0);
 const GEAR_MATS = [0x5b6338, 0x9a8458, 0x2a2c2f].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.8, metalness: 0.05 }));
 const STRAP_MAT = new THREE.MeshStandardMaterial({ color: 0x1d1e1c, roughness: 0.9 });
+
+// Detailed helmets and backpacks (items/GearModels.js), once they've loaded; every soldier
+// with a body re-fits its gear then (until then, and for any that's missing, the stand-ins)
+let _gearModels = null;
+const _live = new Set();
+export function setGearModels(lib) {
+  _gearModels = lib;
+  for (const s of _live) s._rebuildGear();
+}
 
 /** One step of a critically damped spring toward target (exact for a constant target). */
 function spring(st, key, vkey, target, omega, dt) {
@@ -194,6 +206,7 @@ export class Soldier {
     this.guns = {};               // id → { model, back, muzzle }
     this.currentGun = "smg";
     this.backGun = null;          // the gun slung on the back
+    this.carried = null;          // guns actually carried (null: not told, anything goes)
     this.muzzle = new THREE.Object3D();
     this.mixer = null;
 
@@ -277,6 +290,7 @@ export class Soldier {
     this.mixer = new THREE.AnimationMixer(model);
     this._buildActions();
     this._buildGear();
+    _live.add(this);
     this._attachWeapons(smg.scene);
     this.setWeapon(this.currentGun);
   }
@@ -484,11 +498,23 @@ export class Soldier {
     for (let lv = 1; lv <= 3; lv++) {
       const mat = GEAR_MATS[lv - 1];
       const helmet = new THREE.Group();
-      helmet.add(new THREE.Mesh(domeGeo, mat));
-      const brim = new THREE.Mesh(brimGeo, mat);
-      brim.position.y = r * 0.02;
-      helmet.add(brim);
-      helmet.position.set((headP.x + topP.x) / 2, headP.y + headH * 0.55, (headP.z + topP.z) / 2 + headH * 0.04);
+      const hm = _gearModels?.[`helmet${lv}`];
+      const domeX = (headP.x + topP.x) / 2, domeY = headP.y + headH * 0.55, domeZ = (headP.z + topP.z) / 2 + headH * 0.04;
+      if (hm) {
+        // The real helmet: a little wider than the head, its crown where the dome's is
+        const k = (r * 2.25) / Math.max(hm.size.x, hm.size.z) * hm.fit;
+        const m = hm.model.clone(true);
+        m.scale.setScalar(k);
+        helmet.add(m);
+        helmet.quaternion.copy(frame);
+        helmet.position.set(domeX, domeY + r * 1.02 - hm.size.y * k, domeZ);
+      } else {
+        helmet.add(new THREE.Mesh(domeGeo, mat));
+        const brim = new THREE.Mesh(brimGeo, mat);
+        brim.position.y = r * 0.02;
+        helmet.add(brim);
+        helmet.position.set(domeX, domeY, domeZ);
+      }
       this._wear(helmet, b.head, "helmet");
 
       const vest = new THREE.Group();
@@ -503,6 +529,17 @@ export class Soldier {
 
       const depth = torso.d * (0.45 + 0.15 * lv);
       const pack = new THREE.Group();
+      const pm = _gearModels?.[`backpack${lv}`];
+      if (pm) {
+        // The real pack, sized by level: as wide as the back at most, longer for the bigger ones
+        const k = Math.min(width * (0.8 + 0.06 * lv) / pm.size.x, height * (0.66 + 0.12 * lv) / pm.size.y) * pm.fit;
+        const m = pm.model.clone(true);
+        m.scale.setScalar(k);
+        pack.add(m);
+        place(pack, torso.cx, abdP.y + height * 0.55, torso.back - torso.d * 0.02);
+        this._wear(pack, b.spine2, "backpack");
+        continue;
+      }
       const bag = new THREE.Mesh(new THREE.BoxGeometry(width * 0.85, height * (0.62 + 0.1 * lv), depth), mat);
       bag.position.z = -depth / 2;
       pack.add(bag);
@@ -519,6 +556,34 @@ export class Soldier {
     }
     // Where a slung gun sits: on the back, outside a backpack's straps
     this._backFrame = { frame, chestP: chestP.clone(), torso, height, abdY: abdP.y };
+  }
+
+  /** This body is gone for good (a player who left): it stops taking gear updates. */
+  release() { _live.delete(this); }
+
+  /**
+   * Builds the gear again (the detailed models arrived), measured off the bind pose with
+   * the body at the origin facing +Z, as at load; then back to how it was.
+   */
+  _rebuildGear() {
+    if (!this.model) return;
+    const levels = { ...this.gear }, fp = this.firstPerson;
+    for (const list of Object.values(this.gearMeshes)) for (const g of list) { g.removeFromParent(); g.userData.home = null; }
+    this.gearMeshes = { helmet: [], vest: [], backpack: [] };
+    this.gear = { helmet: 0, vest: 0, backpack: 0 };
+    const root = this.root, pos = root.position.clone(), quat = root.quaternion.clone(), parent = root.parent;
+    parent?.remove(root);
+    root.position.set(0, 0, 0);
+    root.quaternion.identity();
+    this.firstPerson = false;
+    this._restPose();
+    this._buildGear();
+    root.position.copy(pos);
+    root.quaternion.copy(quat);
+    parent?.add(root);
+    root.updateMatrixWorld(true);
+    this.setGear(levels);
+    this.setFirstPerson(fp);
   }
 
   _wear(group, bone, slot) {
@@ -650,7 +715,13 @@ export class Soldier {
    */
   setWeapon(id) {
     if (id !== null && !this.guns[id]) return;
-    const from = this.currentGun;
+    let from = this.currentGun;
+    // A gun that's gone (dropped, or a battle royale drop emptying your hands) isn't put away: it just goes
+    if (from && this.carried && !this.carried.has(from)) {
+      from = null;
+      this.currentGun = null;
+      this.swap = null;
+    }
     if (from === id) { if (id) this.muzzle.position.copy(this.guns[id].muzzle); this._showGuns(); return; }
     const sw = this.swap;
     if (sw && !sw.switched) {
@@ -665,6 +736,20 @@ export class Soldier {
     this.currentGun = id;
     this._showGuns();
     if (id) this.muzzle.position.copy(this.guns[id].muzzle);
+  }
+
+  /**
+   * The guns you have (ids; null: unknown). One you no longer have leaves the sling, and the
+   * hand if it's held; the next setWeapon draws without putting anything away.
+   */
+  setCarried(ids) {
+    this.carried = ids ? new Set(ids) : null;
+    if (!this.carried) return;
+    let changed = false;
+    if (this.backGun && !this.carried.has(this.backGun)) { this.backGun = null; changed = true; }
+    const sw = this.swap;
+    if (sw && sw.to && !this.carried.has(sw.to)) { sw.to = null; changed = true; }
+    if (changed) this._showGuns();
   }
 
   /**
@@ -1037,6 +1122,12 @@ export class Soldier {
     this._procedural(dt, s, armed, speed);
   }
 
+  /** Touchdown from a parachute: the landing-from-height clip (impact crouch, then up). */
+  landFromHeight(dur = LAND_FROM_HEIGHT) {
+    this.air.on = false;
+    this.air.land = { t: 0, hard: true, chute: true, dur };
+  }
+
   /** Jump and landing (from s.air), climb and vault (gestures). → { act, w, time, lowerOnly } */
   _overrides(dt, s, armed) {
     const g = this.gesture;
@@ -1068,11 +1159,12 @@ export class Soldier {
       const L = air.land;
       L.t += dt;
       if (L.t >= L.dur) { air.land = null; return none; }
-      const act = L.hard ? pick("land") : pick("jump");
+      // Off a parachute the whole body lands (the gun, if any, stays on the upper body)
+      const act = L.chute && !armed ? this.F.land : L.hard ? pick("land") : pick("jump");
       if (!act) return none;
       const k = L.t / L.dur;
-      const [a, b] = L.hard ? [SEG.landFrom, SEG.landTo] : [SEG.jumpLand, SEG.jumpEnd];
-      return { act, w: Math.min(1, (L.dur - L.t) / 0.18), time: THREE.MathUtils.lerp(a, b, k) * act.dur, lowerOnly: armed };
+      const [a, b] = L.chute ? [SEG.chuteFrom, SEG.chuteTo] : L.hard ? [SEG.landFrom, SEG.landTo] : [SEG.jumpLand, SEG.jumpEnd];
+      return { act, w: Math.min(1, L.t / 0.08, (L.dur - L.t) / (L.chute ? 0.35 : 0.18)), time: THREE.MathUtils.lerp(a, b, k) * act.dur, lowerOnly: armed };
     }
     return none;
   }

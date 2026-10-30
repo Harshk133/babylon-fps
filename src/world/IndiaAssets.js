@@ -13,6 +13,9 @@ export const INDIA_MODELS = {
   townBuilding: "/models/india/town_building.glb",
   biscuit:      "/models/india/parle_g.glb",
   rupees:       "/models/india/rupees_2000.glb",
+  // Made for the game (sources in public/models/indian things/, no credit line needed)
+  waterTower:   "/models/india/water_tower.glb",
+  chaiwala:     "/models/india/chaiwala.glb",
 };
 
 /** Shown on the lobby's credits line (CC Attribution asks for it). */

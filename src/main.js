@@ -6,7 +6,8 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
-import { Soldier, SWAP_TIME, THROW_RECOVER } from "./player/Soldier.js";
+import { Soldier, SWAP_TIME, THROW_RECOVER, LAND_FROM_HEIGHT, setGearModels } from "./player/Soldier.js";
+import { loadGearModels, GEAR_CREDITS, GEAR_MODELS } from "./items/GearModels.js";
 import { encodeAvatar } from "./player/Avatar.js";
 import { AvatarPicker } from "./ui/AvatarPicker.js";
 import { ScopeOverlay } from "./ui/ScopeOverlay.js";
@@ -79,6 +80,8 @@ import { applyStaticIcons, gameItemIcon } from "./ui/applyIcons.js";
 import { icon } from "./ui/gameIcons.js";
 import { SHOP_ITEMS, ShopUI, fmtRupees } from "./economy/Shop.js";
 import { shopSpots, buildShops, SHOP_RANGE } from "./world/Shops.js";
+import { waterTowerSpots, buildWaterTowers } from "./world/WaterTowers.js";
+import { buildChaiwalas, chaiwalaByStall, chaiwalaAtFront, CHAIWALA_R } from "./world/Chaiwalas.js";
 import { WeaponWheel } from "./ui/WeaponWheel.js";
 import { KillStreak } from "./ui/KillStreak.js";
 import { PostFX } from "./render/PostFX.js";
@@ -1358,10 +1361,12 @@ function snapCharacterToGround() {
 
 // ─── Movement ─────────────────────────────────────────────────────────────────
 // WASD is camera-relative; the body turns to face the aim direction (strafe mode)
+let landLock = 0;   // s left of a parachute landing: no walking off mid-crouch
 function updateCharacterMovement(delta) {
   const alive = playerHealth > 0;
+  landLock = Math.max(0, landLock - delta);
   let ix = 0, iz = 0; // ix: +right, iz: +forward
-  if (alive && !inventoryOpen) {
+  if (alive && !inventoryOpen && landLock <= 0) {
     if (keys.forward)  iz += 1;
     if (keys.backward) iz -= 1;
     if (keys.right)    ix += 1;
@@ -1432,7 +1437,7 @@ function updateCharacterMovement(delta) {
   if (jumpQueued && alive && climb.offer) startClimb();
   // Jump from a crouch stands you up; from prone, to a crouch
   else if (jumpQueued && alive && stance !== "stand") setStance(stance === "prone" ? "crouch" : "stand");
-  else if (jumpQueued && onGround && alive && !swimming) {
+  else if (jumpQueued && onGround && alive && !swimming && landLock <= 0) {
     characterBody.velocity.y = JUMP_VELOCITY;
     jumpGrace = 0.8;
     jumpedAir = true;
@@ -1557,6 +1562,7 @@ function cancelClimb() {
 // Animations beyond the clips the soldier walks and aims with (Soldier.playClip / playGesture).
 // Teammates see them too: each one goes out as an "anim" message.
 let airPose = 0;                 // eased 0..1: knees tucked in the air
+let carriedVersion = -1;         // inventory.version the soldier's slung guns last matched
 // Sprinting over hills loses ground contact for a frame or two (a crest, a steep climb):
 // the legs keep running through that, and only a jump or a real fall shows the air pose
 let offGroundTime = 0;
@@ -1618,6 +1624,8 @@ function updateSoldier(delta) {
   const vz = characterBody.velocity.z - knockbackVel.z;
   const sy = Math.sin(bodyYaw), cy = Math.cos(bodyYaw);
   const alive = playerHealth > 0;
+  // A gun dropped or lost (not the one in your hands) comes off the back too
+  if (inventory.version !== carriedVersion) { carriedVersion = inventory.version; soldier.setCarried(inventory.ownedWeapons); }
   soldier.update(delta, {
     localForward: footed ? vx * sy + vz * cy : 0,
     localRight:   footed ? -vx * cy + vz * sy : 0,
@@ -1981,6 +1989,7 @@ function equipWeapon(id) {
 /** Syncs the held model, camera zoom and weapon timers to inventory.current. */
 function onWeaponChanged(withSound = true) {
   const def = currentDef();
+  soldier.setCarried(inventory.ownedWeapons);
   soldier.setWeapon(inventory.current);
   syncOptic();
   weapon.reloading = false;
@@ -2648,6 +2657,8 @@ function isOpenGround(x, z) {
 }
 
 const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag", "biscuit", "cash", "biscuit"];
+// The water towers' roofs are a sniper's perch: optics and long guns up there
+const TOWER_LOOT = ["sniper", "scope4x", "ammo", "rifle", "scope6x", "medkit", "ammo", "scope8x", "grenade", "helmet2", "ammo", "biscuit"];
 const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov", "helmet3", "vest3", "backpack3", "scope4x", "scope6x", "scope8x", "suppressor"];
 
 function spawnWorldLoot() {
@@ -2673,6 +2684,12 @@ function spawnWorldLoot() {
   [...(city?.lootSpots ?? []), ...(plots?.lootSpots ?? [])].forEach((sp, i) => {
     if (lootRng() < 0.45) return;
     const kind = HOUSE_LOOT[(i * 7 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
+    pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
+  });
+  // Up on the water towers
+  waterTowers?.lootSpots.forEach((sp, i) => {
+    if (lootRng() < 0.3) return;
+    const kind = TOWER_LOOT[(i * 5 + Math.floor(lootRng() * TOWER_LOOT.length)) % TOWER_LOOT.length];
     pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
   });
   // The caves are worth the walk: something in most chambers and junctions
@@ -3648,6 +3665,7 @@ let city = null;           // world/City.js: Shivpur, built in loadWorld()
 let plots = null;          // world/Plots.js: walled plots and building sites along the roads
 const chunks = new WorldChunks(); // world/Chunks.js: far static meshes aren't drawn
 let collegeGate = null;    // world/CollegeGate.js, placed in loadWorld()
+let waterTowers = null;    // world/WaterTowers.js: { towers, lootSpots, blocks() }, built in loadWorld()
 let indiaModels = {};      // world/IndiaAssets.js: { rickshaw, thar, truck, … } (null where missing)
 let townLabels = [];       // town names for the world map
 let roadLines = [];        // road centrelines for the maps
@@ -3655,6 +3673,23 @@ let roadLines = [];        // road centrelines for the maps
 // ─── Character GLTF Load ──────────────────────────────────────────────────────
 async function loadCharacter() {
   await soldier.load(gltfLoader);
+}
+
+/** Swaps the stand-in helmets and backpacks for the detailed models that are there (items/GearModels.js). */
+async function loadDetailedGear() {
+  const lib = await loadGearModels(gltfLoader);
+  const found = Object.keys(lib).filter(k => lib[k]);
+  if (!found.length) return;
+  const show = new THREE.Group();
+  for (const k of found) show.add(lib[k].model.clone(true));
+  show.position.copy(camera.position);
+  await renderer.compileAsync(show, camera, scene);
+  setGearModels(lib);
+  // Their credit line (CC Attribution)
+  const credits = document.querySelector(".credits");
+  const order = Object.keys(GEAR_MODELS);
+  const names = found.map(k => GEAR_CREDITS[order.indexOf(k)]).filter(Boolean);
+  if (credits && names.length) credits.textContent += ` Gear: ${names.map(([what, who]) => `${what} by ${who}`).join(" · ")} (Sketchfab, CC BY 4.0, simplified and retextured for the game).`;
 }
 
 // ─── World Assets Load ────────────────────────────────────────────────────────
@@ -3748,10 +3783,25 @@ async function loadWorld() {
   const parked = vehicleSpawns(roads);
   const stalls = shopSpots(roads);
   const props = propSpots(roads);
+  // A chaiwala by every dukaan and every town store (Shivpur's shops get theirs once the city is laid out)
+  const chaiSpots = [
+    ...stalls.map(s => chaiwalaByStall(s)),
+    ...props.filter(p => p.kind === "townBuilding").map(p => chaiwalaAtFront(p, 3.6, 5.4)),
+  ];
+  // Water towers by the towns, clear of the caves, the river, the beach and everything above
+  const taken = [...parked.map(p => ({ x: p.x, z: p.z, r: VEHICLES[p.kind].length / 2 })), ...stalls.map(s => ({ x: s.x, z: s.z, r: 2.4 })), ...props, ...chaiSpots.map(c => ({ ...c, r: CHAIWALA_R }))];
+  const towerSpots = india.waterTower ? waterTowerSpots(roads, (x, z, r) => caveBlocks(x, z, r + 4) || river.wet(x, z, r + 2)
+    || Math.hypot(x, z) < 26 + r || Math.hypot(x, z) > shoreRadius(x, z) - 30 - r
+    || Math.hypot(x - COLLEGE_GATE.x, z - COLLEGE_GATE.z) < COLLEGE_GATE.clear + r
+    || DEBRIS_SPOTS.some(([dx, dz]) => Math.hypot(dx - x, dz - z) < 5 + r)
+    || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2 + r)
+    || taken.some(p => Math.hypot(p.x - x, p.z - z) < p.r + r + 2)) : [];
   const reserved = [
     ...parked.map(p => ({ x: p.x, z: p.z, r: VEHICLES[p.kind].length / 2 + 0.5 })),
     ...stalls.map(s => ({ x: s.x, z: s.z, r: 2.4 })),
     ...props,
+    ...chaiSpots.map(c => ({ x: c.x, z: c.z, r: CHAIWALA_R })),
+    ...towerSpots,
   ];
   // Asked for every grass texel and tree / rock / pole candidate: a coarse grid keeps it to nearby spots
   const RES_CELL = 8, RES_PAD = 6, resGrid = new Map();
@@ -3799,6 +3849,10 @@ async function loadWorld() {
   city = new City({
     def: CITY, roads, rng: makeLCG(0x5141f0e), base: cityBase,
     blocked: (x, z, r) => houses.blocks(x, z, r) || caveBlocks(x, z, r) || river.wet(x, z, r) || nearParked(x, z, r),
+  });
+  // ...and a chaiwala on the pavement in front of every third shop
+  city.buildings.forEach((b, i) => {
+    if (i % 3 === 1) chaiSpots.push(chaiwalaAtFront(b, (i % 2 ? 1 : -1) * (b.w / 2 - 0.65), b.d / 2 + 0.75));
   });
 
   // Farmland between the towns (world/Farmland.js), and a farm shed (a cabin, with its loot spots) by some fields
@@ -3913,6 +3967,15 @@ async function loadWorld() {
   indiaBuildings = placeIndiaProps({
     scene, world, material: staticMaterial, spots: props, groundAt: groundHeight, mapObstacles, navObstacles,
     models: { truck: indiaModels.truck, panchayat: indiaModels.panchayat, townBuilding: indiaModels.townBuilding },
+  });
+  // Water towers you can climb, and the chaiwalas
+  waterTowers = buildWaterTowers({
+    gltf: indiaModels.waterTower ? { scene: indiaModels.waterTower } : null, scene, world, material: staticMaterial,
+    spots: towerSpots, groundAt: groundHeight, mapObstacles, navObstacles, anisotropy: renderer.capabilities.getMaxAnisotropy(),
+  });
+  buildChaiwalas({
+    gltf: indiaModels.chaiwala ? { scene: indiaModels.chaiwala } : null, scene, world, material: staticMaterial,
+    spots: chaiSpots, groundAt: groundHeight, mapObstacles, navObstacles,
   });
 
   loadMark("· water, fields, city, plots built");
@@ -5306,6 +5369,7 @@ function brSpawnLoot(seed) {
   for (const sp of indiaBuildings?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   for (const sp of city?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   for (const sp of plots?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
+  for (const sp of waterTowers?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
     pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`, it.y ?? null);
   });
@@ -5413,6 +5477,9 @@ function brLand() {
   moveVelocity.x *= 0.3;
   moveVelocity.z *= 0.3;
   characterBody.velocity.y = 0;
+  // The landing from height: knees bend into a crouch and you come back up (you stand still meanwhile)
+  soldier.landFromHeight();
+  landLock = LAND_FROM_HEIGHT * 0.65;
   if (br.state === "match" && !inventory.current) inventoryUI.feed("Landed. Find a weapon!", "info");
 }
 
@@ -6408,13 +6475,15 @@ async function boot() {
     plantTrees().catch(err => console.warn(err));
     // The animation clips nobody needs in the first seconds (deaths, swimming, climbing, throws…)
     loadExtraAnimations(gltfLoader).catch(err => console.warn(err));
+    // The detailed helmets and backpacks: compiled off-screen, then every soldier wears them
+    loadDetailedGear().catch(err => console.warn(err));
 
     setupGui();
 
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     if (BENCH_ENABLED) startBenchmark();

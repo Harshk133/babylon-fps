@@ -17,7 +17,7 @@ import { NodeIO, TextureInfo } from "@gltf-transform/core";
 import { ALL_EXTENSIONS } from "@gltf-transform/extensions";
 import {
   dedup, prune, weld, simplify, textureCompress, reorder, quantize, meshopt, resample, unpartition,
-  compactPrimitive, dequantize, join,
+  compactPrimitive, dequantize, join, metalRough,
 } from "@gltf-transform/functions";
 import { MeshoptSimplifier, MeshoptEncoder, MeshoptDecoder } from "meshoptimizer";
 import sharp from "sharp";
@@ -46,6 +46,19 @@ const MODELS = [
   { src: "public/models/india/town_building.glb", ratio: 1,    error: 0,     tex: 512 },
   { src: "public/models/india/parle_g.glb",       ratio: 0.03, error: 0.02,  tex: 512 },  // a 20 cm pickup: 77k triangles → ~2k
   { src: "public/models/india/rupees_2000.glb",   ratio: 1,    error: 0,     tex: 512 },
+  // Made for the game (public/models/indian things/, originals stay local): already low-poly with
+  // their own LODs. The water tower keeps its near mesh and collision mesh, and the
+  // "लातूर शहर महानगरपालिका" board at full width (it's read from the ground, 15 m up);
+  // the chaiwala keeps the middle LOD (a 2 m figure: 3.7k triangles is plenty)
+  {
+    src: "public/models/indian things/WaterTower/WaterTower.glb", out: "public/models/india/water_tower.opt.glb", ratio: 1, error: 0, tex: 512,
+    keepNodes: ["WaterTower_LOD0", "WaterTower_Collision"], hiTex: { pattern: /Sign/, size: 2048, quality: 92 },
+  },
+  // Helmets and backpacks worn by every soldier (Sketchfab, CC BY: credits in src/items/GearModels.js).
+  // tris: a triangle budget (simplified down to it); one 512 texture set each is plenty on a head
+  ...["helmet_1", "helmet_2", "helmet_3"].map(n => ({ src: `public/models/gear/${n}.glb`, tris: 5000, error: 0.004, tex: 512, gear: true })),
+  ...["backpack_1", "backpack_2", "backpack_3"].map(n => ({ src: `public/models/gear/${n}.glb`, tris: 4000, error: 0.004, tex: 512, gear: true })),
+  { src: "public/models/indian things/GaramChaha/Chaiwala_GaramChaha.glb", out: "public/models/india/chaiwala.opt.glb", ratio: 1, error: 0, tex: 64, keepNodes: ["Chaiwala_LOD1"] },
   // Player characters (Mixamo, converted by tools/mixamo/convert.html into raw/). One
   // is downloaded per character in use; textures are what the camera sees up close.
   { src: "public/models/mixamo/raw/char_vanguard.glb", out: "public/models/mixamo/char_vanguard.opt.glb", ratio: 1,    error: 0,     tex: 1024, noMorphs: true },
@@ -187,6 +200,10 @@ for (const m of MODELS) {
   const t0 = performance.now();
   const doc = await io.read(m.src);
   const before = countVerts(doc);
+  const ratio = m.tris ? Math.min(1, (m.tris * 3) / before) : m.ratio;
+  if (m.keepNodes) {
+    for (const node of doc.getRoot().listNodes()) if (node.getMesh() && !m.keepNodes.includes(node.getName())) node.dispose();
+  }
   if (m.keepAnimations) {
     for (const anim of doc.getRoot().listAnimations()) {
       const name = anim.getName().split("|").pop();
@@ -198,16 +215,21 @@ for (const m of MODELS) {
   // joined (the FBX import split one into 264, a draw call each), vertices welded
   if (m.noMorphs) steps.unshift(stripMorphs(), stripCustomAttributes());
   if (m.noMorphs) steps.push(weld(), join({ keepMeshes: true, keepNamed: false }));
+  // Worn gear: one primitive per material (a draw call each, on every soldier)
+  // (spec-gloss materials, which three no longer reads, converted to metal-rough first)
+  if (m.gear) steps.unshift(metalRough());
+  if (m.gear) steps.push(stripMorphs(), stripCustomAttributes(), join({ keepMeshes: false, keepNamed: false }));
   if (m.prune) {
-    steps.push(weld(), simplifyPrune(m.ratio, m.error));
-  } else if (m.ratio < 1) {
-    steps.push(weld(), simplify({ simplifier: MeshoptSimplifier, ratio: m.ratio, error: m.error, lockBorder: false }));
+    steps.push(weld(), simplifyPrune(ratio, m.error));
+  } else if (ratio < 1) {
+    steps.push(weld(), simplify({ simplifier: MeshoptSimplifier, ratio, error: m.error, lockBorder: false }));
   }
   steps.push(
     resample(m.keyTolerance ? { tolerance: m.keyTolerance } : {}),
     ...(m.animQuant ? [quantizeRotationKeys()] : []),
     prune(),
-    textureCompress({ encoder: sharp, targetFormat: "webp", resize: [m.tex, m.tex], quality: 85 }),
+    ...(m.hiTex ? [textureCompress({ encoder: sharp, targetFormat: "webp", pattern: m.hiTex.pattern, resize: [m.hiTex.size, m.hiTex.size], quality: m.hiTex.quality })] : []),
+    textureCompress({ encoder: sharp, targetFormat: "webp", resize: [m.tex, m.tex], quality: 85, ...(m.hiTex ? { pattern: new RegExp(`^(?!.*(${m.hiTex.pattern.source})).+`) } : {}) }),
     unpartition(),
     reorder({ encoder: MeshoptEncoder }),
     quantize(),

@@ -65,3 +65,10 @@ public/models/india/*/
 public/models/mixamo/characters/
 public/models/mixamo/anims/
 public/models/mixamo/raw/
+
+# Source files for the models made for the game (the optimized copies go to public/models/india/)
+public/models/indian things/
+
+# Gear originals (Sketchfab downloads); only the optimized copies are committed
+public/models/gear/*.glb
+!public/models/gear/*.opt.glb

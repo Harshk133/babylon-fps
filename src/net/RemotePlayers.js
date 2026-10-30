@@ -134,7 +134,7 @@ export class RemotePlayers {
     const soldier = new Soldier({ avatar: code });
     soldier.load(this.loader).then(() => {
       if (!this.players.has(p.id) || p.avatarCode !== code) return;
-      if (p.soldier) p.root.remove(p.soldier.root);
+      if (p.soldier) { p.root.remove(p.soldier.root); p.soldier.release(); }
       p.root.add(soldier.root);
       soldier.setWeapon(p.weapon);
       soldier.stance = p.stance;
@@ -150,6 +150,7 @@ export class RemotePlayers {
     const p = this.players.get(id);
     if (!p) return;
     this.scene.remove(p.root);
+    p.soldier?.release();
     this.scene.remove(p.tag);
     p.tag.material.map.dispose();
     p.tag.material.dispose();
@@ -191,7 +192,12 @@ export class RemotePlayers {
     p.swim = !!s.swm; p.air = s.air ? 1 : 0;
     p.throwHold = s.th ?? null;   // the throwable they're holding ready, if any
     if (s.av !== undefined && s.av !== p.avatarCode) this._build(p, s.av);
-    if (s.w !== p.weapon) { p.weapon = s.w; p.soldier?.setWeapon(s.w); }
+    if (s.w !== p.weapon) {
+      // Empty hands means no guns at all (a battle royale drop, everything dropped): nothing goes on the back
+      if (s.w == null) p.soldier?.setCarried([]);
+      else if (p.weapon == null) p.soldier?.setCarried(null);
+      p.weapon = s.w; p.soldier?.setWeapon(s.w);
+    }
     const dead = !!s.dead;
     if (dead !== p.dead) {
       p.dead = dead;
@@ -208,7 +214,10 @@ export class RemotePlayers {
     }
     // g: worn gear as helmet·100 + vest·10 + backpack levels
     p.gearCode = s.g ?? 0;
-    p.phase = s.ph ?? PHASE_GROUND;
+    const phase = s.ph ?? PHASE_GROUND;
+    // Down off the chute: the same landing from height you see on yourself
+    if (phase === PHASE_GROUND && (p.phase === PHASE_CHUTE || p.phase === PHASE_FALL)) p.soldier?.landFromHeight();
+    p.phase = phase;
     p.driving = !!s.veh;
     if (p.soldier) p.soldier.seated = p.driving;
     // Dead players and players still in the plane can't be hit
