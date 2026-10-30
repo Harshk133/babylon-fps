@@ -518,26 +518,44 @@ export class Soldier {
       this._wear(helmet, b.head, "helmet");
 
       const vest = new THREE.Group();
-      vest.add(new THREE.Mesh(vestGeo, mat));
-      for (const x of [-0.3, 0, 0.3]) {
-        const pouch = new THREE.Mesh(pouchGeo, lv === 3 ? STRAP_MAT : GEAR_MATS[Math.max(0, lv - 2)]);
-        pouch.position.set(x * width, -height * 0.14, torso.d * 0.62);
-        vest.add(pouch);
+      const vm = _gearModels?.[`vest${lv}`];
+      if (vm) {
+        // The real vest, worn over this torso: waist to the top of the shoulders, out past the
+        // chest and back, and across to the shoulders (the measured torso is the body itself)
+        const m = vm.model.clone(true);
+        const span = neckP.y - abdP.y;
+        m.scale.set(Math.max(width * 1.25, half * 2) / vm.size.x, span * 1.25 / vm.size.y, torso.d * 1.45 / vm.size.z).multiplyScalar(vm.fit);
+        vest.add(m);
+        place(vest, torso.cx, abdP.y + span * 0.55, torso.cz);
+        this._vestBack = torso.d * 0.22;   // how far its back plate stands off the back
+      } else {
+        vest.add(new THREE.Mesh(vestGeo, mat));
+        for (const x of [-0.3, 0, 0.3]) {
+          const pouch = new THREE.Mesh(pouchGeo, lv === 3 ? STRAP_MAT : GEAR_MATS[Math.max(0, lv - 2)]);
+          pouch.position.set(x * width, -height * 0.14, torso.d * 0.62);
+          vest.add(pouch);
+        }
+        place(vest, torso.cx, abdP.y + height * 0.5, torso.cz);
       }
-      place(vest, torso.cx, abdP.y + height * 0.5, torso.cz);
       this._wear(vest, b.spine2, "vest");
 
       const depth = torso.d * (0.45 + 0.15 * lv);
       const pack = new THREE.Group();
       const pm = _gearModels?.[`backpack${lv}`];
       if (pm) {
-        // The real pack, sized by level: as wide as the back at most, longer for the bigger ones
-        const k = Math.min(width * (0.8 + 0.06 * lv) / pm.size.x, height * (0.66 + 0.12 * lv) / pm.size.y) * pm.fit;
+        // The real pack at its own proportions, bigger by level (the biggest nearly the width of
+        // the back, waist to shoulders): its back panel flat on the back, centred on the spine,
+        // carried by the mid spine (the chest bone leans and twists the most when aiming)
+        const k = Math.min(width * (0.78 + 0.1 * (lv - 1)) / pm.bag.w, height * (0.7 + 0.12 * (lv - 1)) / pm.bag.h) * pm.fit;
         const m = pm.model.clone(true);
         m.scale.setScalar(k);
-        pack.add(m);
-        place(pack, torso.cx, abdP.y + height * 0.55, torso.back - torso.d * 0.02);
-        this._wear(pack, b.spine2, "backpack");
+        // (a holder, so a vest under it can push it out: setGear)
+        const holder = new THREE.Group();
+        holder.add(m);
+        pack.add(holder);
+        pack.userData.holder = holder;
+        place(pack, torso.cx, abdP.y + height * 0.5, torso.back + 0.01);
+        this._wear(pack, b.spine1, "backpack");
         continue;
       }
       const bag = new THREE.Mesh(new THREE.BoxGeometry(width * 0.85, height * (0.62 + 0.1 * lv), depth), mat);
@@ -602,6 +620,9 @@ export class Soldier {
       this.gear[slot] = lv;
       this.gearMeshes[slot].forEach((m, i) => showPart(m, i === lv - 1 && !(slot === "helmet" && this.firstPerson)));
     }
+    // A detailed vest's back plate under the backpack: the pack sits on it, not in it
+    const shift = this.gear.vest && _gearModels?.[`vest${this.gear.vest}`] ? this._vestBack ?? 0 : 0;
+    for (const g of this.gearMeshes.backpack) if (g.userData.holder) g.userData.holder.position.z = -shift;
   }
 
   /** First person (indoors): the head the camera sits in shrinks away (it's part of the body mesh). */

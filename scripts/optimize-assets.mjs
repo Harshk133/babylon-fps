@@ -58,6 +58,7 @@ const MODELS = [
   // tris: a triangle budget (simplified down to it); one 512 texture set each is plenty on a head
   ...["helmet_1", "helmet_2", "helmet_3"].map(n => ({ src: `public/models/gear/${n}.glb`, tris: 5000, error: 0.004, tex: 512, gear: true })),
   ...["backpack_1", "backpack_2", "backpack_3"].map(n => ({ src: `public/models/gear/${n}.glb`, tris: 4000, error: 0.004, tex: 512, gear: true })),
+  { src: "public/models/gear/vest_1.glb", tris: 6000, error: 0.03, tex: 512, gear: true },   // 21k triangles; one model for all three levels (tinted)
   { src: "public/models/indian things/GaramChaha/Chaiwala_GaramChaha.glb", out: "public/models/india/chaiwala.opt.glb", ratio: 1, error: 0, tex: 64, keepNodes: ["Chaiwala_LOD1"] },
   // Player characters (Mixamo, converted by tools/mixamo/convert.html into raw/). One
   // is downloaded per character in use; textures are what the camera sees up close.

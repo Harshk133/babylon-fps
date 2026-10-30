@@ -7,7 +7,7 @@ import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
 import { Soldier, SWAP_TIME, THROW_RECOVER, LAND_FROM_HEIGHT, setGearModels } from "./player/Soldier.js";
-import { loadGearModels, GEAR_CREDITS, GEAR_MODELS } from "./items/GearModels.js";
+import { loadGearModels, GEAR_CREDITS } from "./items/GearModels.js";
 import { encodeAvatar } from "./player/Avatar.js";
 import { AvatarPicker } from "./ui/AvatarPicker.js";
 import { ScopeOverlay } from "./ui/ScopeOverlay.js";
@@ -3680,15 +3680,24 @@ async function loadDetailedGear() {
   const lib = await loadGearModels(gltfLoader);
   const found = Object.keys(lib).filter(k => lib[k]);
   if (!found.length) return;
+  // Loot on the ground shows them too: helmets upright, vests and packs lying flat
+  const groundLoot = [];
+  for (const k of found) {
+    const lv = +k.slice(-1);
+    const [size, pose] = k.startsWith("helmet") ? [0.3, "upright"] : k.startsWith("vest") ? [0.55, "faceUp"] : [0.42 + 0.08 * lv, "backDown"];
+    groundLoot.push(pickups.setDetailedModel(k, lib[k].model, size, pose));
+  }
+  // Every program they need (worn, and instanced on the ground) compiled before any is seen
   const show = new THREE.Group();
   for (const k of found) show.add(lib[k].model.clone(true));
+  for (const { meshes } of groundLoot) for (const im of meshes) show.add(new THREE.InstancedMesh(im.geometry, im.material, 1));
   show.position.copy(camera.position);
   await renderer.compileAsync(show, camera, scene);
+  for (const g of groundLoot) g.use();
   setGearModels(lib);
-  // Their credit line (CC Attribution)
+  // Their credit line (CC BY): one per file that's there
   const credits = document.querySelector(".credits");
-  const order = Object.keys(GEAR_MODELS);
-  const names = found.map(k => GEAR_CREDITS[order.indexOf(k)]).filter(Boolean);
+  const names = [...new Set(found.map(k => lib[k].url))].map(url => GEAR_CREDITS[url]).filter(Boolean);
   if (credits && names.length) credits.textContent += ` Gear: ${names.map(([what, who]) => `${what} by ${who}`).join(" · ")} (Sketchfab, CC BY 4.0, simplified and retextured for the game).`;
 }
 

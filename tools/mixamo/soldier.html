@@ -34,9 +34,10 @@ const s = new Soldier({ avatar: { char: +(q.get("char") ?? 0), top: 0, bottom: 0
 await s.load(loader);
 await loadExtraAnimations(loader);
 scene.add(s.root);
-if (q.has("helmet") || q.has("backpack")) {
-  setGearModels(await loadGearModels(loader));
-  s.setGear({ helmet: +(q.get("helmet") ?? 0), vest: 0, backpack: +(q.get("backpack") ?? 0) });
+if (q.has("helmet") || q.has("backpack") || q.has("vest")) {
+  window.__gear = await loadGearModels(loader);
+  setGearModels(window.__gear);
+  s.setGear({ helmet: +(q.get("helmet") ?? 0), vest: +(q.get("vest") ?? 0), backpack: +(q.get("backpack") ?? 0) });
 }
 window.__sol = s;
 window.__V3 = THREE.Vector3;
@@ -77,6 +78,9 @@ if (q.has("laser")) {
 }
 if (q.has("unarmed")) s.setWeapon(null);
 if (q.get("gun")) s.setWeapon(q.get("gun"));
+// ?aim&fwd=3&frames=40: pose it on load (for headless screenshots)
+if (q.has("aim") || q.has("fwd")) set({ aim: q.has("aim"), fwd: +(q.get("fwd") ?? 0) });
+for (let i = 0; i < +(q.get("frames") ?? 0); i++) step(1 / 30);
 window.ready = true;
 step(0);
 </script></body></html>
