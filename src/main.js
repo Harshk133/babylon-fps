@@ -4622,7 +4622,10 @@ net.on("left", msg => {
   updateSquadPlayerCount();
   if (isBR()) brOnPlayerLeft(msg.id);
 });
-net.on("host", msg => { if (msg.id === net.id) becomeHost(); });
+net.on("host", msg => {
+  if (msg.id === net.id) becomeHost();
+  else if (isBR() && bots.count) bots.release(); // someone took over while this tab was away: they run the bots now
+});
 net.on("disconnect", () => {
   chat.setEnabled(false);
   if (isBR()) bots.clear(); // whoever hosts the room now runs them
@@ -5667,7 +5670,8 @@ characterRoot.add(myChute);
 
 // What the camera, minimap, shadows and ground chunks centre on (you, or the player you're watching)
 const focusPos = new THREE.Vector3(characterBody.position.x, characterBody.position.y, characterBody.position.z);
-const GHOST_PARK = { x: 0, y: 60, z: 0 }; // a spectator's own (hidden) body waits up here
+const GHOST_PARK = { x: 0, y: 60, z: 0 };
+const BR_HOST_QUIET = 3.5; // s without the host's match state before a player offers to take over (the relay checks too) // a spectator's own (hidden) body waits up here
 
 const br = {
   state: "warm",         // warm → count → match → end
@@ -5688,6 +5692,8 @@ const br = {
   alive: new Set(),      // player ids still standing
   outKeys: new Set(),    // tab keys (Net.key) knocked out of this match: rejoining, they spectate
   gate: null,            // host: whether the relay was last told the room is closed to newcomers
+  hostQuiet: 0,          // s since the host's last "br" (too long: ask to take over)
+  takeoverCd: 0,
   placement: 0,
   spectating: null,
   outside: false,
@@ -5835,6 +5841,7 @@ function enterBattleRoyale(welcome) {
   localTarget.id = net.id;
   remotePlayers.pvp = true;
   br.gate = null;
+  br.hostQuiet = 0;
   chat.setEnabled(true);
   chat.system(`Room "${welcome.room.slice(3)}" · press ${IS_TOUCH ? "the chat button" : "Y"} to chat`);
   for (const p of welcome.players) if (p.id !== net.id) remotePlayers.add(p);
@@ -5845,7 +5852,7 @@ function enterBattleRoyale(welcome) {
   brEnterWarmup();
   inventoryUI.feed(net.isHost
     ? `You're the host. The match starts by itself, or ${IS_TOUCH ? "tap START MATCH" : "press ENTER"} to drop now`
-    : `Joined "${welcome.room.slice(3)}" · waiting for the host to start`, "info");
+    : `Joined "${welcome.room.slice(3)}" · the match starts by itself`, "info");
 }
 
 function brWarmSpawn() {
@@ -6336,6 +6343,16 @@ function brOnPlayerLeft(id) {
 
 // ── Per frame ────────────────────────────────────────────────────────────────
 function brUpdate(delta) {
+  // The match runs in the host's game loop, which stops when its tab is hidden or the phone
+  // sleeps. Then an active player takes over, so the countdown and the drop never wait on them.
+  if (net.isClient) {
+    br.hostQuiet += delta;
+    br.takeoverCd -= delta;
+    if (br.hostQuiet > BR_HOST_QUIET && br.takeoverCd <= 0) {
+      br.takeoverCd = 2;
+      net.send({ t: "takeover" });
+    }
+  }
   if (net.isHost) bots.update(delta);
   if (net.isHost) brUpdateGate();
   if (net.isHost) {
@@ -6418,7 +6435,7 @@ function brUpdateHud(delta) {
     const players = remotePlayers.count + 1;
     let status = "", kind = "", alive = null;
     if (br.state === "warm") {
-      status = `${players}/${BR_MAX_PLAYERS} players · ${net.isHost ? (IS_TOUCH ? "tap START MATCH" : "press ENTER to start") : "waiting for the host"}`;
+      status = `${players}/${BR_MAX_PLAYERS} players · ${net.isHost ? (IS_TOUCH ? "tap START MATCH" : "press ENTER to start") : "starting soon"}`;
     } else if (br.state === "count") {
       status = `Match starts in ${Math.ceil(br.countdown)}${net.isHost ? (IS_TOUCH ? " · START MATCH: go now" : " · ENTER: start now") : ""}`;
       kind = "warn";
@@ -6457,6 +6474,7 @@ function brUpdateHud(delta) {
 
 net.on("br", msg => {
   if (!isBR() || net.isHost) return;
+  br.hostQuiet = 0;
   applyWorldClock(msg.hr, msg.wx);
   if (msg.s === "match") {
     // Missed the start (or joined late): build the match from the seed

@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 const COLORS = ["#4dd2ff", "#ffb347", "#7dff6a", "#ff6ad5", "#ffe14d", "#b48cff", "#ff6a6a", "#6affd8"];
 const MAX_PER_ROOM = 8;      // co-op rooms
 const MAX_PER_BR_ROOM = 100; // battle royale rooms ("br-<code>")
-const CHAT_MAX = 120;        // characters per chat message (src/ui/Chat.js cuts at the same length)
+const CHAT_MAX = 120;
+const HOST_QUIET = 3000;     // ms: a battle royale host that sent no game messages this long can be replaced        // characters per chat message (src/ui/Chat.js cuts at the same length)
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "").split(",").map(s => s.trim().replace(/\/$/, "")).filter(Boolean);
 
 const rooms = new Map(); // room name → { players: Map<id, client>, hostId, closed }
@@ -53,6 +54,7 @@ function join(ws, msg) {
     color: COLORS.find(c => !used.has(c)) ?? COLORS[nextId % COLORS.length],
     // The tab's own id (kept across reloads and reconnects), so the host can tell a returning player
     key: String(msg.key ?? "").replace(/[^a-z0-9]/gi, "").slice(0, 24),
+    lastGame: Date.now(), // last game message (pings don't count: a background tab still pings)
   };
   room.players.set(client.id, client);
   if (room.hostId === null) room.hostId = client.id;
@@ -101,6 +103,18 @@ export function attachRelay(httpServer, path = "/ws") {
         return;
       }
       if (msg.t === "ping") { send(ws, { t: "pong", ts: msg.ts }); return; }
+      client.lastGame = Date.now();
+      if (msg.t === "takeover") {
+        // A battle royale player whose host went quiet (tab in the background, phone screen off):
+        // they run the match from now on, so the countdown and the drop don't wait for anyone
+        const room = client.room, host = room.players.get(room.hostId);
+        if (client.roomName.startsWith("br-") && host && host !== client && Date.now() - host.lastGame > HOST_QUIET) {
+          room.hostId = client.id;
+          const data = JSON.stringify({ t: "host", id: client.id });
+          for (const c of room.players.values()) if (c.ws.readyState === c.ws.OPEN) c.ws.send(data);
+        }
+        return;
+      }
       if (msg.t === "roomlock") {
         // The host opens / closes the room to new players; never forwarded
         if (client.id === client.room.hostId) client.room.closed = msg.closed ? String(msg.reason ?? "closed").slice(0, 160) : null;

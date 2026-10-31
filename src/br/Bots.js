@@ -120,6 +120,13 @@ export class Bots {
     this.byId.clear();
   }
 
+  /** No longer the host (someone took over): stop running the bots, they stay as remote players. */
+  release() {
+    for (const b of this.list) if (b.car) b.car.driver = null;
+    this.list.length = 0;
+    this.byId.clear();
+  }
+
   /** New host after the old one left: take over the bots it was running (with what they're carrying unknown). */
   adopt() {
     if (this.list.length) return;
