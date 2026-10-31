@@ -3,6 +3,7 @@ import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import { PICKUP_KINDS } from "../combat/weapons.js";
 import { groundHeight } from "../world/Terrain.js";
 import { getItemTemplate } from "../items/ItemModels.js";
+import { toFloatGeometry } from "../world/MergeStatic.js";
 
 const MAX_ACTIVE      = 720;  // battle royale: ~430 placed (most in town houses) + every player's spilled loot
 const INTERACT_RADIUS = 2.2;   // weapons, gear, attachments: shows the [E] prompt
@@ -294,6 +295,41 @@ export class Pickups {
     return out;
   }
 
+  /**
+   * Draws a kind with a detailed, textured model from now on (items/GearModels.js)
+   * instead of its baked stand-in: one InstancedMesh per material, lying as `pose` says ("upright", "faceUp": its +Z to the sky, "backDown":
+   * its −Z to the sky), `size` metres across its largest side. Returns
+   * { meshes, use() }: compile the meshes' programs, then use() switches the kind over.
+   */
+  setDetailedModel(kind, object3D, size, pose = "upright") {
+    const draw = this.kindDraw[kind];
+    if (!draw) return { meshes: [], use() {} };
+    const holder = new THREE.Group();
+    const m = object3D.clone(true);
+    m.rotation.x = pose === "faceUp" ? -Math.PI / 2 : pose === "backDown" ? Math.PI / 2 : 0;
+    holder.add(m);
+    holder.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(holder), dims = box.getSize(new THREE.Vector3()), c = box.getCenter(new THREE.Vector3());
+    const k = size / Math.max(dims.x, dims.y, dims.z);
+    const base = new THREE.Matrix4().makeScale(k, k, k).premultiply(new THREE.Matrix4().makeTranslation(-c.x * k, -box.min.y * k + 0.01, -c.z * k));
+    // (no white rim: these are open shells, a vest's or a helmet's inside would show it as wire)
+    const meshes = [];
+    holder.traverse(o => {
+      if (!o.isMesh) return;
+      const geo = toFloatGeometry(o.geometry).applyMatrix4(_m.multiplyMatrices(base, o.matrixWorld));   // (quantized: can't take a transform)
+      const im = new THREE.InstancedMesh(geo, o.material, MODELS_PER_KIND);
+      this._prepare(im, 0);
+      meshes.push(im);
+    });
+    return {
+      meshes,
+      use: () => {
+        draw.detail = meshes;
+        draw.matte = draw.metal = draw.outline = -1;   // the baked stand-in isn't drawn any more
+      },
+    };
+  }
+
   /** py: the player's feet height (only loot on the same floor can be picked up). */
   update(delta, px, pz, py = null) {
     this._time += delta;
@@ -302,7 +338,11 @@ export class Pickups {
     this.touching.length = 0;
     let best = INTERACT_RADIUS * INTERACT_RADIUS;
     for (const cls in this.batches) this.batches[cls].used = 0;
-    for (const kind in this.kindDraw) { const g = this.kindDraw[kind].glass; if (g) g.count = 0; }
+    for (const kind in this.kindDraw) {
+      const d = this.kindDraw[kind];
+      if (d.glass) d.glass.count = 0;
+      if (d.detail) for (const im of d.detail) im.count = 0;
+    }
 
     for (let i = this.active.length - 1; i >= 0; i--) {
       const e = this.active[i];
@@ -325,6 +365,7 @@ export class Pickups {
         this._place("metal", draw.metal);
         this._place("outline", draw.outline);
         if (draw.glass && draw.glass.count < MODELS_PER_KIND) draw.glass.setMatrixAt(draw.glass.count++, _m);
+        if (draw.detail) for (const im of draw.detail) if (im.count < MODELS_PER_KIND) im.setMatrixAt(im.count++, _m);
       }
       if (py !== null && Math.abs(e.y - py) > 1.4) continue; // the other floor of a house
       if (e.pending) continue;
@@ -346,10 +387,12 @@ export class Pickups {
     }
     // An empty InstancedMesh still costs a draw call (and a shadow one): hide glass with nothing in range
     for (const kind in this.kindDraw) {
-      const g = this.kindDraw[kind].glass;
-      if (!g) continue;
-      g.visible = g.count > 0;
-      if (g.count) g.instanceMatrix.needsUpdate = true;
+      const d = this.kindDraw[kind];
+      for (const g of d.detail ? [d.glass, ...d.detail] : [d.glass]) {
+        if (!g) continue;
+        g.visible = g.count > 0;
+        if (g.count) g.instanceMatrix.needsUpdate = true;
+      }
     }
   }
 }

@@ -1,5 +1,4 @@
-import { icon, iconUrl, ICON_PATHS, ICON_CREDITS } from "./gameIcons.js";
-import { CREDITS } from "../world/IndiaAssets.js";
+import { icon, iconUrl, ICON_PATHS } from "./gameIcons.js";
 
 // Puts the game-icons.net set (src/ui/gameIcons.js) into the static HUD and
 // lobby markup at boot, so index.html stays readable. Each swap keeps the old
@@ -27,14 +26,7 @@ export function applyStaticIcons() {
   if (veh) veh.innerHTML = `${icon("steering", "veh-icon")}<span id="veh-name">AUTO-RICKSHAW</span>`;
   const noise = document.querySelector("#noise-meter .noise-label");
   if (noise) noise.innerHTML = `${icon("noise", "noise-icon")}NOISE`;
-  // CC BY credits for the Sketchfab models and the icons, on the pause screen
-  const start = document.getElementById("start-screen");
-  if (start && !start.querySelector(".credits")) {
-    const p = document.createElement("p");
-    p.className = "credits";
-    p.textContent = `3D models (Sketchfab, CC BY): ${CREDITS.map(([what, who]) => `${what} by ${who}`).join(" · ")}. ${ICON_CREDITS}.`;
-    start.append(p);
-  }
+  // (the credits for every model, icon, sound and font: the Credits & Legal screen, ui/LegalScreen.js)
 }
 
 /** Gear and item ids that share an icon. */

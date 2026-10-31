@@ -11,6 +11,7 @@ import "./touch.css";
 import { icon } from "../ui/gameIcons.js";
 
 const SETTINGS_KEY = "babylon-fps:touch";
+const LAYOUT_KEY = "babylon-fps:touch-layout";   // where you've dragged the buttons: { id: { x, y, s } }
 const DEG = Math.PI / 180;
 
 /** Phones, tablets and the Capacitor app. ?touch=1 / ?touch=0 forces it (desktop testing). */
@@ -26,7 +27,9 @@ export const IS_TOUCH = (() => {
 export const IS_NATIVE = !!window.Capacitor?.isNativePlatform?.();
 
 const DEFAULTS = {
-  look: 1.6,        // drag-to-look speed
+  v: 2,             // settings version (2: the faster look)
+  look: 4,          // drag-to-look speed
+  flick: 1,         // swipe boost: a quick flick turns further than a slow drag (0 = off)
   gyro: "always",   // "off" | "aim" (only while scoped) | "always"
   gyroSens: 1.6,    // camera degrees per degree the phone turns
   invertY: false,
@@ -36,15 +39,23 @@ const DEFAULTS = {
 };
 
 function loadSettings() {
-  try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") }; }
-  catch { return { ...DEFAULTS }; }
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+    // Still on the old default look speed: move up to the new one
+    if ((saved.v ?? 1) < 2 && saved.look === 1.6) delete saved.look;
+    return { ...DEFAULTS, ...saved, v: DEFAULTS.v };
+  } catch { return { ...DEFAULTS }; }
+}
+
+function loadLayout() {
+  try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}") || {}; } catch { return {}; }
 }
 
 // Button icons: the game-icons.net set (src/ui/gameIcons.js), like the rest of the HUD
 const ICONS = Object.fromEntries(Object.entries({
   fire: "fire", scope: "scope", jump: "jump", crouch: "crouch", prone: "prone", reload: "reload",
   grenade: "grenade", swap: "swap", bag: "bag", torch: "flashlight", pause: "pause", gear: "gear",
-  map: "map", gyro: "gyro", heal: "medkit", door: "door", drive: "steering", shop: "shop",
+  map: "map", gyro: "gyro", heal: "medkit", door: "door", drive: "steering", shop: "shop", run: "jump",
 }).map(([k, name]) => [k, icon(name)]));
 
 function el(tag, cls, html) {
@@ -71,7 +82,8 @@ export class TouchControls {
     this.settings = loadSettings();
     this.moveX = 0;      // −1..1, + = right
     this.moveY = 0;      // −1..1, + = forward
-    this.sprint = false;
+    this._sprint = false;
+    this.sprintOn = false;   // the RUN button's toggle
     this.aimOn = false;
     this.gyroAvailable = false;
 
@@ -84,8 +96,12 @@ export class TouchControls {
 
     document.body.classList.add("touch");
     if (IS_NATIVE) document.body.classList.add("native");
+    this.layout = loadLayout();
+    this.editing = false;
     this._build();
+    this.root.append(this._buildEditor());
     this._applySettings();
+    this._applyLayout();
     this._bindHud();
     this._bindGyro();
   }
@@ -127,6 +143,7 @@ export class TouchControls {
     this.healBtn = btn("tc-heal", "heal");
     this.healCount = el("span", "tc-badge", "0");
     this.healBtn.append(this.healCount);
+    this.runBtn = btn("tc-run", "run", "RUN");
     this.bagBtn = btn("tc-bag tc-small", "bag");
     this.torchBtn = btn("tc-torch tc-small", "torch");
     this.mapBtn = btn("tc-map tc-small", "map");
@@ -171,7 +188,7 @@ export class TouchControls {
     s.innerHTML = `
       <div class="tc-set-panel">
         <h2>TOUCH CONTROLS</h2>
-        <label><span>Look speed <b data-out="look"></b></span><input type="range" data-k="look" min="0.4" max="4" step="0.1"></label>
+        <label><span>Look speed <b data-out="look"></b></span><input type="range" data-k="look" min="0.5" max="10" step="0.1"></label>
         <label><span>Gyroscope</span>
           <select data-k="gyro">
             <option value="always">Always on</option>
@@ -180,6 +197,7 @@ export class TouchControls {
           </select>
         </label>
         <label><span>Gyro sensitivity <b data-out="gyroSens"></b></span><input type="range" data-k="gyroSens" min="0.3" max="4" step="0.1"></label>
+        <label><span>Swipe boost <b data-out="flick"></b></span><input type="range" data-k="flick" min="0" max="2" step="0.1"></label>
         <label class="tc-check"><input type="checkbox" data-k="invertY"><span>Invert up / down</span></label>
         <label><span>Button size <b data-out="size"></b></span><input type="range" data-k="size" min="0.7" max="1.4" step="0.05"></label>
         <label><span>Button opacity <b data-out="opacity"></b></span><input type="range" data-k="opacity" min="0.3" max="1" step="0.05"></label>
@@ -191,6 +209,7 @@ export class TouchControls {
           </select>
         </label>
         <p class="tc-gyro-note"></p>
+        <button data-act="edit" class="tc-edit-open">Edit button layout</button>
         <div class="tc-set-row"><button data-act="reset" class="ghost">Defaults</button><button data-act="done">Done</button></div>
       </div>`;
     const write = () => {
@@ -217,6 +236,7 @@ export class TouchControls {
       const act = e.target.dataset?.act;
       if (act === "reset") { this.settings = { ...DEFAULTS }; this._saveSettings(); write(); }
       if (act === "done") this.showSettings(false);
+      if (act === "edit") { this.showSettings(false); this.editLayout(true); }
       if (e.target === s) this.showSettings(false);
     });
     this._writeSettings = write;
@@ -311,7 +331,12 @@ export class TouchControls {
     const dx = e.clientX - t.x, dy = e.clientY - t.y;
     t.x = e.clientX; t.y = e.clientY;
     if (dx || dy) {
-      const k = this.settings.look;
+      // A quick flick turns further than a slow drag (fine aim stays fine): like a mouse
+      const now = e.timeStamp, dt = Math.max(4, now - (t.t ?? now - 16));
+      t.t = now;
+      const speed = Math.hypot(dx, dy) / dt;                 // px per ms
+      const boost = 1 + this.settings.flick * Math.min(2.5, Math.max(0, speed - 0.25) * 1.4);
+      const k = this.settings.look * boost;
       this.cb.look(dx * k, dy * k * (this.settings.invertY ? -1 : 1));
     }
   }
@@ -381,6 +406,10 @@ export class TouchControls {
     this._hold(this.throwBtn, () => cb.key("KeyG", true), () => cb.key("KeyG", false), true);
     this._tapKey(this.swapBtn, "KeyQ");
     this._tapKey(this.healBtn, "KeyH");
+    this._hold(this.runBtn, () => {
+      this.sprintOn = !this.sprintOn;
+      this.runBtn.classList.toggle("on", this.sprintOn);
+    });
     this._tapKey(this.bagBtn, "KeyI");
     this._tapKey(this.torchBtn, "KeyN");
     this._tapKey(this.mapBtn, "KeyM");
@@ -399,6 +428,120 @@ export class TouchControls {
     this.pauseBtn.addEventListener("click", () => cb.pause());
     this.chatBtn.addEventListener("click", e => { e.stopPropagation(); cb.chat?.(); });
     this.gearBtn.addEventListener("click", e => { e.stopPropagation(); this.showSettings(true); });
+  }
+
+  /** Sprinting: the joystick pushed past its ring, or the RUN button switched on (and moving). */
+  get sprint() { return this._sprint || (this.sprintOn && this.moveY > 0.3); }
+  set sprint(v) { this._sprint = v; }
+
+  // ── Button layout: drag any button where you want it ──────────────────────
+
+  /** The buttons you can move. */
+  _layoutButtons() {
+    return [this.fireR, this.fireL, this.scopeBtn, this.jumpBtn, this.crouchBtn, this.proneBtn, this.reloadBtn,
+      this.throwBtn, this.swapBtn, this.healBtn, this.runBtn, this.bagBtn, this.torchBtn, this.mapBtn, this.gyroBtn, this.pauseBtn];
+  }
+
+  /** A button's id in the layout: its own class (tc-fire, tc-jump, …). */
+  _layoutId(b) { return [...b.classList].find(c => c.startsWith("tc-") && c !== "tc-btn" && c !== "tc-small" && c !== "tc-picked"); }
+
+  _applyLayout(layout = this.layout) {
+    for (const b of this._layoutButtons()) {
+      const l = layout[this._layoutId(b)];
+      b.style.translate = l ? `${l.x}px ${l.y}px` : "";
+      b.style.scale = l?.s && l.s !== 1 ? `${l.s}` : "";
+    }
+  }
+
+  _buildEditor() {
+    const bar = this.editBar = el("div", "tc-edit-bar");
+    bar.innerHTML = `
+      <div class="tc-edit-title"><b>EDIT LAYOUT</b><span>Drag a button to move it · tap one to resize it</span></div>
+      <label class="tc-edit-size"><span>Size <b data-out="size">—</b></span><input type="range" min="0.6" max="1.8" step="0.05" value="1" disabled></label>
+      <div class="tc-edit-row">
+        <button data-act="reset-one" class="ghost" disabled>Reset button</button>
+        <button data-act="reset-all" class="ghost">Reset all</button>
+        <button data-act="cancel" class="ghost">Cancel</button>
+        <button data-act="save">Save</button>
+      </div>`;
+    const range = bar.querySelector("input"), sizeOut = bar.querySelector("[data-out=size]");
+    const showSel = () => {
+      const l = this._sel && this._draft[this._layoutId(this._sel)];
+      range.disabled = !this._sel;
+      bar.querySelector("[data-act=reset-one]").disabled = !this._sel;
+      range.value = l?.s ?? 1;
+      sizeOut.textContent = this._sel ? `${Math.round((l?.s ?? 1) * 100)}%` : "—";
+      for (const b of this._layoutButtons()) b.classList.toggle("tc-picked", b === this._sel);
+    };
+    this._showSel = showSel;
+    range.addEventListener("input", () => {
+      if (!this._sel) return;
+      const l = this._draft[this._layoutId(this._sel)] ??= { x: 0, y: 0, s: 1 };
+      l.s = parseFloat(range.value);
+      this._applyLayout(this._draft);
+      showSel();
+    });
+    bar.addEventListener("pointerdown", e => e.stopPropagation());
+    bar.addEventListener("click", e => {
+      const act = e.target.dataset?.act;
+      if (!act) return;
+      if (act === "reset-one" && this._sel) { delete this._draft[this._layoutId(this._sel)]; this._applyLayout(this._draft); showSel(); }
+      if (act === "reset-all") { this._draft = {}; this._applyLayout(this._draft); showSel(); }
+      if (act === "cancel") this.editLayout(false);
+      if (act === "save") this.editLayout(false, true);
+    });
+
+    // While editing, pressing a button picks it up instead of pressing it (capture: before its own handler)
+    const drag = { id: null, b: null, x: 0, y: 0, ox: 0, oy: 0 };
+    this.root.addEventListener("pointerdown", e => {
+      if (!this.editing) return;
+      const b = e.target.closest(".tc-btn");
+      if (!b || !this._layoutButtons().includes(b)) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const l = this._draft[this._layoutId(b)] ??= { x: 0, y: 0, s: 1 };
+      Object.assign(drag, { id: e.pointerId, b, x: e.clientX, y: e.clientY, ox: l.x, oy: l.y });
+      this._sel = b;
+      showSel();
+    }, true);
+    window.addEventListener("pointermove", e => {
+      if (!this.editing || drag.id !== e.pointerId) return;
+      const l = this._draft[this._layoutId(drag.b)];
+      l.x = drag.ox + e.clientX - drag.x;
+      l.y = drag.oy + e.clientY - drag.y;
+      this._applyLayout(this._draft);
+      // Kept on the screen
+      const r = drag.b.getBoundingClientRect();
+      if (r.left < 0) l.x -= r.left; else if (r.right > innerWidth) l.x -= r.right - innerWidth;
+      if (r.top < 0) l.y -= r.top; else if (r.bottom > innerHeight) l.y -= r.bottom - innerHeight;
+      this._applyLayout(this._draft);
+    });
+    const drop = e => { if (drag.id === e.pointerId) drag.id = null; };
+    window.addEventListener("pointerup", drop);
+    window.addEventListener("pointercancel", drop);
+    return bar;
+  }
+
+  /** Into / out of the layout editor; save keeps what you dragged (per device). */
+  editLayout(on, save = false) {
+    if (on) {
+      this.editing = true;
+      this._draft = JSON.parse(JSON.stringify(this.layout));
+      this._sel = null;
+      this._showSel();
+    } else {
+      if (save) {
+        // Untouched entries don't need storing
+        for (const [id, l] of Object.entries(this._draft)) if (!l.x && !l.y && (l.s ?? 1) === 1) delete this._draft[id];
+        this.layout = this._draft;
+        try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(this.layout)); } catch { /* private mode */ }
+      }
+      this.editing = false;
+      this._sel = null;
+      this._applyLayout();
+      for (const b of this._layoutButtons()) b.classList.remove("tc-picked");
+    }
+    this.root.classList.toggle("editing", this.editing);
   }
 
   setAim(on) {

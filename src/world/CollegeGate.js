@@ -2,8 +2,8 @@ import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { GROUP_WORLD, GROUP_GLASS } from "../physicsGroups.js";
 
-// The college gate (MSBECL): stone pillars, a beam with the college's name on
-// it, a guard booth in the middle and iron gates over the two lanes either
+// The college gate: stone pillars, a plain beam (the college's name was taken
+// off the model), a guard booth in the middle and iron gates over the two lanes either
 // side, across the North Road between Crossroads and Ravencross. The model
 // (public/models/msbecl_gate_final.glb, optimized copy loaded first) is
 // built to scale in metres: ground at y = 0, spanning its local X.

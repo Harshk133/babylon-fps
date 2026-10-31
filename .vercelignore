@@ -15,3 +15,6 @@ public/texture/ratamahatta.png
 public/models/mixamo/characters/
 public/models/mixamo/anims/
 public/models/mixamo/raw/
+public/models/gear/*.glb
+!public/models/gear/*.opt.glb
+public/models/indian things/

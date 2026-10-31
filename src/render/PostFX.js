@@ -14,6 +14,15 @@ import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
 // the edges, the weapon wheel's slow motion goes cold with film lines, a kill
 // streak frenzy goes hot and saturated, kills and cleared levels flash, death
 // fades to grey. main.js feeds a state object to update() every frame.
+//
+// Battle royale moments ride the same pass (each one a uniform-gated branch,
+// free while it's off): a radial speed blur with wind streaks in the skydive;
+// a storm warp and crackling blue edges outside the zone; screen-space
+// shockwave rings (nearby grenades, your eliminations, the zone starting to
+// close, landing); a "signal lost" glitch when you're eliminated or switch
+// who you watch; a drone-camera feed while spectating (barrel lens, phosphor
+// tint, tracking band, corner brackets, blinking REC dot); letterbox bars and
+// a teal / orange split tone for the final three; golden god rays on a win.
 
 const GradeShader = {
   uniforms: {
@@ -33,6 +42,18 @@ const GradeShader = {
     uFlashColor: { value: new THREE.Color(1, 1, 1) },
     uGrain: { value: 0 },
     uScan: { value: 0 },
+    // Battle royale
+    uRadial: { value: 0 },  // skydive zoom blur
+    uLines: { value: 0 },   // skydive wind streaks
+    uStorm: { value: 0 },   // outside the zone
+    uGlitch: { value: 0 },  // signal lost / switching feeds
+    uFeed: { value: 0 },    // spectator drone camera
+    uBars: { value: 0 },    // final-circle letterbox
+    uShow: { value: 0 },    // final-circle split tone
+    uRays: { value: 0 },    // victory god rays
+    // Shockwaves: x, y (screen uv), radius (screen heights), strength
+    uWaves: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] },
+    uWaveTint: { value: [new THREE.Color(), new THREE.Color(), new THREE.Color(), new THREE.Color()] },
   },
   vertexShader: /* glsl */ `
     precision highp float;
@@ -63,21 +84,85 @@ const GradeShader = {
     uniform vec3 uFlashColor;
     uniform float uGrain;
     uniform float uScan;
+    uniform float uRadial;
+    uniform float uLines;
+    uniform float uStorm;
+    uniform float uGlitch;
+    uniform float uFeed;
+    uniform float uBars;
+    uniform float uShow;
+    uniform float uRays;
+    uniform vec4 uWaves[4];
+    uniform vec3 uWaveTint[4];
     #include <tonemapping_pars_fragment>
     #include <colorspace_pars_fragment>
     varying vec2 vUv;
 
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+    // The scene only filled the bottom-left uScale of the target; never read past it
+    vec3 samp(vec2 uv) { return texture2D(tDiffuse, clamp(uv, 0.001, 0.999) * uScale).rgb; }
+
     void main() {
+      float aspect = uRes.x / uRes.y;
+      vec2 uv = vUv;
       vec2 c = vUv - 0.5;
+      float edge = length(c * vec2(aspect, 1.0)) / length(vec2(aspect, 1.0) * 0.5);
+      float lensMask = 1.0;
+
+      // Drone camera: barrel lens (the corners fall off the glass)
+      if (uFeed > 0.001) {
+        float r2 = dot(c, c);
+        uv = 0.5 + c * (1.0 + uFeed * (0.22 * r2 + 0.2 * r2 * r2)) / (1.0 + uFeed * 0.08);
+        vec2 o = abs(uv - 0.5);
+        lensMask = 1.0 - smoothstep(0.49, 0.5, max(o.x, o.y));
+        // Tracking band rolling down the picture
+        float band = 1.0 - smoothstep(0.0, 0.04, abs(uv.y - fract(1.0 - uTime * 0.09)));
+        uv.x += band * (hash(vec2(floor(uv.y * uRes.y * 0.5), uTime)) - 0.5) * 0.025 * uFeed;
+      }
+
+      // Signal glitch: torn horizontal slices
+      if (uGlitch > 0.001) {
+        float h = hash(vec2(floor(uv.y * 22.0), floor(uTime * 24.0)));
+        uv.x += (h - 0.5) * 0.16 * uGlitch * step(1.0 - 0.55 * uGlitch, h);
+        uv.y += (hash(vec2(floor(uTime * 15.0), 3.1)) - 0.5) * 0.03 * uGlitch * step(0.7, h);
+      }
+
+      // Outside the zone: the air itself wobbles, harder toward the edges
+      if (uStorm > 0.001) {
+        uv += uStorm * (0.002 + 0.006 * edge) * vec2(
+          sin(uv.y * 38.0 + uTime * 7.0) + 0.5 * sin(uv.y * 91.0 - uTime * 13.0),
+          cos(uv.x * 31.0 - uTime * 5.0));
+      }
+
+      // Shockwaves: a refracting ring pushes the picture outward as it passes
+      float ringGlow = 0.0;
+      vec3 ringCol = vec3(0.0);
+      for (int i = 0; i < 4; i++) {
+        vec4 w = uWaves[i];
+        if (w.w < 0.001) continue;
+        vec2 dv = (vUv - w.xy) * vec2(aspect, 1.0);
+        float dist = length(dv);
+        float ring = dist - w.z;
+        float t = exp(-ring * ring * 700.0);
+        uv -= dv / max(dist, 1e-4) * ring * t * w.w * 0.9 / vec2(aspect, 1.0);
+        ringGlow += t * w.w;
+        ringCol += uWaveTint[i] * t * w.w;
+      }
+
+      // Chromatic aberration (stronger on shockwave rings), split sideways in a glitch
+      float ch = uChroma + ringGlow * 6.0;
+      vec2 off = (uv - 0.5) * ch / uRes.y * 2.0 + vec2(uGlitch * 0.012 + uFeed * 0.0015, 0.0);
       vec3 col;
-      // Chromatic aberration: red and blue pulled apart toward the edges
-      // (the scene only filled the bottom-left uScale of the target)
-      vec2 suv = vUv * uScale;
-      if (uChroma > 0.01) {
-        vec2 off = c * uChroma / uRes.y * 2.0 * uScale;
-        col = vec3(texture2D(tDiffuse, suv + off).r, texture2D(tDiffuse, suv).g, texture2D(tDiffuse, suv - off).b);
+      if (uRadial > 0.001) {
+        // Skydive: eight taps toward the centre, a zoom blur that grows with speed
+        vec2 dir = (uv - 0.5) * uRadial * 0.075;
+        col = vec3(0.0);
+        for (int i = 0; i < 8; i++) col += samp(uv - dir * (float(i) / 7.0));
+        col *= 0.125;
+      } else if (ch > 0.01 || uGlitch > 0.001 || uFeed > 0.001) {
+        col = vec3(samp(uv + off).r, samp(uv).g, samp(uv - off).b);
       } else {
-        col = texture2D(tDiffuse, suv).rgb;
+        col = samp(uv);
       }
 
       col = ACESFilmicToneMapping(col);
@@ -95,17 +180,77 @@ const GradeShader = {
       col = mix(col, bleach, uBleach);
       col *= uTint;
 
+      // Final circle: teal shadows, warm highlights
+      if (uShow > 0.001) {
+        vec3 split = mix(vec3(0.8, 1.0, 1.1), vec3(1.14, 1.0, 0.84), smoothstep(0.15, 0.75, l));
+        col = mix(col, col * split, uShow);
+      }
+
       // Vignette toward a colour (black, or blood red when hurt)
-      float d = length(c * vec2(uRes.x / uRes.y, 1.0)) / length(vec2(uRes.x / uRes.y, 1.0) * 0.5);
-      col = mix(col, uVigColor, smoothstep(0.45, 1.05, d) * uVig);
+      col = mix(col, uVigColor, smoothstep(0.45, 1.05, edge) * uVig);
+
+      // Outside the zone: crackling blue static at the edges
+      if (uStorm > 0.001) {
+        float sn = hash(floor(vUv * vec2(aspect, 1.0) * 90.0) + floor(uTime * 18.0));
+        col += vec3(0.25, 0.55, 1.0) * step(0.955, sn) * smoothstep(0.6, 1.0, edge) * uStorm * 0.4;
+      }
+
+      // Shockwave rings catch a little light
+      col += ringCol * 0.35;
+
+      // Skydive: wind streaks raking out from the centre
+      if (uLines > 0.001) {
+        float seg = floor(atan(c.y, c.x + 1e-5) * 38.0);
+        float h = hash(vec2(seg, floor(uTime * 14.0 + hash(vec2(seg, 1.0)) * 4.0)));
+        float lines = step(0.86, h) * smoothstep(0.35, 0.95, edge);
+        col = mix(col, vec3(0.92, 0.96, 1.0), lines * uLines * 0.35);
+      }
+
+      // Victory: slow golden rays from above the top of the screen
+      if (uRays > 0.001) {
+        vec2 rp = vec2(c.x * aspect, vUv.y - 1.15);
+        float a = atan(rp.x, -rp.y);
+        float rays = 0.5 + 0.5 * sin(a * 15.0 + uTime * 0.7) * sin(a * 7.0 - uTime * 0.45);
+        rays *= 1.0 - smoothstep(0.2, 1.6, length(rp));
+        col += vec3(1.0, 0.78, 0.35) * rays * uRays * 0.32;
+      }
 
       // Flashes are stronger at the edges, so the crosshair stays readable
-      col += uFlashColor * uFlash * (0.3 + 0.7 * d);
+      col += uFlashColor * uFlash * (0.3 + 0.7 * edge);
 
       // Film: grain and rolling scanlines
-      float n = fract(sin(dot(vUv * uRes + fract(uTime) * 91.7, vec2(12.9898, 78.233))) * 43758.5453);
+      float n = hash(vUv * uRes + fract(uTime) * 91.7);
       col += (n - 0.5) * uGrain;
       col *= 1.0 - uScan * (0.5 + 0.5 * sin(vUv.y * uRes.y * 1.6 - uTime * 18.0));
+
+      // Drone camera: phosphor monochrome, fine lines, corner brackets, blinking REC dot
+      if (uFeed > 0.001) {
+        float lf = dot(col, vec3(0.299, 0.587, 0.114));
+        col = mix(col, vec3(0.62, 1.0, 0.84) * (lf * 1.08 + 0.03), uFeed * 0.8);
+        col *= 1.0 - uFeed * 0.16 * (0.5 + 0.5 * sin(gl_FragCoord.y * 3.14159));
+        vec2 pp = vUv * uRes;
+        vec2 e = min(pp, uRes - pp) - 0.07 * uRes.y;
+        float len = 0.09 * uRes.y, th = max(1.5, 0.004 * uRes.y);
+        float hor = step(0.0, e.y) * step(e.y, th) * step(0.0, e.x) * step(e.x, len);
+        float ver = step(0.0, e.x) * step(e.x, th) * step(0.0, e.y) * step(e.y, len);
+        col = mix(col, vec3(0.8, 1.0, 0.88), max(hor, ver) * uFeed * 0.85);
+        vec2 rec = pp - vec2(0.115 * uRes.y, 0.885 * uRes.y);
+        float recDot = (1.0 - smoothstep(0.011 * uRes.y, 0.014 * uRes.y, length(rec))) * step(0.45, fract(uTime * 0.8));
+        col = mix(col, vec3(1.0, 0.16, 0.12), recDot * uFeed);
+        col *= mix(1.0, lensMask, uFeed);
+      }
+
+      // Signal glitch: bright noisy slices
+      if (uGlitch > 0.001) {
+        float sl = step(0.82, hash(vec2(floor(vUv.y * 60.0), floor(uTime * 30.0))));
+        col = mix(col, vec3(hash(vUv * uRes + uTime)), sl * uGlitch * 0.35);
+      }
+
+      // Final circle: letterbox bars slide in
+      if (uBars > 0.001) {
+        float b = uBars * 0.085;
+        col *= smoothstep(b, b + 0.003, vUv.y) * smoothstep(b, b + 0.003, 1.0 - vUv.y);
+      }
 
       gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
     }
@@ -156,6 +301,10 @@ export class PostFX {
     this.flashColor = new THREE.Color(1, 1, 1);
     this.hurtPulse = 0;
     this.time = 0;
+    // Battle royale: eased levels, one-shot glitch, pooled shockwaves
+    this.br = { radial: 0, lines: 0, storm: 0, feed: 0, bars: 0, show: 0, rays: 0 };
+    this.glitchAmt = 0;
+    this.waves = [0, 1, 2, 3].map(() => ({ x: 0, y: 0, r: 0, speed: 0, strength: 0, life: 0, age: 1 }));
   }
 
   /** Drawing-buffer size (CSS size × pixel ratio). */
@@ -216,8 +365,28 @@ export class PostFX {
     this.hurtPulse = Math.min(1, this.hurtPulse + amount);
   }
 
+  /** "Signal lost": torn, noisy slices that settle in a moment. */
+  glitch(amount) {
+    if (!this.enabled) return;
+    this.glitchAmt = Math.min(1, Math.max(this.glitchAmt, amount));
+  }
+
   /**
-   * s: { darkness 0..1, bloodMoon, health 0..1, dead, slowmo 0..1, frenzy 0..1, heartbeat 0..1, cave 0..1, scope 0..1 }
+   * A refracting ring expanding from screen point (x, y) in 0..1 uv (y up).
+   * speed in screen heights per second, life in seconds. Reuses the weakest slot.
+   */
+  shockwave(x, y, strength, color = 0xffffff, speed = 1.1, life = 0.7) {
+    if (!this.enabled || strength <= 0.01) return;
+    let w = this.waves[0];
+    for (const o of this.waves) if (o.strength * (1 - o.age) < w.strength * (1 - w.age)) w = o;
+    w.x = x; w.y = y; w.r = 0; w.speed = speed; w.life = life; w.age = 0;
+    w.strength = Math.min(1, strength);
+    this.uniforms.uWaveTint.value[this.waves.indexOf(w)].set(color);
+  }
+
+  /**
+   * s: { darkness 0..1, bloodMoon, health 0..1, dead, slowmo 0..1, frenzy 0..1, heartbeat 0..1, cave 0..1, scope 0..1,
+   *      battle royale: zone 0..1, freefall 0..1, fallSpeed 0..1, feed 0..1 (spectating), showdown 0..1, victory 0..1 }
    * dt: real (unscaled) seconds.
    */
   update(dt, s) {
@@ -226,7 +395,7 @@ export class PostFX {
     const g = this.g;
 
     // Targets for this frame
-    let sat = 1.06, contrast = 1.05, bleach = 0, chroma = 0, vig = 0, scan = 0, red = 0;
+    let sat = 1.06, contrast = 1.05, bleach = 0, chroma = 0, vig = 0, scan = 0, red = 0, grainFeed = 0;
     let bloom = 0.32 + s.darkness * 0.25;
     _c1.setRGB(1, 1, 1);
 
@@ -292,6 +461,28 @@ export class PostFX {
       contrast += 0.04 * s.scope;
     }
 
+    // Final circle: punchier, a touch warmer (the split tone and bars are in the shader)
+    const show = s.showdown ?? 0;
+    if (show > 0) {
+      contrast += 0.1 * show;
+      sat += 0.05 * show;
+    }
+    // Victory: a warm, glowing afterglow
+    const victory = s.victory ?? 0;
+    if (victory > 0) {
+      _c1.lerp(_c2.setRGB(1.12, 1.02, 0.86), 0.6 * victory);
+      bloom += 0.5 * victory;
+      sat += 0.15 * victory;
+    }
+    // Spectating: the feed brings its own look, so drop the rest of the grade
+    const feed = s.feed ?? 0;
+    if (feed > 0) {
+      vig *= 1 - feed;
+      chroma *= 1 - feed;
+      red *= 1 - feed;
+      grainFeed = 0.05 * feed;
+    }
+
     if (s.dead) { sat = 0; contrast = 1.18; vig = 0.7; red = 0; chroma = 0; scan = 0; _c1.setRGB(1, 1, 1); }
 
     const k = 1 - Math.exp(-6 * dt);
@@ -304,6 +495,27 @@ export class PostFX {
     g.bloom += (bloom - g.bloom) * k;
     g.red += (red - g.red) * k;
     this.tint.lerp(_c1, k);
+
+    // Battle royale levels: the skydive answers fast, moods ease in slower
+    const b = this.br, kf = 1 - Math.exp(-8 * dt), ks = 1 - Math.exp(-2.5 * dt);
+    const fall = s.fallSpeed ?? 0;
+    b.radial += (fall - b.radial) * kf;
+    b.lines += (fall * fall - b.lines) * kf;
+    b.storm += ((s.zone ?? 0) - b.storm) * k;
+    b.feed += (feed - b.feed) * ks;
+    b.bars += (show - b.bars) * ks;
+    b.show += (show - b.show) * ks;
+    b.rays += (victory - b.rays) * ks;
+    for (const key in b) if (b[key] < 0.002) b[key] = 0; // so the shader branches switch off
+    this.glitchAmt = Math.max(0, this.glitchAmt - dt * 1.6);
+    for (let i = 0; i < 4; i++) {
+      const w = this.waves[i], uw = this.uniforms.uWaves.value[i];
+      if (w.age >= 1) { uw.w = 0; continue; }
+      w.age = Math.min(1, w.age + dt / w.life);
+      w.r += w.speed * dt * (1.4 - w.age); // fast out, slowing as it fades
+      const fade = 1 - w.age;
+      uw.set(w.x, w.y, w.r, w.strength * fade * fade);
+    }
 
     // Hits and flashes decay on their own
     this.hurtPulse = Math.max(0, this.hurtPulse - dt * 2.2);
@@ -321,8 +533,16 @@ export class PostFX {
     u.uVigColor.value.copy(s.slowmo > 0.3 && redness < 0.3 ? SLOW_VIG : BLACK).lerp(RED, redness);
     u.uFlash.value = this.flash;
     u.uFlashColor.value.copy(this.flashColor);
-    u.uGrain.value = 0.02 + g.scan * 0.4;
+    u.uGrain.value = 0.02 + g.scan * 0.4 + grainFeed + this.glitchAmt * 0.06;
     u.uScan.value = g.scan;
+    u.uRadial.value = b.radial;
+    u.uLines.value = b.lines;
+    u.uStorm.value = b.storm;
+    u.uGlitch.value = this.glitchAmt;
+    u.uFeed.value = b.feed;
+    u.uBars.value = b.bars;
+    u.uShow.value = b.show;
+    u.uRays.value = b.rays;
     if (this.bloom) this.bloom.strength = g.bloom + this.flash * 0.8;
   }
 }

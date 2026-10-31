@@ -13,7 +13,7 @@ const _rel = new THREE.Matrix4();
 const _inv = new THREE.Matrix4();
 
 /** Plain Float32 copy of the attributes we keep (meshopt output is quantized / interleaved). */
-function toFloatGeometry(src) {
+export function toFloatGeometry(src) {
   const pos = src.attributes.position;
   if (!pos) return null;
   const out = new THREE.BufferGeometry();

@@ -72,6 +72,8 @@ export class RemotePlayers {
     this._pvp = false;
     /** (player, x, feetY, z, vol 0..1) → plays a footfall there (set by main.js). */
     this.onStep = null;
+    /** (p, delta) → true if it seated them on a motorbike this frame (main.js: placeRider). */
+    this.seatAt = null;
     /** (from, to) → true if a smoke cloud hides the line between them (set by main.js). */
     this.concealed = null;
     this._targets = [];
@@ -134,7 +136,7 @@ export class RemotePlayers {
     const soldier = new Soldier({ avatar: code });
     soldier.load(this.loader).then(() => {
       if (!this.players.has(p.id) || p.avatarCode !== code) return;
-      if (p.soldier) p.root.remove(p.soldier.root);
+      if (p.soldier) { p.root.remove(p.soldier.root); p.soldier.release(); }
       p.root.add(soldier.root);
       soldier.setWeapon(p.weapon);
       soldier.stance = p.stance;
@@ -150,6 +152,7 @@ export class RemotePlayers {
     const p = this.players.get(id);
     if (!p) return;
     this.scene.remove(p.root);
+    p.soldier?.release();
     this.scene.remove(p.tag);
     p.tag.material.map.dispose();
     p.tag.material.dispose();
@@ -189,8 +192,14 @@ export class RemotePlayers {
     p.aim = !!s.aim; p.fire = !!s.fire;
     p.hp = s.hp; p.vis = s.vis ?? 1; p.kills = s.k ?? 0;
     p.swim = !!s.swm; p.air = s.air ? 1 : 0;
+    p.throwHold = s.th ?? null;   // the throwable they're holding ready, if any
     if (s.av !== undefined && s.av !== p.avatarCode) this._build(p, s.av);
-    if (s.w !== p.weapon) { p.weapon = s.w; p.soldier?.setWeapon(s.w); }
+    if (s.w !== p.weapon) {
+      // Empty hands means no guns at all (a battle royale drop, everything dropped): nothing goes on the back
+      if (s.w == null) p.soldier?.setCarried([]);
+      else if (p.weapon == null) p.soldier?.setCarried(null);
+      p.weapon = s.w; p.soldier?.setWeapon(s.w);
+    }
     const dead = !!s.dead;
     if (dead !== p.dead) {
       p.dead = dead;
@@ -207,7 +216,10 @@ export class RemotePlayers {
     }
     // g: worn gear as helmet·100 + vest·10 + backpack levels
     p.gearCode = s.g ?? 0;
-    p.phase = s.ph ?? PHASE_GROUND;
+    const phase = s.ph ?? PHASE_GROUND;
+    // Down off the chute: the same landing from height you see on yourself
+    if (phase === PHASE_GROUND && (p.phase === PHASE_CHUTE || p.phase === PHASE_FALL)) p.soldier?.landFromHeight();
+    p.phase = phase;
     p.driving = !!s.veh;
     if (p.soldier) p.soldier.seated = p.driving;
     // Dead players and players still in the plane can't be hit
@@ -289,6 +301,8 @@ export class RemotePlayers {
 
       p.root.position.set(b.x, b.y - feetOffset, b.z);
       p.root.rotation.y += angleDiff(p.bodyYaw, p.root.rotation.y) * k;
+      // On a motorbike: main.js puts them on its seat (and poses the ride) instead
+      p.riding = !!this.seatAt?.(p, delta);
       const inPlane = p.phase === PHASE_PLANE;
       this._footsteps(p, delta, b.y - feetOffset);
       p.root.visible = !inPlane;
@@ -313,8 +327,8 @@ export class RemotePlayers {
           const yaw = p.root.rotation.y;
           const sy = Math.sin(yaw), cy = Math.cos(yaw);
           p.soldier.update(p.animAcc, {
-            localForward: p.vx * sy + p.vz * cy,
-            localRight: -p.vx * cy + p.vz * sy,
+            localForward: p.riding ? 0 : p.vx * sy + p.vz * cy,
+            localRight: p.riding ? 0 : -p.vx * cy + p.vz * sy,
             aiming: !p.dead && (p.aim || p.fire || p.stance === "prone"),
             firing: p.fire,
             aimYawOffset: angleDiff(p.aimYaw, yaw),
@@ -322,6 +336,8 @@ export class RemotePlayers {
             health: p.hp / 100,
             air: p.air,
             swim: p.swim,
+            throwHold: !!p.throwHold && !p.dead,
+            throwKind: p.throwHold,
           });
           p.animAcc = 0;
         }

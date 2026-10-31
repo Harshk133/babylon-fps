@@ -16,6 +16,8 @@ build/
 # originals stay local; regenerate the .opt files with `npm run optimize-assets`.
 public/models/*.glb
 !public/models/*.opt.glb
+public/models/bikes/*.glb
+!public/models/bikes/*.opt.glb
 public/models/rusty_roof_wooden_house_1_3d_model_free.opt.glb
 public/models/monster.md2
 public/trees/*.glb
@@ -65,3 +67,10 @@ public/models/india/*/
 public/models/mixamo/characters/
 public/models/mixamo/anims/
 public/models/mixamo/raw/
+
+# Source files for the models made for the game (the optimized copies go to public/models/india/)
+public/models/indian things/
+
+# Gear originals (Sketchfab downloads); only the optimized copies are committed
+public/models/gear/*.glb
+!public/models/gear/*.opt.glb

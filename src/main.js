@@ -6,7 +6,8 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
-import { Soldier } from "./player/Soldier.js";
+import { Soldier, SWAP_TIME, THROW_RECOVER, LAND_FROM_HEIGHT, setGearModels } from "./player/Soldier.js";
+import { loadGearModels } from "./items/GearModels.js";
 import { encodeAvatar } from "./player/Avatar.js";
 import { AvatarPicker } from "./ui/AvatarPicker.js";
 import { ScopeOverlay } from "./ui/ScopeOverlay.js";
@@ -48,10 +49,12 @@ import { Grass, GRASS_FLATTENERS } from "./world/Grass.js";
 import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves, adoptCavesData } from "./world/Caves.js";
 import { scatterRocks } from "./world/Rocks.js";
 import { COLLEGE_GATE, placeCollegeGate } from "./world/CollegeGate.js";
+import { CSE_BUILDING, placeCseBuilding } from "./world/CseBuilding.js";
 import { loadIndiaModels } from "./world/IndiaAssets.js";
 import { propSpots, placeIndiaProps } from "./world/IndiaProps.js";
 import { mergeStaticMeshes } from "./world/MergeStatic.js";
 import { Vehicle, VEHICLES, standInJeep, standInTractor } from "./vehicles/Vehicle.js";
+import { LegalScreen, legalButton } from "./ui/LegalScreen.js";
 import { QUALITY, QUALITY_NAME, QUALITY_SETTING, QUALITY_PRESETS, saveQuality } from "./quality.js";
 import { Net } from "./net/Net.js";
 import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "./net/RemotePlayers.js";
@@ -81,6 +84,8 @@ import { applyStaticIcons, gameItemIcon } from "./ui/applyIcons.js";
 import { icon } from "./ui/gameIcons.js";
 import { SHOP_ITEMS, ShopUI, fmtRupees } from "./economy/Shop.js";
 import { shopSpots, buildShops, SHOP_RANGE } from "./world/Shops.js";
+import { waterTowerSpots, buildWaterTowers } from "./world/WaterTowers.js";
+import { buildChaiwalas, chaiwalaByStall, chaiwalaAtFront, CHAIWALA_R } from "./world/Chaiwalas.js";
 import { WeaponWheel } from "./ui/WeaponWheel.js";
 import { KillStreak } from "./ui/KillStreak.js";
 import { PostFX } from "./render/PostFX.js";
@@ -129,6 +134,14 @@ const CAPSULE_HALF_HEIGHT = CAPSULE_HEIGHT / 2;
 const FEET_OFFSET         = CAPSULE_HALF_HEIGHT + CHARACTER_RADIUS;
 const GROUND_SNAP_DISTANCE = 0.08;
 const STEP_UP             = 0.3;   // the controller climbs ledges this high (stairs, door sills)
+// Falls: a jump lands at ~7 m/s; past FALL_SAFE (~2 m of drop) it hurts by the square of the
+// rest: an upstairs window ~10, the CSE building's top floor ~75, a water tank kills
+const FALL_SAFE           = 9;     // m/s at landing
+const FALL_HURT           = 1.25;  // damage per (m/s over FALL_SAFE)²
+// Stamina: sprinting and jumping use it, it comes back after a breather. The worse you're
+// hurt, the less you have and the slower it returns; run dry and you can't sprint until
+// you've got some back
+const STAMINA = { sprint: 15, swim: 8, jump: 12, regen: 24, delay: 0.9, recover: 25, minCap: 35 };
 // Swimming: deeper than SWIM_DEPTH you float with your feet SWIM_FLOAT under the surface
 const SWIM_DEPTH          = 1.3;
 const SWIM_FLOAT          = 1.32;
@@ -164,10 +177,12 @@ const MONSTER_ANG_DAMPING      = 1.0;
 
 // ─── Weapons & Items ──────────────────────────────────────────────────────────
 // Gun stats live in combat/weapons.js; the inventory tracks what's carried.
-const SWITCH_TIME    = 0.4;   // weapon draw time after a swap
+// Weapon draw time after a swap: until the new gun is round from the sling and nearly up
+const SWITCH_TIME    = SWAP_TIME * 0.9;
 const THROW_SPEED    = 15;
 const THROW_LOFT     = 4.5;
 const THROW_COOLDOWN = 0.6;
+const THROW_GESTURE  = 0.45;  // s of the throw clip from the wind-up to the follow-through
 const DROP_LIFETIME  = 45;    // zombie loot despawns after this many seconds
 
 const inventory = new Inventory();
@@ -183,6 +198,8 @@ const lowHealthEl     = document.getElementById("low-health");
 const healthFillEl    = document.getElementById("health-bar-fill");
 const healthTrailEl   = document.getElementById("health-bar-trail");
 const healthValEl     = document.getElementById("health-val");
+const staminaFillEl   = document.getElementById("stamina-fill");
+const staminaCapEl    = document.getElementById("stamina-cap");
 const threatEl        = document.getElementById("threat");
 const threatCountEl   = document.getElementById("threat-count");
 const deathScreenEl   = document.getElementById("death-screen");
@@ -195,7 +212,7 @@ let healthTrail   = 100; // lagging "recent damage" bar
 const knockbackVel = new CANNON.Vec3();
 
 // Cached HUD values so the DOM is only touched when something changes
-const hudCache = { hp: -1, trail: -1, flash: -1, low: -1, threat: -1 };
+const hudCache = { hp: -1, trail: -1, flash: -1, low: -1, threat: -1, stamina: -1, cap: -1, exhausted: null };
 
 function updatePlayerHealthUI(delta) {
   const hp = Math.ceil(Math.max(0, playerHealth));
@@ -213,6 +230,17 @@ function updatePlayerHealthUI(delta) {
       healthCardEl?.style.setProperty("--beat", `${beat}s`);
       healthCardEl?.classList.toggle("flatline", hp <= 0);
     }
+  }
+
+  // Stamina: the bar, and the part of it your wounds have taken away
+  const st = Math.round(stamina), cap = Math.round(staminaCap());
+  if (st !== hudCache.stamina || cap !== hudCache.cap || exhausted !== hudCache.exhausted) {
+    hudCache.stamina = st; hudCache.cap = cap; hudCache.exhausted = exhausted;
+    if (staminaFillEl) {
+      staminaFillEl.style.width = `${st}%`;
+      staminaFillEl.classList.toggle("exhausted", exhausted);
+    }
+    if (staminaCapEl) staminaCapEl.style.width = `${100 - cap}%`;
   }
 
   if (timeSinceHit > 0.5) healthTrail += (playerHealth - healthTrail) * (1 - Math.exp(-4 * delta));
@@ -265,6 +293,11 @@ function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX =
     const right = dx * -Math.cos(aimYaw) + dz * Math.sin(aimYaw);
     const fwd = dx * Math.sin(aimYaw) + dz * Math.cos(aimYaw);
     gameHud.hitFrom(Math.atan2(right, fwd), amount / 15);
+    // Battle royale: shots land as a ripple off that side of the screen
+    if (isBR() && kind !== "raw") {
+      const a = Math.atan2(right, fwd);
+      postFx.shockwave(0.5 + Math.sin(a) * 0.62, 0.5 + Math.cos(a) * 0.62, Math.min(0.8, amount / 30), 0xff3a2a, 0.9, 0.45);
+    }
   }
   sfx.hurt();
   postFx.hurt(Math.min(1, amount / 30));
@@ -345,6 +378,7 @@ function onPlayerDeath() {
 
 function respawnPlayer() {
   cancelClimb();
+  resetStamina();
   playerHealth = MAX_HEALTH;
   healthTrail  = MAX_HEALTH;
   timeSinceHit = 99;
@@ -971,7 +1005,7 @@ function setStance(next, force = false) {
 
 /** C / Z: that stance, or back up to standing if you're already in it. */
 function toggleStance(which) {
-  if (playerHealth <= 0 || drive.on || brAirborne()) return;
+  if (playerHealth <= 0 || drive.on || ride.on || brAirborne()) return;
   setStance(stance === which ? "stand" : which);
 }
 
@@ -1169,6 +1203,8 @@ function setKey(code, pressed, repeat) {
       case "KeyL": useLightSwitch(); break;
       case "KeyN": toggleTorch(); break;
       case "KeyV": toggleVehicle(); break;
+      case "KeyX": pillionKey(1); break;
+      case "KeyY": pillionKey(-1); break;
       case "KeyT": refuelVehicle(); break;
     }
   } else if (code === "KeyG") {
@@ -1359,10 +1395,12 @@ function snapCharacterToGround() {
 
 // ─── Movement ─────────────────────────────────────────────────────────────────
 // WASD is camera-relative; the body turns to face the aim direction (strafe mode)
+let landLock = 0;   // s left of a parachute landing: no walking off mid-crouch
 function updateCharacterMovement(delta) {
   const alive = playerHealth > 0;
+  landLock = Math.max(0, landLock - delta);
   let ix = 0, iz = 0; // ix: +right, iz: +forward
-  if (alive && !inventoryOpen) {
+  if (alive && !inventoryOpen && landLock <= 0) {
     if (keys.forward)  iz += 1;
     if (keys.backward) iz -= 1;
     if (keys.right)    ix += 1;
@@ -1376,9 +1414,9 @@ function updateCharacterMovement(delta) {
 
   // In deep water you swim: standing, the gun on your back, no jumping (a little hysteresis at the edge)
   const depth = waterDepthAt(characterBody.position.x, characterBody.position.z);
-  swimming = alive && !drive.on && !climb.active && !brAirborne() && depth > (swimming ? SWIM_DEPTH - 0.15 : SWIM_DEPTH);
+  swimming = alive && !drive.on && !ride.on && !climb.active && !brAirborne() && depth > (swimming ? SWIM_DEPTH - 0.15 : SWIM_DEPTH);
   if (swimming && stance !== "stand") setStance("stand", true);
-  sprinting = alive && !swimming && (keys.run || !!touch?.sprint) && iz > 0.5 && !input.fire && !input.aim;
+  sprinting = alive && !swimming && !exhausted && (keys.run || !!touch?.sprint) && iz > 0.5 && !input.fire && !input.aim;
   // Sprinting gets you up off the ground first
   if (sprinting && stance !== "stand" && !setStance("stand")) sprinting = false;
 
@@ -1386,7 +1424,8 @@ function updateCharacterMovement(delta) {
   if (swimming) {
     speed = movingInput ? ((keys.run || touch?.sprint) ? SWIM_FAST : SWIM_SPEED) * analog : 0;
   } else if (sprinting) {
-    speed = SPRINT_SPEED;
+    // Running on the last of your breath, you slow a little
+    speed = SPRINT_SPEED * (0.88 + 0.12 * Math.min(1, stamina / 25));
   } else if (movingInput) {
     const ax = Math.abs(ix), az = Math.abs(iz);
     speed = (az * (iz >= 0 ? JOG_SPEED : BACKPEDAL_SPEED) + ax * STRAFE_SPEED) / (ax + az);
@@ -1415,6 +1454,7 @@ function updateCharacterMovement(delta) {
   knockbackVel.z *= knockDecay;
   characterBody.velocity.x = moveVelocity.x + knockbackVel.x;
   characterBody.velocity.z = moveVelocity.z + knockbackVel.z;
+  slideAlongWalls();
   // Afloat: a spring holds you at the surface (it outweighs gravity), with a slow bob
   if (swimming) {
     swimBob += delta;
@@ -1433,9 +1473,13 @@ function updateCharacterMovement(delta) {
   if (jumpQueued && alive && climb.offer) startClimb();
   // Jump from a crouch stands you up; from prone, to a crouch
   else if (jumpQueued && alive && stance !== "stand") setStance(stance === "prone" ? "crouch" : "stand");
-  else if (jumpQueued && onGround && alive && !swimming) {
-    characterBody.velocity.y = JUMP_VELOCITY;
+  else if (jumpQueued && onGround && alive && !swimming && landLock <= 0) {
+    // Out of breath: a weaker jump
+    characterBody.velocity.y = JUMP_VELOCITY * (stamina >= STAMINA.jump ? 1 : 0.8);
+    stamina = Math.max(0, stamina - STAMINA.jump);
+    staminaRest = 0;
     jumpGrace = 0.8;
+    jumpedAir = true;
     onGround = false;
   }
   jumpQueued = false;
@@ -1454,17 +1498,125 @@ function updateCharacterMovement(delta) {
   characterRoot.rotation.y = bodyYaw;
 }
 
+// ─── Sliding along walls, getting unstuck ────────────────────────────────────
+// The controller sets the body's velocity every frame. Into a wall that fights the
+// solver: at box edges, the corners of houses and the uneven cave rock it jitters or
+// pins you instead of sliding. So the part of the step that goes into anything you're
+// touching (last step's contacts) is taken off, leaving the slide along it. Contacts
+// low on the capsule are left alone: that's how you step up stairs and kerbs.
+let slideSpeed = 0;      // m/s left after the slide: what you should be moving at
+function slideAlongWalls() {
+  const v = characterBody.velocity, p = characterBody.position, feet = p.y - FEET_OFFSET;
+  for (const c of world.contacts) {
+    let nx, ny, nz, hy;
+    if (c.bi === characterBody) { nx = -c.ni.x; ny = -c.ni.y; nz = -c.ni.z; hy = p.y + c.ri.y; }
+    else if (c.bj === characterBody) { nx = c.ni.x; ny = c.ni.y; nz = c.ni.z; hy = p.y + c.rj.y; }
+    else continue;
+    if (ny > 0.55 || hy - feet < STEP_UP + 0.05) continue;   // ground, ramps, stairs and low ledges
+    const h = Math.hypot(nx, nz);
+    if (h < 0.3) continue;
+    nx /= h; nz /= h;
+    const into = v.x * nx + v.z * nz;
+    if (into < 0) { v.x -= nx * into; v.z -= nz * into; }
+  }
+  slideSpeed = Math.hypot(v.x, v.z);
+}
+
+// Backstop: if the slide says you should be moving but you've hardly moved for a moment
+// (caught on an edge between two colliders, a seam in the cave rock), ease out of it
+const stuck = { t: 0, x: 0, z: 0 };
+const UNSTICK_AFTER = 0.3;   // s
+function unstick(delta) {
+  const p = characterBody.position;
+  if (slideSpeed < 1.2 || climb.active || drive.on || ride.on || swimming || playerHealth <= 0 || brAirborne()) {
+    stuck.t = 0; stuck.x = p.x; stuck.z = p.z;
+    return;
+  }
+  stuck.t += delta;
+  if (stuck.t < UNSTICK_AFTER) return;
+  const moved = Math.hypot(p.x - stuck.x, p.z - stuck.z);
+  if (moved < slideSpeed * UNSTICK_AFTER * 0.15) {
+    // Away from what's holding you, and up a touch so the capsule clears the edge
+    let ax = 0, az = 0;
+    for (const c of world.contacts) {
+      if (c.bi === characterBody) { ax -= c.ni.x; az -= c.ni.z; }
+      else if (c.bj === characterBody) { ax += c.ni.x; az += c.ni.z; }
+    }
+    const a = Math.hypot(ax, az);
+    if (a > 1e-3) { p.x += ax / a * 0.06; p.z += az / a * 0.06; }
+    // ...and along the way you wanted to go
+    const v = characterBody.velocity, sp = Math.hypot(v.x, v.z);
+    if (sp > 1e-3) { p.x += v.x / sp * 0.05; p.z += v.z / sp * 0.05; }
+    p.y += 0.05;
+  }
+  stuck.t = 0; stuck.x = p.x; stuck.z = p.z;
+}
+
+// ─── Stamina and falls ────────────────────────────────────────────────────────
+let stamina = 100;        // 0 … staminaCap()
+let staminaRest = 99;     // s since you last used any
+let exhausted = false;    // ran dry: no sprinting until STAMINA.recover is back
+
+/** How much stamina you can have: less the more you're hurt. */
+function staminaCap() {
+  return STAMINA.minCap + (100 - STAMINA.minCap) * Math.max(0, playerHealth) / MAX_HEALTH;
+}
+
+function updateStamina(delta) {
+  staminaRest += delta;
+  const moving = moveVelocity.lengthSquared() > 4;
+  if (sprinting && moving) { stamina -= STAMINA.sprint * delta; staminaRest = 0; }
+  else if (swimming && (keys.run || touch?.sprint) && moving) { stamina -= STAMINA.swim * delta; staminaRest = 0; }
+  else if (staminaRest > STAMINA.delay) stamina += STAMINA.regen * (0.45 + 0.55 * Math.max(0, playerHealth) / MAX_HEALTH) * delta;
+  stamina = THREE.MathUtils.clamp(stamina, 0, staminaCap());
+  if (stamina <= 0.5) exhausted = true;
+  else if (exhausted && stamina >= Math.min(STAMINA.recover, staminaCap() * 0.6)) exhausted = false;
+}
+
+function resetStamina() {
+  stamina = 100;
+  staminaRest = 99;
+  exhausted = false;
+}
+
+const fall = { speed: 0, wasGround: true, exempt: false };
+/** After the physics step: landing hard hurts (not into deep water, on a vehicle or under a chute). */
+function updateFallDamage() {
+  if (drive.on || ride.on || brAirborne() || playerHealth <= 0) {
+    fall.speed = 0;
+    fall.exempt = true;
+    fall.wasGround = onGround;
+    return;
+  }
+  if (onGround && !fall.wasGround) {
+    const p = characterBody.position, v = fall.speed;
+    if (v > FALL_SAFE && !fall.exempt && waterDepthAt(p.x, p.z) < 0.8) {
+      const dmg = (v - FALL_SAFE) ** 2 * FALL_HURT;
+      dealDamageToPlayer(dmg, 0, 0, Math.min(1, 0.35 + dmg / 50));
+      cameraTrauma = Math.min(1, cameraTrauma + Math.min(0.8, dmg / 60));
+      sfx.thud(null, false);
+      // Winded and staggered for a moment
+      stamina = Math.max(0, stamina - dmg);
+      staminaRest = 0;
+      landLock = Math.max(landLock, Math.min(0.7, dmg / 50));
+      if (playerHealth > 0 && dmg >= 5) inventoryUI.feed(`Hard landing: −${Math.round(dmg)} HP`, "info");
+    }
+  }
+  if (onGround) { fall.speed = 0; fall.exempt = false; }
+  else if (!swimming) fall.speed = Math.max(fall.speed, -characterBody.velocity.y);
+  fall.wasGround = onGround;
+}
+
 // ─── Climbing yard walls, vaulting through windows ────────────────────────────
-// Stand at a compound wall facing it for CLIMB_WAIT s and SPACE climbs over it;
-// face a window whose sill is between knee and chest height and SPACE vaults
-// through (out of an upstairs one too: you drop from the sill). A short
+// SPACE at a compound wall climbs over it; at a window whose sill is between knee
+// and chest height it vaults through (out of an upstairs one too: you drop from the
+// sill). No prompt and no wait: walking (or looking) at it is enough. A short
 // scripted move with collisions off, then gravity takes over.
-const CLIMB_WAIT  = 2;      // s at a wall before the climb is offered
 const CLIMB_TIME  = 1.05;   // s up and over a yard wall
 const VAULT_TIME  = 0.6;    // s through a window
 const CLIMB_SPLIT = 0.55;   // share of the move spent getting up to the top
 const climb = {
-  active: false, kind: "", t: 0, dur: 1, wait: 0, offer: "", spot: null,
+  active: false, kind: "", t: 0, dur: 1, offer: "", spot: null,
   from: new THREE.Vector3(), mid: new THREE.Vector3(), to: new THREE.Vector3(), pos: new THREE.Vector3(),
   dirX: 0, dirZ: 0,
 };
@@ -1473,17 +1625,19 @@ const climb = {
 function updateClimbOffer(delta) {
   climb.offer = "";
   climb.spot = null;
-  if (climb.active || playerHealth <= 0 || drive.on || brAirborne() || !houses
-    || stance === "prone" || throwAiming || inventoryOpen) { climb.wait = 0; return; }
+  if (climb.active || playerHealth <= 0 || drive.on || ride.on || brAirborne() || !houses
+    || stance === "prone" || throwAiming || inventoryOpen) return;
   const p = characterBody.position;
-  const fx = Math.sin(aimYaw), fz = Math.cos(aimYaw);
-  const win = onGround && houses.windowVaultSpot(p.x, p.y - FEET_OFFSET, p.z, fx, fz);
-  if (win) { climb.offer = "window"; climb.spot = win; climb.wait = 0; return; }
+  // The way you're walking (or, standing still, looking)
+  const mv = Math.hypot(moveVelocity.x, moveVelocity.z);
+  const fx = mv > 1 ? moveVelocity.x / mv : Math.sin(aimYaw), fz = mv > 1 ? moveVelocity.z / mv : Math.cos(aimYaw);
+  // Just off the ground counts too: SPACE pressed as you jump at it still goes over
+  const footed = onGround || offGroundTime < 0.3;
+  if (!footed) return;
+  const win = houses.windowVaultSpot(p.x, p.y - FEET_OFFSET, p.z, fx, fz);
+  if (win) { climb.offer = "window"; climb.spot = win; return; }
   const wall = houses.wallClimbSpot(p.x, p.z, fx, fz);
-  if (!wall) { climb.wait = 0; return; }
-  // A frame or two off the ground (contact jitter) doesn't restart the wait
-  climb.wait += delta;
-  if (climb.wait >= CLIMB_WAIT && onGround) { climb.offer = "wall"; climb.spot = wall; }
+  if (wall) { climb.offer = "wall"; climb.spot = wall; }
 }
 
 function startClimb() {
@@ -1507,7 +1661,6 @@ function startClimb() {
   climb.active = true;
   climb.t = 0;
   playerAnim.gesture(climb.kind === "wall" ? "climb" : "vault", climb.dur);
-  climb.wait = 0;
   climb.offer = "";
   if (stance !== "stand") setStance("stand", true);
   moveVelocity.set(0, 0, 0);
@@ -1557,6 +1710,12 @@ function cancelClimb() {
 // Animations beyond the clips the soldier walks and aims with (Soldier.playClip / playGesture).
 // Teammates see them too: each one goes out as an "anim" message.
 let airPose = 0;                 // eased 0..1: knees tucked in the air
+let carriedVersion = -1;         // inventory.version the soldier's slung guns last matched
+// Sprinting over hills loses ground contact for a frame or two (a crest, a steep climb):
+// the legs keep running through that, and only a jump or a real fall shows the air pose
+let offGroundTime = 0;
+let jumpedAir = false;           // set by a jump, cleared on touchdown
+const AIR_POSE_DELAY = 0.22;     // s off the ground before a fall counts as airborne
 const playerAnim = {
   clip(name, dur, weight = 1) {
     soldier.playClip(name, dur, weight);
@@ -1603,15 +1762,21 @@ function updateCrosshairPoint(delta) {
 
 function updateSoldier(delta) {
   characterRoot.updateMatrixWorld(true);
-  const inAir = !onGround && !climb.active && !drive.on && !brAirborne() && Math.abs(characterBody.velocity.y) > 1.2;
+  if (onGround || swimming || climb.active || drive.on || ride.on) { offGroundTime = 0; jumpedAir = false; }
+  else offGroundTime += delta;
+  const airborne = jumpedAir || offGroundTime > AIR_POSE_DELAY;
+  const inAir = airborne && !climb.active && !drive.on && !ride.on && !brAirborne() && Math.abs(characterBody.velocity.y) > 1.2;
   airPose += ((inAir ? 1 : 0) - airPose) * (1 - Math.exp(-10 * delta));
+  const footed = !airborne;
   const vx = characterBody.velocity.x - knockbackVel.x;
   const vz = characterBody.velocity.z - knockbackVel.z;
   const sy = Math.sin(bodyYaw), cy = Math.cos(bodyYaw);
   const alive = playerHealth > 0;
+  // A gun dropped or lost (not the one in your hands) comes off the back too
+  if (inventory.version !== carriedVersion) { carriedVersion = inventory.version; soldier.setCarried(inventory.ownedWeapons); }
   soldier.update(delta, {
-    localForward: onGround ? vx * sy + vz * cy : 0,
-    localRight:   onGround ? -vx * cy + vz * sy : 0,
+    localForward: footed ? vx * sy + vz * cy : 0,
+    localRight:   footed ? -vx * cy + vz * sy : 0,
     // Prone always holds the gun up (the arms are what you lie on)
     // First person holds it up too, so the gun is in front of you
     aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone" || fpBlend > 0.5),
@@ -1624,6 +1789,7 @@ function updateSoldier(delta) {
     air: airPose,
     swim: swimming,
     throwHold: throwAiming && alive,
+    throwKind: inventory.selectedThrowable,
   });
 }
 
@@ -1755,6 +1921,7 @@ function updateMood(delta) {
   const deep = caves ? caves.depthAt(camera.position.x, camera.position.y, camera.position.z) : 0;
   caveDepth += (deep - caveDepth) * (1 - Math.exp(-3 * delta));
   indoor = !!houses?.houseAt(camera.position.x, camera.position.z) || !!indiaBuildings?.inside(camera.position.x, camera.position.z) || deep > 0.05
+    || !!cseBuilding?.inside(camera.position.x, camera.position.z)
     || !!city?.inside(camera.position.x, camera.position.z, camera.position.y - 1.6);
   env.update(delta, camera, weather);
   if (caveDepth > 0.001) dimUnderground(caveDepth);
@@ -1839,9 +2006,10 @@ function updateThirdPersonCamera(delta) {
   updateScopeView();
   blendAirRig(isBR() ? br.flight : PHASE_GROUND, delta, drive.on);
   // Inside a house the camera moves into your head; outside it's the shoulder camera again
-  const inside = alive && !drive.on && !climb.active && !brAirborne()
+  const inside = alive && !drive.on && !ride.on && !climb.active && !brAirborne()
     && (!!houses?.houseAt(characterBody.position.x, characterBody.position.z)
-      || !!indiaBuildings?.inside(characterBody.position.x, characterBody.position.z));
+      || !!indiaBuildings?.inside(characterBody.position.x, characterBody.position.z)
+      || !!cseBuilding?.inside(characterBody.position.x, characterBody.position.z));
   fpBlend += ((inside ? 1 : 0) - fpBlend) * (1 - Math.exp(-8 * delta));
   if (!inside && fpBlend < 0.01) fpBlend = 0;
   soldier.setFirstPerson(fpBlend > 0.5);
@@ -1971,6 +2139,7 @@ function equipWeapon(id) {
 /** Syncs the held model, camera zoom and weapon timers to inventory.current. */
 function onWeaponChanged(withSound = true) {
   const def = currentDef();
+  soldier.setCarried(inventory.ownedWeapons);
   soldier.setWeapon(inventory.current);
   syncOptic();
   weapon.reloading = false;
@@ -2194,13 +2363,25 @@ function beginThrow() {
   if (cookTime === 0) sfx.pin();
 }
 
+// Letting go before the throwable is out and wound up (the gun is still going onto the back)
+// queues the throw for that moment; then the arm swings, and the throwable leaves the hand on
+// the clip's release frame, along the trajectory shown at that moment
+let throwQueued  = false;
+let pendingThrow = -1;      // s until the swinging hand lets go, −1 = none
+
 function releaseThrow() {
   if (!throwAiming) return;
+  if (!soldier.throwReady) { throwQueued = true; return; }
+  throwQueued = false;
   throwAiming = false;
   throwables.hidePreview();
-  if (playerHealth <= 0) { setCookCountdown(0); return; }
-  computeThrow();
-  launchThrow(cookTime >= 0 ? Math.max(0.05, GRENADE.cookTime - cookTime) : undefined);
+  if (playerHealth <= 0) { setCookCountdown(0); cookTime = -1; return; }
+  const delay = soldier.throwReleaseDelay(THROW_GESTURE);
+  playerAnim.gesture("throw", THROW_GESTURE);
+  pendingThrow = delay;
+  throwCooldown = THROW_COOLDOWN + delay;
+  // No shooting until the gun is back off the sling
+  if (inventory.current) weapon.switchTimer = Math.max(weapon.switchTimer, THROW_GESTURE + THROW_RECOVER);
 }
 
 /** Throws the selected item from _throwFrom at _throwVel (fuse: a cooked grenade's time left). */
@@ -2213,7 +2394,6 @@ function launchThrow(fuse) {
   const color = kind === "smoke" ? Math.floor(Math.random() * SMOKE_COLORS.length) : 0;
   if (kind === "smoke") sfx.pin();
   throwables.throw(kind, _throwFrom, _throwVel, localTarget.id, color, fuse);
-  playerAnim.gesture("throw", 0.45);
   if (net.connected) {
     net.send({
       t: "throw", k: kind, c: color, f: fuse === undefined ? undefined : +fuse.toFixed(2),
@@ -2226,6 +2406,7 @@ function launchThrow(fuse) {
 
 function cancelThrow() {
   throwAiming = false;
+  throwQueued = false;
   cookTime = -1;
   setCookCountdown(0);
   throwables.hidePreview();
@@ -2252,7 +2433,19 @@ function selectThrowable(kind) {
 
 function updateThrowAim(delta) {
   throwCooldown = Math.max(0, throwCooldown - delta);
+  if (pendingThrow >= 0) {
+    // The arm is swinging: the fuse keeps burning until the grenade leaves the hand
+    if (cookTime >= 0) cookTime += delta;
+    pendingThrow -= delta;
+    if (playerHealth <= 0) { pendingThrow = -1; cookTime = -1; setCookCountdown(0); return; }
+    if (pendingThrow > 0) return;
+    pendingThrow = -1;
+    computeThrow();
+    launchThrow(cookTime >= 0 ? Math.max(0.05, GRENADE.cookTime - cookTime) : undefined);
+    return;
+  }
   if (!throwAiming) return;
+  if (throwQueued && soldier.throwReady) { releaseThrow(); return; }
   if (playerHealth <= 0 || !isLocked()) { cancelThrow(); return; }
   computeThrow();
   if (cookTime >= 0) {
@@ -2316,6 +2509,7 @@ function onGrenadeExplode(pos, owner = null) {
   }
   if (isBR() && net.isHost) bots.blast(pos, by, GRENADE.playerRadius, GRENADE.playerMaxDamage);
   cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - pd / 35, 0, 1) * 0.8);
+  if (isBR()) worldShockwave(pos.x, pos.y + 0.5, pos.z, THREE.MathUtils.clamp(1.1 - camera.position.distanceTo(pos) / 45, 0, 1), 0xffb070);
   sfx.explosion(pos);
   if (!net.isClient) zombieManager?.noise(pos.x, pos.z, GRENADE.alertRadius, "explosion");
 }
@@ -2457,18 +2651,27 @@ function updatePickups(delta) {
       promptRows[n++] = "B";
       promptRows[n++] = `Shop · ${fmtRupees(inventory.cash)}`;
     }
-    if (climb.offer) {
-      promptRows[n++] = "Space";
-      promptRows[n++] = climb.offer === "wall" ? "Climb over the wall" : "Jump through the window";
-    }
-    const car = drive.car ?? nearestVehicle();
+    const car = drive.car ?? ride.car ?? nearestVehicle();
     if (car) {
-      if (drive.on) {
+      const bike = !!car.spec.bike;
+      if (drive.on || ride.on) {
         promptRows[n++] = "V";
-        promptRows[n++] = "Get out";
-      } else if (car.driver === null) {
-        promptRows[n++] = "V";
-        promptRows[n++] = `Drive the ${car.spec.label}${car.empty ? " (no petrol)" : ""}`;
+        promptRows[n++] = bike ? "Get off" : "Get out";
+        if (ride.on) {
+          promptRows[n++] = ride.facing > 0 ? "Y" : "X";
+          promptRows[n++] = ride.facing > 0 ? "Turn round (face back)" : "Turn round (face front)";
+        }
+      } else {
+        if (car.driver === null) {
+          promptRows[n++] = "V";
+          promptRows[n++] = `${bike ? "Ride" : "Drive"} the ${car.spec.label}${car.empty ? " (no petrol)" : ""}`;
+        }
+        if (bike && car.pillion === null) {
+          promptRows[n++] = "X";
+          promptRows[n++] = "Sit behind, facing front";
+          promptRows[n++] = "Y";
+          promptRows[n++] = "Sit behind, facing back";
+        }
       }
       if (inventory.fuelCans > 0 && car.fuel < car.spec.fuelMax - 1) {
         promptRows[n++] = "T";
@@ -2613,6 +2816,8 @@ function isOpenGround(x, z) {
 }
 
 const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag", "biscuit", "cash", "biscuit"];
+// The water towers' roofs are a sniper's perch: optics and long guns up there
+const TOWER_LOOT = ["sniper", "scope4x", "ammo", "rifle", "scope6x", "medkit", "ammo", "scope8x", "grenade", "helmet2", "ammo", "biscuit"];
 const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov", "helmet3", "vest3", "backpack3", "scope4x", "scope6x", "scope8x", "suppressor"];
 
 function spawnWorldLoot() {
@@ -2634,10 +2839,16 @@ function spawnWorldLoot() {
     const kind = HOUSE_LOOT[(i * 5 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
     pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
   });
-  // Shivpur's shops and rooftops, and the building sites
-  [...(city?.lootSpots ?? []), ...(plots?.lootSpots ?? [])].forEach((sp, i) => {
+  // Shivpur's shops and rooftops, the building sites and the CSE building's classrooms
+  [...(city?.lootSpots ?? []), ...(plots?.lootSpots ?? []), ...(cseBuilding?.lootSpots ?? [])].forEach((sp, i) => {
     if (lootRng() < 0.45) return;
     const kind = HOUSE_LOOT[(i * 7 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
+    pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
+  });
+  // Up on the water towers
+  waterTowers?.lootSpots.forEach((sp, i) => {
+    if (lootRng() < 0.3) return;
+    const kind = TOWER_LOOT[(i * 5 + Math.floor(lootRng() * TOWER_LOOT.length)) % TOWER_LOOT.length];
     pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
   });
   // The caves are worth the walk: something in most chambers and junctions
@@ -2696,6 +2907,11 @@ for (const id of [...Object.keys(GEAR), ...Object.keys(ATTACHMENTS)]) {
   itemIcons[id] = itemIcon(id, { width: 64, height: 64, yaw: 0.6, pitch: 0.25 });
 }
 applyStaticIcons();
+// Credits & Legal: every asset's attribution and the disclaimer (accepted once, on the first visit)
+const legal = new LegalScreen();
+document.querySelector("#lobby .lb-top")?.append(legalButton(legal, "lb-legal"));
+document.getElementById("start-screen")?.append(legalButton(legal));
+legal.showFirstTime();
 // Prompt rows show what the key does as an icon too (and that's all a phone shows)
 const PROMPT_ICONS = { O: "door", E: "bag", V: "steering", B: "shop", Space: "jump", L: "flashlight", T: "fuel", H: "medkit" };
 const inventoryUI = new InventoryUI({ inventory, icons: itemIcons, promptIcon: key => icon(PROMPT_ICONS[key] ?? "", "prompt-icon") });
@@ -2760,9 +2976,38 @@ function updatePostFx(realDt) {
     // Battle royale moments: outside the zone (deeper = stronger), and the skydive
     zone: isBR() && br.outside && playerHealth > 0 ? THREE.MathUtils.clamp(0.55 + br.outsideBy / 40, 0.55, 1) : 0,
     freefall: isBR() && br.flight === PHASE_FALL ? 1 : isBR() && br.flight === PHASE_CHUTE ? 0.25 : 0,
+    ...brPostFx(),
     // Faster as health drops
     heartbeat: low ? 0.5 + 0.5 * Math.sin(performance.now() / 1000 * (6 + 6 * (1 - playerHealth / (MAX_HEALTH * 0.4)))) : 0,
   });
+}
+
+const _brFx = { fallSpeed: 0, feed: 0, showdown: 0, victory: 0 };
+/** Battle royale grade: skydive speed, spectator feed, final circle, victory. */
+function brPostFx() {
+  const f = _brFx;
+  f.fallSpeed = f.feed = f.showdown = f.victory = 0;
+  if (!isBR()) return f;
+  if (br.flight === PHASE_FALL) f.fallSpeed = THREE.MathUtils.clamp((-br.vy - 8) / (FREEFALL.dive - 8), 0, 1);
+  const watching = brWatching();
+  f.feed = watching ? 1 : 0;
+  // Switching who you watch tears the signal for a moment
+  const watched = watching ? br.spectating : null;
+  if (watched !== br.fxWatch) {
+    if (watched !== null && br.fxWatch !== null) postFx.glitch(0.55);
+    br.fxWatch = watched;
+  }
+  if (br.state === "match" && br.inMatch && playerHealth > 0 && br.started >= 3 && br.alive.size <= 3) f.showdown = 1;
+  if (br.state === "end" && br.won) f.victory = 1;
+  return f;
+}
+
+const _waveAt = new THREE.Vector3();
+/** A shockwave ring on screen where a world point is (or from below, when it's close behind you). */
+function worldShockwave(x, y, z, strength, color) {
+  _waveAt.set(x, y, z).project(camera);
+  if (_waveAt.z > 1) postFx.shockwave(0.5, -0.1, strength * 0.6, color);
+  else if (Math.abs(_waveAt.x) < 1.4 && Math.abs(_waveAt.y) < 1.4) postFx.shockwave(_waveAt.x * 0.5 + 0.5, _waveAt.y * 0.5 + 0.5, strength, color);
 }
 
 function wheelAmmo(id) {
@@ -2963,7 +3208,7 @@ let _wasOnGround = true, _fallSpeed = 0;
 /** What feet hit at (x, feetY, z): house floors are wood, caves stone, the rest grass. */
 function footSurface(x, feetY, z) {
   if (houses?.floorAt(x, feetY, z)) return "wood";
-  if (caves?.inside(x, z, feetY) || indiaBuildings?.inside(x, z)) return "concrete";
+  if (caves?.inside(x, z, feetY) || indiaBuildings?.inside(x, z) || cseBuilding?.inside(x, z)) return "concrete";
   return "grass";
 }
 
@@ -2989,7 +3234,7 @@ function updateAudio(delta) {
     sfx.fireLoop(`fire${i}`, _fireAt, f.active ? Math.min(1, f.time) : 0);
   });
   // Landing from a jump or a fall: both feet at once, louder the harder
-  if (onGround && !_wasOnGround && _fallSpeed > 3 && playerHealth > 0 && !drive.on) {
+  if (onGround && !_wasOnGround && _fallSpeed > 3 && playerHealth > 0 && !drive.on && !ride.on) {
     const s = footSurface(p.x, p.y - FEET_OFFSET, p.z), v = Math.min(1.3, _fallSpeed / 7);
     sfx.footstep(s, v);
     sfx.footstep(s, v * 0.8, null, 0.9);
@@ -3077,7 +3322,7 @@ function playerVisibility() {
   else if (Math.hypot(moveVelocity.x, moveVelocity.z) < 0.5) v *= 0.85;
   const floor = houses?.floorAt(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
   if (floor && !floor.lightOn) v *= 0.45;
-  if (indiaBuildings?.inside(characterBody.position.x, characterBody.position.z)) v *= 0.7;
+  if (indiaBuildings?.inside(characterBody.position.x, characterBody.position.z) || cseBuilding?.inside(characterBody.position.x, characterBody.position.z)) v *= 0.7;
   if (city?.inside(characterBody.position.x, characterBody.position.z, characterBody.position.y - FEET_OFFSET)) v *= 0.7;
   // Deep in the sugarcane only movement gives you away
   if (farmland?.inCane(characterBody.position.x, characterBody.position.z)) v *= sprinting ? 0.6 : 0.35;
@@ -3584,6 +3829,8 @@ let city = null;           // world/City.js: Shivpur, built in loadWorld()
 let plots = null;          // world/Plots.js: walled plots and building sites along the roads
 const chunks = new WorldChunks(); // world/Chunks.js: far static meshes aren't drawn
 let collegeGate = null;    // world/CollegeGate.js, placed in loadWorld()
+let cseBuilding = null;    // world/CseBuilding.js: the CSE department block behind the gate
+let waterTowers = null;    // world/WaterTowers.js: { towers, lootSpots, blocks() }, built in loadWorld()
 let indiaModels = {};      // world/IndiaAssets.js: { rickshaw, thar, truck, … } (null where missing)
 let townLabels = [];       // town names for the world map
 let roadLines = [];        // road centrelines for the maps
@@ -3591,6 +3838,28 @@ let roadLines = [];        // road centrelines for the maps
 // ─── Character GLTF Load ──────────────────────────────────────────────────────
 async function loadCharacter() {
   await soldier.load(gltfLoader);
+}
+
+/** Swaps the stand-in helmets and backpacks for the detailed models that are there (items/GearModels.js). */
+async function loadDetailedGear() {
+  const lib = await loadGearModels(gltfLoader);
+  const found = Object.keys(lib).filter(k => lib[k]);
+  if (!found.length) return;
+  // Loot on the ground shows them too: helmets upright, vests and packs lying flat
+  const groundLoot = [];
+  for (const k of found) {
+    const lv = +k.slice(-1);
+    const [size, pose] = k.startsWith("helmet") ? [0.3, "upright"] : k.startsWith("vest") ? [0.55, "faceUp"] : [0.42 + 0.08 * lv, "backDown"];
+    groundLoot.push(pickups.setDetailedModel(k, lib[k].model, size, pose));
+  }
+  // Every program they need (worn, and instanced on the ground) compiled before any is seen
+  const show = new THREE.Group();
+  for (const k of found) show.add(lib[k].model.clone(true));
+  for (const { meshes } of groundLoot) for (const im of meshes) show.add(new THREE.InstancedMesh(im.geometry, im.material, 1));
+  show.position.copy(camera.position);
+  await renderer.compileAsync(show, camera, scene);
+  for (const g of groundLoot) g.use();
+  setGearModels(lib);
 }
 
 // ─── World Assets Load ────────────────────────────────────────────────────────
@@ -3629,12 +3898,15 @@ async function loadWorld() {
     gltfLoader.loadAsync("/models/house/house-kit.glb?v=2"),
     // (the two big tree models arrive after the game starts: plantTrees())
     settle(loadGLB("/models/msbecl_gate_final.glb")),
+    settle(loadGLB("/models/cse_building.glb")),
+    settle(loadGLB("/models/bikes/sv650.glb")),
+    settle(loadGLB("/models/bikes/military_motorbike.glb")),
     indiaDownload,
   ]);
   // The caves' rock: from the worker (started at boot), or here if it couldn't run
   await cavesPrecomputed;
   precomputeCaves();
-  const [autoGltf, wrlScene, houseKit, gateGltf, india] = await downloads;
+  const [autoGltf, wrlScene, houseKit, gateGltf, cseGltf, sportbikeGltf, motorbikeGltf, india] = await downloads;
   loadMark("world downloaded");
   sfx.preload();
   indiaModels = india;
@@ -3684,10 +3956,28 @@ async function loadWorld() {
   const parked = vehicleSpawns(roads);
   const stalls = shopSpots(roads);
   const props = propSpots(roads);
+  // A chaiwala by every dukaan and every town store (Shivpur's shops get theirs once the city is laid out)
+  const chaiSpots = [
+    ...stalls.map(s => chaiwalaByStall(s)),
+    ...props.filter(p => p.kind === "townBuilding").map(p => chaiwalaAtFront(p, 3.6, 5.4)),
+  ];
+  // Water towers by the towns, clear of the caves, the river, the beach and everything above
+  // The CSE building's grounds (placed after the terrain; everything else keeps off them)
+  const campus = cseGltf ? [{ x: CSE_BUILDING.x, z: CSE_BUILDING.z, r: CSE_BUILDING.r, fade: 18 }] : [];
+  const taken = [...parked.map(p => ({ x: p.x, z: p.z, r: VEHICLES[p.kind].length / 2 })), ...stalls.map(s => ({ x: s.x, z: s.z, r: 2.4 })), ...props, ...chaiSpots.map(c => ({ ...c, r: CHAIWALA_R })), ...campus];
+  const towerSpots = india.waterTower ? waterTowerSpots(roads, (x, z, r) => caveBlocks(x, z, r + 4) || river.wet(x, z, r + 2)
+    || Math.hypot(x, z) < 26 + r || Math.hypot(x, z) > shoreRadius(x, z) - 30 - r
+    || Math.hypot(x - COLLEGE_GATE.x, z - COLLEGE_GATE.z) < COLLEGE_GATE.clear + r
+    || DEBRIS_SPOTS.some(([dx, dz]) => Math.hypot(dx - x, dz - z) < 5 + r)
+    || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2 + r)
+    || taken.some(p => Math.hypot(p.x - x, p.z - z) < p.r + r + 2)) : [];
   const reserved = [
     ...parked.map(p => ({ x: p.x, z: p.z, r: VEHICLES[p.kind].length / 2 + 0.5 })),
     ...stalls.map(s => ({ x: s.x, z: s.z, r: 2.4 })),
     ...props,
+    ...chaiSpots.map(c => ({ x: c.x, z: c.z, r: CHAIWALA_R })),
+    ...towerSpots,
+    ...campus,
   ];
   // Asked for every grass texel and tree / rock / pole candidate: a coarse grid keeps it to nearby spots
   const RES_CELL = 8, RES_PAD = 6, resGrid = new Map();
@@ -3736,6 +4026,10 @@ async function loadWorld() {
     def: CITY, roads, rng: makeLCG(0x5141f0e), base: cityBase,
     blocked: (x, z, r) => houses.blocks(x, z, r) || caveBlocks(x, z, r) || river.wet(x, z, r) || nearParked(x, z, r),
   });
+  // ...and a chaiwala on the pavement in front of every third shop
+  city.buildings.forEach((b, i) => {
+    if (i % 3 === 1) chaiSpots.push(chaiwalaAtFront(b, (i % 2 ? 1 : -1) * (b.w / 2 - 0.65), b.d / 2 + 0.75));
+  });
 
   // Farmland between the towns (world/Farmland.js), and a farm shed (a cabin, with its loot spots) by some fields
   const farmRng = makeLCG(0xfa53f1e1d);
@@ -3778,7 +4072,7 @@ async function loadWorld() {
   const pads = [
     ...plateaus,
     { x: 0, z: 0, r: 16, fade: 14 },                                                         // spawn + starter loot
-    ...reserved.map(p => ({ x: p.x, z: p.z, r: p.r + 1, fade: 6, y: lvl(p.x, p.z) })),        // parked vehicles, stalls, props
+    ...reserved.map(p => ({ x: p.x, z: p.z, r: p.r + 1, fade: p.fade ?? 6, y: lvl(p.x, p.z) })), // parked vehicles, stalls, props, the campus
     { x: COLLEGE_GATE.x, z: COLLEGE_GATE.z, r: COLLEGE_GATE.width / 2 + 2, fade: 12, y: lvl(COLLEGE_GATE.x, COLLEGE_GATE.z) }, // level under the gate
     ...shedPads,                                                                               // farm sheds
   ];
@@ -3842,13 +4136,30 @@ async function loadWorld() {
       gltf: gateGltf, scene, world, material: staticMaterial, roads, groundAt: groundHeight, mapObstacles, navObstacles,
     });
   }
-  const nearGate = (x, z, pad) => !!collegeGate?.blocks(x, z, pad);
+  // The CSE building, on its flattened grounds by the road
+  if (cseGltf) {
+    cseBuilding = placeCseBuilding({
+      gltf: cseGltf, scene, world, material: staticMaterial, roads, groundAt: groundHeight, mapObstacles, navObstacles, chunks,
+      anisotropy: Math.min(renderer.capabilities.getMaxAnisotropy(), QUALITY.anisotropy),
+    });
+    townLabels.push({ name: CSE_BUILDING.name, x: CSE_BUILDING.x, z: CSE_BUILDING.z });
+  }
+  const nearGate = (x, z, pad) => !!collegeGate?.blocks(x, z, pad) || !!cseBuilding?.blocks(x, z, pad);
 
   // Dukaan stalls and the Indian props (after the terrain too)
   shops = buildShops({ scene, world, material: staticMaterial, spots: stalls, groundAt: groundHeight, mapObstacles, navObstacles });
   indiaBuildings = placeIndiaProps({
     scene, world, material: staticMaterial, spots: props, groundAt: groundHeight, mapObstacles, navObstacles,
     models: { truck: indiaModels.truck, panchayat: indiaModels.panchayat, townBuilding: indiaModels.townBuilding },
+  });
+  // Water towers you can climb, and the chaiwalas
+  waterTowers = buildWaterTowers({
+    gltf: indiaModels.waterTower ? { scene: indiaModels.waterTower } : null, scene, world, material: staticMaterial,
+    spots: towerSpots, groundAt: groundHeight, mapObstacles, navObstacles, anisotropy: renderer.capabilities.getMaxAnisotropy(),
+  });
+  buildChaiwalas({
+    gltf: indiaModels.chaiwala ? { scene: indiaModels.chaiwala } : null, scene, world, material: staticMaterial,
+    spots: chaiSpots, groundAt: groundHeight, mapObstacles, navObstacles,
   });
 
   loadMark("· water, fields, city, plots built");
@@ -3902,11 +4213,15 @@ async function loadWorld() {
   headlight = new THREE.SpotLight(0xffe6b8, 0, 52, 0.5, 0.5, 1.3);
   headlight.castShadow = false;
   scene.add(headlight, headlight.target);
-  const vehicleModels = { rickshaw: indiaModels.rickshaw ?? autoGltf?.scene ?? null, thar: indiaModels.thar ?? null, tractor: null };
+  const vehicleModels = {
+    rickshaw: indiaModels.rickshaw ?? autoGltf?.scene ?? null, thar: indiaModels.thar ?? null, tractor: null,
+    sportbike: sportbikeGltf?.scene ?? null, motorbike: motorbikeGltf?.scene ?? null,
+  };
   const standIns = { thar: standInJeep, tractor: standInTractor };
   parked.forEach((spawn, index) => {
-    const src = vehicleModels[spawn.kind];
-    if (spawn.kind === "rickshaw" && !src) return;
+    // (a missing bike rides the other one's model: the list must have no gaps)
+    const src = vehicleModels[spawn.kind] ?? (VEHICLES[spawn.kind].bike ? vehicleModels.sportbike ?? vehicleModels.motorbike : null);
+    if (!src && !standIns[spawn.kind]) return;   // (the rickshaw and the bikes have no stand-in)
     const model = src ? src.clone(true) : standIns[spawn.kind]();
     // The old free rickshaw model (the fallback) points its nose along +X
     const modelYaw = spawn.kind === "rickshaw" && !indiaModels.rickshaw ? -Math.PI / 2 : null;
@@ -4294,7 +4609,10 @@ net.on("left", msg => {
   const name = remotePlayers.players.get(msg.id)?.name ?? "A player";
   remotePlayers.remove(msg.id);
   if (worldMap.pins.has(msg.id)) setPin(msg.id, null);
-  for (const v of vehicles) if (v.driver === msg.id) v.releaseRemote();
+  for (const v of vehicles) {
+    if (v.driver === msg.id) v.releaseRemote();
+    if (v.pillion === msg.id) v.pillion = null;
+  }
   inventoryUI.feed(`${name} left`, "info");
   chat.system(`${name} left`);
   updateSquadPlayerCount();
@@ -4369,7 +4687,9 @@ net.on("anim", msg => {
 });
 net.on("hurt", msg => dealDamageToPlayer(msg.d, msg.kx, msg.kz, msg.sh, msg.sx, msg.sz, "monster"));
 net.on("throw", msg => {
-  remotePlayers.players.get(msg.b ?? msg.from)?.soldier?.playGesture("throw", 0.45);
+  // (Players send the swing as an "anim" first and this on the release frame: don't restart it)
+  const s = remotePlayers.players.get(msg.b ?? msg.from)?.soldier;
+  if (s) { s.tossKind = msg.k; if (s.gesture?.name !== "throw") s.playGesture("throw", THROW_GESTURE); }
   throwables.throw(msg.k, _vecA.set(msg.o[0], msg.o[1], msg.o[2]), _vecB.set(msg.v[0], msg.v[1], msg.v[2]), msg.b ?? msg.from, msg.c ?? 0, msg.f);
 });
 net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
@@ -4518,10 +4838,12 @@ function netTick(delta) {
       w: inventory.current, hp: Math.max(0, Math.round(playerHealth)), dead: playerHealth <= 0 ? 1 : 0,
       vis: +playerVisibility().toFixed(2), k: killsThisLife, sn: STANCE_RANK[stance], g: _gearCode || undefined,
       av: encodeAvatar(soldier.avatar), swm: swimming ? 1 : undefined, air: airPose > 0.5 ? 1 : undefined,
+      th: throwAiming && playerHealth > 0 ? inventory.selectedThrowable : undefined,
       ph: isBR() ? (br.ghost ? PHASE_PLANE : br.flight) : PHASE_GROUND,
       veh: drive.on
         ? [+drive.car.x.toFixed(2), +drive.car.z.toFixed(2), +drive.car.yaw.toFixed(3), +drive.car.speed.toFixed(2), +drive.car.fuel.toFixed(1), drive.car.index]
         : undefined,
+      rd: ride.on ? [ride.car.index, ride.facing] : undefined,   // riding pillion: [bike, facing]
     });
   }
   if (!net.isHost) return;
@@ -4623,12 +4945,24 @@ const VEHICLE_SPAWNS = [
   { kind: "tractor", road: "Outer Ring", near: [-200, 295], side: 1 },
   { kind: "tractor", road: "Outer Ring", near: [-140, -335], side: -1 },
   { kind: "tractor", road: "Outer Ring", near: [240, 290], side: 1 },
+  // Motorbikes (appended: indices are on the wire)
+  { kind: "sportbike", road: "North Road", near: [8, 18], side: -1 },   // Crossroads
+  { kind: "motorbike", road: "Highway", near: [20, -8], side: 1 },
+  { kind: "sportbike", road: "North Road", near: [3, 162], side: -1 },  // Ravencross
+  { kind: "motorbike", road: "North Road", near: [5, 208], side: 1 },   // the CSE building
+  { kind: "sportbike", road: "Station Road", near: [352, 4], side: -1 }, // Shivpur
+  { kind: "motorbike", road: "Highway", near: [158, -31], side: 1 },    // Ashford
+  { kind: "motorbike", road: "North Road", near: [24, -160], side: -1 }, // Mill Creek
+  { kind: "sportbike", road: "Highway", near: [-126, 10], side: 1 },    // Pine Hollow
 ];
 const PARK_OFFSET = 4.4;         // m from the road's centreline: on the shoulder, inside the power-pole line (5.9 m)
 const SEATED_HIP = 0.95;         // soldier hip height above the feet
 const vehicles = [];             // index = VEHICLE_SPAWNS index
 let headlight = null;            // the one shared beam (Vehicle.aimHeadlight)
 const drive = { on: false, car: null, lastMouse: 0, emptyNotice: 0 };
+// Riding pillion on a motorbike: facing 1 forward, −1 turned round (you can shoot from back there)
+const ride = { on: false, car: null, facing: 1 };
+const MOUNT_TIME = 0.6;          // s to swing on to a bike (or off it)
 const _seat = new THREE.Vector3();
 const _exit = { x: 0, z: 0 };
 const _runOver = new Map();      // monster / player id → last hit (ms)
@@ -4693,9 +5027,13 @@ function nearestVehicle() {
 
 function toggleVehicle() {
   if (drive.on) { exitVehicle(); return; }
+  if (ride.on) { exitPillion(); return; }
   const car = nearestVehicle();
   if (!car || playerHealth <= 0 || brAirborne() || climb.active) return;
-  if (car.driver !== null) { inventoryUI.feed("Someone is already driving it", "info"); return; }
+  if (car.driver !== null) {
+    inventoryUI.feed(car.spec.bike && car.pillion === null ? `Someone's riding it: ${IS_TOUCH ? "tap" : "press X / Y"} to sit behind them` : "Someone is already driving it", "info");
+    return;
+  }
   drive.on = true;
   drive.car = car;
   car.driver = "local";
@@ -4709,13 +5047,17 @@ function toggleVehicle() {
   knockbackVel.set(0, 0, 0);
   drive.lastMouse = 0;
   sfx.equip();
+  if (car.spec.bike) startMount(car, "drive");
   inventoryUI.feed(car.empty
     ? `Out of petrol: find a petrol can, then ${IS_TOUCH ? "tap it in the hotbar" : "press T"}`
-    : IS_TOUCH ? "Joystick: drive & steer · BRAKE · tap Get out" : "W/S drive · A/D steer · Space brake · V get out",
+    : car.spec.bike
+      ? IS_TOUCH ? "Joystick: ride & lean · BRAKE · tap Get off" : "W/S ride · A/D lean into the turn · Space brake · V get off"
+      : IS_TOUCH ? "Joystick: drive & steer · BRAKE · tap Get out" : "W/S drive · A/D steer · Space brake · V get out",
     car.empty ? "info" : "fuel", "fuel");
 }
 
 function exitVehicle() {
+  exitPillion();
   if (!drive.on) return;
   const car = drive.car;
   drive.on = false;
@@ -4729,6 +5071,144 @@ function exitVehicle() {
   characterBody.position.set(_exit.x, groundHeight(_exit.x, _exit.z) + FEET_OFFSET + 0.05, _exit.z);
   characterBody.velocity.set(0, 0, 0);
   bodyYaw = car.yaw;
+  if (car.spec.bike) startDismount();
+}
+
+// ─── Motorbikes: pillion, and the rider's mount / dismount ────────────────────
+/** X / Y next to a bike: sit behind the driver facing forward (1) or back (−1); on it already, turn round. */
+function pillionKey(facing) {
+  if (playerHealth <= 0 || brAirborne() || climb.active || drive.on) return;
+  if (ride.on) {
+    if (ride.facing === facing) return;
+    // Turn round on the seat: half off, and back on the other way
+    ride.facing = facing;
+    ride.car.pillionFacing = facing;
+    localRide.w = Math.min(localRide.w, 0.35);
+    localRide.from.copy(characterRoot.position);
+    localRide.pose = facing > 0 ? "front" : "back";
+    sfx.equip();
+    return;
+  }
+  const car = nearestVehicle();
+  if (!car?.spec.bike) return;
+  if (car.pillion !== null) { inventoryUI.feed("Someone is already riding pillion", "info"); return; }
+  ride.on = true;
+  ride.car = car;
+  ride.facing = facing;
+  car.pillion = "local";
+  car.pillionFacing = facing;
+  characterBody.collisionResponse = false; // the bike carries you
+  setStance("stand", true);
+  moveVelocity.set(0, 0, 0);
+  knockbackVel.set(0, 0, 0);
+  sfx.equip();
+  startMount(car, facing > 0 ? "front" : "back");
+  inventoryUI.feed(facing > 0
+    ? `Riding pillion${car.driver === null ? ": wait for a driver" : ""} · ${IS_TOUCH ? "tap" : "Y"} to turn round · V get off`
+    : `Riding pillion facing back: cover the road behind · ${IS_TOUCH ? "tap" : "X"} to face forward · V get off`, "info");
+}
+
+function exitPillion() {
+  if (!ride.on) return;
+  const car = ride.car;
+  ride.on = false;
+  ride.car = null;
+  if (car.pillion === "local") car.pillion = null;
+  car.exitSpot(solidAt, _exit);
+  characterBody.collisionResponse = true;
+  characterBody.position.set(_exit.x, groundHeight(_exit.x, _exit.z) + FEET_OFFSET + 0.05, _exit.z);
+  characterBody.velocity.set(0, 0, 0);
+  bodyYaw = car.yaw;
+  startDismount();
+}
+
+/**
+ * A rider's place on a bike, eased on and off: { car, pose ("drive" | "front" | "back"),
+ * w (0 off … 1 seated), target (1 getting on, 0 getting off), from (where the swing on
+ * started) }. The local player has one, every remote rider too.
+ */
+const localRide = { car: null, pose: null, w: 0, target: 0, from: new THREE.Vector3() };
+function startMount(car, pose) {
+  if (localRide.w <= 0 || localRide.car !== car) { localRide.w = 0; localRide.from.copy(characterRoot.position); }
+  localRide.car = car;
+  localRide.pose = pose;
+  localRide.target = 1;
+}
+function startDismount() {
+  localRide.target = 0;
+  landLock = Math.max(landLock, MOUNT_TIME * localRide.w);   // no walking off mid-swing
+}
+
+const _rideSeat = new THREE.Vector3(), _rideP = new THREE.Vector3(), _rideAt = new THREE.Vector3();
+/**
+ * Places a rider for this frame and fills in a Soldier ride for them: the hips on the seat,
+ * hands on the grips / the driver's waist / the rack, feet on the pegs (the driver's left one
+ * down on the road when nearly stopped). a: their mount state; root: their soldier's root;
+ * atRoot: where their body is (eased toward while getting off). Returns the ride, or null
+ * once they're off.
+ */
+function placeRider(a, root, delta, atRoot) {
+  const car = a.car;
+  if (!car) return null;
+  a.w = THREE.MathUtils.clamp(a.w + (a.target > 0 ? 1 : -1) * delta / MOUNT_TIME, 0, 1);
+  if (a.target === 0 && a.w <= 0) { a.car = null; return null; }
+  const B = car.spec.bike, pose = a.pose;
+  const seat = pose === "drive" ? car.seatWorld(_rideSeat) : car.pillionWorld(_rideSeat);
+  _rideP.set(seat.x, seat.y - SEATED_HIP, seat.z);
+  // The body gets there before the legs are done (the swing over the seat comes last)
+  const e = THREE.MathUtils.smoothstep(Math.min(1, a.w / 0.7), 0, 1);
+  root.position.lerpVectors(a.target ? a.from : atRoot, _rideP, e);
+  root.rotation.y = car.yaw + (pose === "back" ? Math.PI : 0);
+  root.updateMatrixWorld(true);
+
+  const r = a.ride ??= { lh: new THREE.Vector3(), rh: new THREE.Vector3(), lf: new THREE.Vector3(), rf: new THREE.Vector3(), axis: new THREE.Vector3(), view: {} };
+  r.axis.set(Math.sin(car.yaw), 0, Math.cos(car.yaw));
+  const P = B.pillion;
+  let hold = true;
+  if (pose === "drive") {
+    r.hunch = B.hunch;
+    car.pointWorld(B.grips[0], r.lh);
+    car.pointWorld(B.grips[1], r.rh);
+    car.pointWorld(B.pegs[0], r.lf);
+    car.pointWorld(B.pegs[1], r.rf);
+    // Nearly stopped: the left foot comes down onto the road
+    const down = 1 - Math.min(1, Math.abs(car.speed) / 1.6);
+    if (down > 0.01 && a.w > 0.9) {
+      car.pointWorld([B.pegs[0][0] + 0.2, 0, B.pegs[0][2] + 0.15], _rideAt);
+      _rideAt.y = groundHeight(_rideAt.x, _rideAt.z) + 0.08;
+      r.lf.lerp(_rideAt, down);
+    }
+  } else if (pose === "front") {
+    r.hunch = 0.12;
+    car.pointWorld(P.pegs[0], r.lf);
+    car.pointWorld(P.pegs[1], r.rf);
+    // Holding on to the driver's waist (or hands on the thighs with nobody up front)
+    hold = car.driver !== null;
+    const sd = car.spec.seat;
+    car.pointWorld([0.17, sd[1] + 0.02, sd[2] - 0.08], r.lh);
+    car.pointWorld([-0.17, sd[1] + 0.02, sd[2] - 0.08], r.rh);
+  } else {
+    // Turned round: the rider's left is the bike's right; hands on the rack in front of them
+    r.hunch = 0.05;
+    car.pointWorld(P.pegs[1], r.lf);
+    car.pointWorld(P.pegs[0], r.rf);
+    car.pointWorld(P.grabs[1], r.lh);
+    car.pointWorld(P.grabs[0], r.rh);
+  }
+  // What the Soldier reads (Soldier.ride)
+  const o = r.view;
+  o.pose = pose; o.w = a.w; o.swing = Math.sin(Math.PI * a.w); o.lean = car.lean; o.axis = r.axis; o.hunch = r.hunch;
+  o.lf = r.lf; o.rf = r.rf;
+  o.lh = hold ? r.lh : null;
+  o.rh = hold ? r.rh : null;
+  return o;
+}
+
+/** Your own seat on a bike, every frame (after the body is placed, before the soldier animates). */
+function updateLocalRide(delta) {
+  if (!localRide.car) { soldier.ride = null; return; }
+  _rideAt.set(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
+  soldier.ride = placeRider(localRide, characterRoot, delta, _rideAt);
 }
 
 function refuelVehicle() {
@@ -4818,6 +5298,14 @@ function vehicleRunOver(car) {
 
 /** After the physics step: you ride in the seat. */
 function vehicleAfterStep() {
+  if (ride.on) {
+    ride.car.pillionWorld(_seat);
+    characterBody.position.set(_seat.x, _seat.y - SEATED_HIP + FEET_OFFSET, _seat.z);
+    characterBody.velocity.set(0, 0, 0);
+    bodyYaw = ride.car.yaw + (ride.facing < 0 ? Math.PI : 0);
+    characterRoot.rotation.y = bodyYaw;
+    return;
+  }
   if (!drive.on) return;
   drive.car.seatWorld(_seat);
   characterBody.position.set(_seat.x, _seat.y - SEATED_HIP + FEET_OFFSET, _seat.z);
@@ -4899,9 +5387,20 @@ function updateVehicleFx() {
   }
 }
 
-// Someone else driving, carried in their state packet: veh = [x, z, yaw, speed, fuel, index]
+// Someone else driving, carried in their state packet: veh = [x, z, yaw, speed, fuel, index];
+// riding pillion: rd = [index, facing]
 net.on("st", msg => {
   if (!vehicles.length) return;
+  const back = msg.rd ? vehicles[msg.rd[0]] : null;
+  if (back?.spec.bike) {
+    // Both sat behind at once: the lower id keeps the seat
+    if (ride.car === back && msg.from < net.id) {
+      exitPillion();
+      inventoryUI.feed(`${remotePlayers.players.get(msg.from)?.name ?? "Someone"} is riding pillion`, "info");
+    }
+    if (back.pillion !== "local") { back.pillion = msg.from; back.pillionFacing = msg.rd[1] < 0 ? -1 : 1; }
+  }
+  for (const v of vehicles) if (v !== back && v.pillion === msg.from) v.pillion = null;
   const car = msg.veh ? vehicles[msg.veh[5] ?? 0] : null;
   if (car) {
     if (drive.car === car) {
@@ -4915,6 +5414,26 @@ net.on("st", msg => {
   // Out of the one they were driving (or switched)
   for (const v of vehicles) if (v !== car && v.driver === msg.from) v.releaseRemote();
 });
+// Teammates and bots on motorbikes: on the seat, swinging on and off like you do
+const _remoteAt = new THREE.Vector3();
+remotePlayers.seatAt = (p, delta) => {
+  const a = p.bikeRide ??= { car: null, pose: null, w: 0, target: 0, from: new THREE.Vector3() };
+  let car = null, pose = null;
+  for (const v of vehicles) {
+    if (!v.spec.bike) continue;
+    if (v.driver === p.id) { car = v; pose = "drive"; break; }
+    if (v.pillion === p.id) { car = v; pose = v.pillionFacing > 0 ? "front" : "back"; break; }
+  }
+  if (car) {
+    if (a.car !== car || a.w <= 0) { a.w = 0; a.from.copy(p.root.position); }
+    a.car = car;
+    a.pose = pose;
+    a.target = 1;
+  } else if (a.car) a.target = 0;
+  const r = a.car ? placeRider(a, p.root, delta, _remoteAt.copy(p.root.position)) : null;
+  if (p.soldier) p.soldier.ride = r;
+  return !!r;
+};
 net.on("vfuel", msg => {
   const car = vehicles[msg.i ?? 0];
   if (!car) return;
@@ -4930,6 +5449,7 @@ function vehiclesState() {
 
 /** Parks every vehicle back where it started (a new battle royale round). */
 function resetVehicles() {
+  exitVehicle();
   for (const v of vehicles) v.reset();
 }
 
@@ -4941,7 +5461,7 @@ function resetVehicles() {
 let jumpGrace = 0;
 function keepOnCaveFloor(delta) {
   jumpGrace = Math.max(0, jumpGrace - delta);
-  if (!caves || drive.on || jumpGrace > 0 || brAirborne()) return;
+  if (!caves || drive.on || ride.on || jumpGrace > 0 || brAirborne()) return;
   const p = characterBody.position;
   const feet = p.y - FEET_OFFSET;
   const up = feet - groundHeight(p.x, p.z);
@@ -4959,12 +5479,12 @@ function keepInBounds() {
     p.z *= PLAY_RADIUS / r;
   }
   // You can swim out from the beach, but not out to sea: past SEA_SWIM_DEPTH you're turned back
-  if (!drive.on && seaDepth(p.x, p.z) > SEA_SWIM_DEPTH && r > 1) {
+  if (!drive.on && !ride.on && seaDepth(p.x, p.z) > SEA_SWIM_DEPTH && r > 1) {
     let k = 1;
     while (k > 0.6 && seaDepth(p.x * k, p.z * k) > SEA_SWIM_DEPTH) k -= 0.004;
     p.x *= k; p.z *= k;
   }
-  if (drive.on || (isBR() && (br.ghost || br.flight === PHASE_PLANE))) return;
+  if (drive.on || ride.on || (isBR() && (br.ghost || br.flight === PHASE_PLANE))) return;
   const g = groundHeight(p.x, p.z);
   if (p.y < g + FEET_OFFSET - 0.6) {
     p.y = g + FEET_OFFSET;
@@ -5010,6 +5530,9 @@ const br = {
   spectating: null,
   outside: false,
   outsideBy: 0,
+  won: false,            // the post-match screen is our win (golden grade)
+  shrinking: false,      // last frame's zone state, for the shockwave when it starts closing
+  fxWatch: null,         // whom the spectator feed showed last frame (glitch on switch)
   zoneTick: 1,
   respawnTimer: 0,
   atkId: null, atkW: "", atkHs: false, atkAt: -99, // who hurt you last (kill credit)
@@ -5171,6 +5694,7 @@ function brWarmSpawn() {
 /** Full health, fresh pockets (empty for the drop, a warm-up kit otherwise), at (x, y, z). */
 function brResetPlayer(x, y, z, empty) {
   cancelClimb();
+  resetStamina();
   exitVehicle();
   playerHealth = MAX_HEALTH;
   healthTrail = MAX_HEALTH;
@@ -5199,6 +5723,7 @@ function brEnterWarmup() {
   br.alive.clear();
   br.route = null; br.circles = null;
   br.spectating = null; br.respawnTimer = 0; br.outside = false;
+  br.won = false; br.shrinking = false;
   br.flight = PHASE_GROUND;
   myChute.visible = false;
   zoneWall.hide();
@@ -5281,6 +5806,8 @@ function brSpawnLoot(seed) {
   for (const sp of indiaBuildings?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   for (const sp of city?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   for (const sp of plots?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
+  for (const sp of waterTowers?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
+  for (const sp of cseBuilding?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
     pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`, it.y ?? null);
   });
@@ -5380,12 +5907,17 @@ function brOpenChute() {
 }
 
 function brLand() {
+  // Touchdown: a dust ring off the bottom of the screen, harder from a freefall
+  postFx.shockwave(0.5, 0.0, br.flight === PHASE_FALL ? 0.9 : 0.35, 0xd8c8a0, 0.9, 0.6);
   br.flight = PHASE_GROUND;
   br.vy = 0;
   myChute.visible = false;
   moveVelocity.x *= 0.3;
   moveVelocity.z *= 0.3;
   characterBody.velocity.y = 0;
+  // The landing from height: knees bend into a crouch and you come back up (you stand still meanwhile)
+  soldier.landFromHeight();
+  landLock = LAND_FROM_HEIGHT * 0.65;
   if (br.state === "match" && !inventory.current) inventoryUI.feed("Landed. Find a weapon!", "info");
 }
 
@@ -5508,12 +6040,14 @@ function brHandleElim({ v, k, w, hs }) {
     onLocalKill(!!hs);
     showHitMarker(!!hs, true);
     sfx.kill();
+    postFx.shockwave(0.5, 0.5, hs ? 0.8 : 0.55, hs ? 0xffd27a : 0xffffff, 1.3, 0.6);
   }
   if (br.state !== "match" || !br.alive.has(v)) return;
   br.alive.delete(v);
   if (v === net.id) {
     br.inMatch = false;
     postFx.kick(0.4, 0xff2a1a);
+    postFx.glitch(1); // signal lost, then the spectator feed
     const place = br.placement || br.alive.size + 1;
     progress.brFinished(place, br.started);
     brHud.showResult({
@@ -5547,6 +6081,7 @@ function brShowEnd(w) {
   br.outside = false;
   zoneWall.hide();
   dropPlane.visible = false;
+  br.won = w === net.id;
   if (w === net.id) progress.brFinished(1, br.started);
   const lines = [["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`], ["XP", `+${progress.runXp}`]];
   if (w === net.id) {
@@ -5586,6 +6121,9 @@ function brUpdate(delta) {
     br.t += delta;
     zoneAt(br.circles, br.t, br.zone);
     zoneWall.set(br.zone.x, br.zone.z, br.zone.r, br.t);
+    // The zone starts closing: a cold ring sweeps the screen
+    if (br.zone.shrinking && !br.shrinking && br.t > 1) { postFx.shockwave(0.5, 0.5, 0.7, 0x4da3ff, 0.9, 1.2); postFx.kick(0.15, 0x4da3ff); }
+    br.shrinking = br.zone.shrinking;
     brUpdatePlane(delta);
     brZoneDamage(delta);
     // Out of the fight: follow somebody who's still in it
@@ -5929,6 +6467,9 @@ function animate() {
   updateTouch();
   if (drive.on) {
     updateDriving(delta);
+  } else if (ride.on) {
+    // Riding pillion: the bike carries you (vehicleAfterStep)
+    jumpQueued = false;
   } else if (brFlying()) {
     brUpdateFlight(delta);
   } else if (climb.active) {
@@ -5946,6 +6487,9 @@ function animate() {
   checkGrounded();
   if (climb.active) climbAfterStep();
   else snapCharacterToGround();
+  updateFallDamage();
+  updateStamina(delta);
+  unstick(delta);
   if (isBR()) brAfterStep(delta);
   vehicleAfterStep();
   keepInBounds();
@@ -5958,9 +6502,11 @@ function animate() {
   const smoothY = Math.abs(feetY - prevFeetY) < 0.04 ? (feetY + prevFeetY) / 2 : feetY;
   prevFeetY = feetY;
   characterRoot.position.set(characterBody.position.x, smoothY, characterBody.position.z);
+  updateLocalRide(delta);
 
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
   collegeGate?.update(delta);
+  cseBuilding?.update(camera.position.x, camera.position.z);
   houses?.cull(camera);
   if (isBR()) {
     brUpdate(delta);
@@ -6351,9 +6897,12 @@ async function boot() {
     };
     // Flyers keep their altitude over the cave hills, not over the cave floors under them
     zombieManager.flyFloor = (x, z) => surfaceHeight(x, z);
-    // House floors and stairs are walkable surfaces too (monsters follow you upstairs)
-    zombieManager.surfaceAt = (x, z, y, ground) => houses.surfaceAt(x, z, y, ground);
-    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z)
+    // House floors and stairs are walkable surfaces too (monsters follow you upstairs), and the CSE building's ground floor
+    zombieManager.surfaceAt = (x, z, y, ground) => {
+      const h = houses.surfaceAt(x, z, y, ground);
+      return cseBuilding ? cseBuilding.surfaceAt(x, z, h) : h;
+    };
+    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z) && !cseBuilding?.blocks(x, z)
       && waterDepthAt(x, z) < 0.3 && Math.hypot(x, z) < shoreRadius(x, z) - 6 && !city?.blocks(x, z, 2);
     zombieManager.onDoorBang = (x, z) => {
       sfx.doorBang({ x, y: groundHeight(x, z) + 1.2, z });
@@ -6375,13 +6924,15 @@ async function boot() {
     plantTrees().catch(err => console.warn(err));
     // The animation clips nobody needs in the first seconds (deaths, swimming, climbing, throws…)
     loadExtraAnimations(gltfLoader).catch(err => console.warn(err));
+    // The detailed helmets and backpacks: compiled off-screen, then every soldier wears them
+    loadDetailedGear().catch(err => console.warn(err));
 
     setupGui();
 
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, keys, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, ride, pillionKey, keys, climb, queueJump() { jumpQueued = true; }, get touch() { return touch; }, get stamina() { return { stamina, cap: staminaCap(), exhausted }; }, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     if (BENCH_ENABLED) startBenchmark();

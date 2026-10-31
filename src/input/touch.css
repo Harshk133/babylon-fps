@@ -503,3 +503,79 @@ body.touch .prompt-row {
 body.touch .prompt-row::before { content: none; }
 .prompt-icon { width: 20px; height: 20px; flex-shrink: 0; fill: #ffa630; }
 body.touch .prompt-icon { width: 26px; height: 26px; }
+
+/* RUN: a sprint toggle you can tap instead of pushing the joystick past its ring */
+.tc-run { left: calc(var(--l) + 24px); top: 26%; width: calc(52 * var(--s)); height: calc(52 * var(--s)); flex-direction: column; }
+.tc-run svg { width: 40%; height: 40%; }
+.tc-run .tc-label { font-size: calc(11 * var(--s)); margin-top: 1px; font-weight: 700; }
+.tc-run.on { background: radial-gradient(circle at 50% 35%, rgba(226, 164, 43, 0.75), rgba(120, 70, 0, 0.5) 70%); }
+#touch-ui.driving .tc-run { display: none; }
+
+/* ── Layout editor: drag the buttons where you want them ─────────────────── */
+.tc-edit-open {
+  width: 100%;
+  margin: 4px 0 10px;
+  padding: 12px;
+  border: 1px solid rgba(226, 164, 43, 0.6);
+  border-radius: 10px;
+  background: rgba(226, 164, 43, 0.14);
+  color: #ffe2a0;
+  font: 600 15px/1 "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0.04em;
+}
+#touch-ui.editing { z-index: 2050; background: rgba(4, 8, 12, 0.55); pointer-events: auto; }
+#touch-ui.editing .tc-surface,
+#touch-ui.editing .tc-joy,
+#touch-ui.editing .tc-paused,
+#touch-ui.editing .tc-inv,
+#touch-ui.editing .tc-spec,
+#touch-ui.editing .tc-settings { display: none !important; }
+#touch-ui.editing .tc-play { display: block; }
+#touch-ui.editing .tc-play .tc-btn:not(.tc-start) {
+  display: flex !important;
+  opacity: 1;
+  outline: 2px dashed rgba(255, 255, 255, 0.55);
+  outline-offset: 4px;
+  cursor: grab;
+  transition: none;
+}
+#touch-ui.editing .tc-play .tc-btn.tc-picked {
+  outline: 2px solid #e2a42b;
+  box-shadow: 0 0 0 6px rgba(226, 164, 43, 0.25), 0 0 24px rgba(226, 164, 43, 0.6);
+}
+.tc-edit-bar { display: none; }
+#touch-ui.editing .tc-edit-bar {
+  position: absolute;
+  left: 50%;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 14px;
+  width: min(620px, 92vw);
+  padding: 10px 14px;
+  border: 1px solid rgba(226, 164, 43, 0.5);
+  border-radius: 12px;
+  background: rgba(12, 10, 8, 0.92);
+  color: #f2e8d8;
+  font: 13px/1.3 "Segoe UI", system-ui, sans-serif;
+  pointer-events: auto;
+}
+.tc-edit-title { display: flex; flex-direction: column; gap: 2px; }
+.tc-edit-title b { font-size: 14px; letter-spacing: 0.12em; color: #ffe2a0; }
+.tc-edit-title span { color: rgba(242, 232, 216, 0.7); }
+.tc-edit-size { display: flex; flex-direction: column; gap: 2px; min-width: 150px; }
+.tc-edit-size input { width: 100%; }
+.tc-edit-row { display: flex; gap: 6px; }
+.tc-edit-row button {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: #e2a42b;
+  color: #1a0f08;
+  font: 700 13px/1 "Segoe UI", system-ui, sans-serif;
+}
+.tc-edit-row button.ghost { background: rgba(255, 255, 255, 0.1); color: #f2e8d8; }
+.tc-edit-row button:disabled { opacity: 0.35; }
