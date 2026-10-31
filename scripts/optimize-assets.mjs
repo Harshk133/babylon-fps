@@ -38,6 +38,10 @@ const MODELS = [
   },
   // The college gate (animated leaves and booth door, its own collision mesh): compress only
   { src: "public/models/msbecl_gate_final.glb",   ratio: 1,    error: 0,     tex: 1024 },
+  // The CSE building: low-poly, instanced furniture (EXT_mesh_gpu_instancing) and its own
+  // collision proxy (COL_*): compress only. (cse_building_draco.glb is the same model with
+  // Draco geometry: the game decodes meshopt, so this one is built from the plain file)
+  { src: "public/models/cse_building.glb",        ratio: 1,    error: 0,     tex: 1024 },
   // Indian models (Sketchfab, CC BY: credits in src/world/IndiaAssets.js)
   { src: "public/models/india/autorickshaw.glb",  ratio: 1,    error: 0,     tex: 1024 },
   { src: "public/models/india/thar.glb",          ratio: 0.06, error: 0.01,  tex: 1024, prune: true }, // 223k triangles → ~15k
