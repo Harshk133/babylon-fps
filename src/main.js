@@ -18,6 +18,8 @@ import { FireFX } from "./combat/FireFX.js";
 import { SmokeFX } from "./combat/SmokeFX.js";
 import { Minimap } from "./ui/Minimap.js";
 import { WorldMap } from "./ui/WorldMap.js";
+import { Chat } from "./ui/Chat.js";
+import "./ui/chat.css";
 import { Waypoints } from "./ui/Waypoints.js";
 import { Houses, houseHalfSize } from "./world/Houses.js";
 import { EnemyFire } from "./combat/EnemyFire.js";
@@ -1140,7 +1142,7 @@ function setKey(code, pressed, repeat) {
     if (code === "Escape" && worldMap.open) { setMapOpen(false); return; }
     if (code === "Escape" && shopUI.open) { setShopOpen(false); return; }
     if (isBR() && !lobby.open) {
-      if (code === "Enter" && net.isHost && (br.state === "warm" || br.state === "count")) { brHostStart(); return; }
+      if (code === "Enter" && brHostCanStart()) { brHostStart(); return; }
       if (brWatching()) {
         if (code === "KeyA" || code === "ArrowLeft") brPickSpectate(-1);
         if (code === "KeyD" || code === "ArrowRight") brPickSpectate(1);
@@ -1175,6 +1177,11 @@ function setKey(code, pressed, repeat) {
 }
 window.addEventListener("keydown", e => {
   if (e.code === "Tab") e.preventDefault(); // keep focus from jumping around the page
+  // Enter / Y / "/" opens the room chat (the BR host's Enter still starts the match)
+  if (!e.repeat && CHAT_KEYS.has(e.code) && !(e.code === "Enter" && brHostCanStart()) && openChat()) {
+    e.preventDefault(); // or the key's character lands in the chat box
+    return;
+  }
   setKey(e.code, true, e.repeat);
 });
 window.addEventListener("keyup", e => setKey(e.code, false, false));
@@ -1275,6 +1282,7 @@ const touch = IS_TOUCH ? new TouchControls({
   },
   pause: () => releaseLock(),
   unlock: () => sfx.unlock(),
+  chat: () => openChat(),
 }) : null;
 
 // Android back button: close the settings / inventory / map, otherwise pause
@@ -4232,6 +4240,8 @@ function updateSquadPlayerCount() {
 
 function onConnected(welcome) {
   localTarget.id = net.id;
+  chat.setEnabled(true);
+  chat.system(`Room "${net.room}" · ${IS_TOUCH ? "tap the chat button" : "press Enter"} to chat`);
   for (const p of welcome.players) if (p.id !== net.id) remotePlayers.add(p);
   if (net.isClient) {
     // The host owns the monsters; ours become puppets of its snapshots
@@ -4262,6 +4272,7 @@ function becomeHost() {
 net.on("joined", msg => {
   remotePlayers.add(msg.p);
   inventoryUI.feed(`${msg.p.name} joined the fight`, "weapon");
+  chat.system(`${msg.p.name} joined`);
   updateSquadPlayerCount();
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
@@ -4285,11 +4296,13 @@ net.on("left", msg => {
   if (worldMap.pins.has(msg.id)) setPin(msg.id, null);
   for (const v of vehicles) if (v.driver === msg.id) v.releaseRemote();
   inventoryUI.feed(`${name} left`, "info");
+  chat.system(`${name} left`);
   updateSquadPlayerCount();
   if (isBR()) brOnPlayerLeft(msg.id);
 });
 net.on("host", msg => { if (msg.id === net.id) becomeHost(); });
 net.on("disconnect", () => {
+  chat.setEnabled(false);
   if (isBR()) {
     brHud.showResult({ title: "DISCONNECTED", sub: "Lost the connection to the server", foot: "Reload the page to play again", color: "#ff4b3a" });
     return;
@@ -4302,6 +4315,40 @@ net.on("disconnect", () => {
 });
 
 net.on("st", msg => remotePlayers.applyState(msg.from, msg));
+
+// ─── Room chat ────────────────────────────────────────────────────────────────
+// Everyone in the room (co-op squad or battle royale lobby) sees it. Names and
+// colours come from the relay's player list, keyed by the relay-stamped `from`.
+const CHAT_KEYS = new Set(["Enter", "NumpadEnter", "KeyY", "Slash"]);
+const chat = new Chat({
+  send(text) {
+    net.send({ t: "chat", m: text });
+    const me = net.players.get(net.id);
+    chat.add(me?.name ?? myName, me?.color, text, true);
+  },
+  onOpen() {
+    // Typing mustn't leave you running or firing
+    for (const k in keys) keys[k] = false;
+    input.fire = false;
+    input.aim = false;
+    cancelThrow();
+    touch?.reset();
+  },
+});
+
+/** Opens the chat box if it can be used right now. */
+function openChat() {
+  if (!chat.enabled || chat.isOpen || lobby?.open || inventoryOpen || worldMap.open || shopUI.open) return false;
+  chat.open();
+  return true;
+}
+
+net.on("chat", msg => {
+  if (typeof msg.m !== "string" || !msg.m) return;
+  const p = net.players.get(msg.from);
+  chat.add(p?.name ?? "?", p?.color, msg.m.slice(0, Chat.MAX_LEN));
+  sfx.click();
+});
 net.on("pin", msg => {
   if (gameMode !== "coop") return;
   const fresh = !worldMap.pins.has(msg.from);
@@ -5092,11 +5139,18 @@ function brNoteAttacker(id, w, hs) {
 /** The sky is always a clear midday now, so there's no host clock or weather to follow. */
 function applyWorldClock() {}
 
+/** The BR host's Enter drops everyone now (during the warm-up / countdown). */
+function brHostCanStart() {
+  return isBR() && net.isHost && !lobby.open && (br.state === "warm" || br.state === "count");
+}
+
 function enterBattleRoyale(welcome) {
   gameMode = "br";
   document.body.classList.add("mode-br");
   localTarget.id = net.id;
   remotePlayers.pvp = true;
+  chat.setEnabled(true);
+  chat.system(`Room "${welcome.room.slice(3)}" · press ${IS_TOUCH ? "the chat button" : "Y"} to chat`);
   for (const p of welcome.players) if (p.id !== net.id) remotePlayers.add(p);
   zombieManager.clearAll();
   enemyFire.clear();

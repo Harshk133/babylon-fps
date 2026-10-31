@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 const COLORS = ["#4dd2ff", "#ffb347", "#7dff6a", "#ff6ad5", "#ffe14d", "#b48cff", "#ff6a6a", "#6affd8"];
 const MAX_PER_ROOM = 8;      // co-op rooms
 const MAX_PER_BR_ROOM = 100; // battle royale rooms ("br-<code>")
+const CHAT_MAX = 120;        // characters per chat message (src/ui/Chat.js cuts at the same length)
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "").split(",").map(s => s.trim().replace(/\/$/, "")).filter(Boolean);
 
 const rooms = new Map(); // room name → { players: Map<id, client>, hostId }
@@ -96,6 +97,16 @@ export function attachRelay(httpServer, path = "/ws") {
         return;
       }
       if (msg.t === "ping") { send(ws, { t: "pong", ts: msg.ts }); return; }
+      if (msg.t === "chat") {
+        // Room chat: plain text, length-capped, to everyone, at most a few lines a second
+        const now = Date.now();
+        if (now - (client.lastChat ?? 0) < 400) return;
+        const m = String(msg.m ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, CHAT_MAX);
+        if (!m) return;
+        client.lastChat = now;
+        broadcast(client.room, { t: "chat", m, from: client.id }, client.id);
+        return;
+      }
       // Forward: to one player, to the host, or to everyone else in the room
       msg.from = client.id;
       const room = client.room;

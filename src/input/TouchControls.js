@@ -132,6 +132,9 @@ export class TouchControls {
     this.mapBtn = btn("tc-map tc-small", "map");
     this.gyroBtn = btn("tc-gyro tc-small", "gyro");
     this.pauseBtn = btn("tc-pause tc-small", "pause");
+    // Room chat (shown only in multiplayer, see ui/chat.css): a plain speech bubble, the icon set has none
+    this.chatBtn = btn("tc-chat tc-small", null);
+    this.chatBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/></svg>';
     this.startBtn = btn("tc-start tc-wide", null, "START MATCH");
 
     // While paused: settings
@@ -394,6 +397,7 @@ export class TouchControls {
       this._saveSettings();
     });
     this.pauseBtn.addEventListener("click", () => cb.pause());
+    this.chatBtn.addEventListener("click", e => { e.stopPropagation(); cb.chat?.(); });
     this.gearBtn.addEventListener("click", e => { e.stopPropagation(); this.showSettings(true); });
   }
 
