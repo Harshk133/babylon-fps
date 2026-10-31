@@ -72,6 +72,8 @@ export class RemotePlayers {
     this._pvp = false;
     /** (player, x, feetY, z, vol 0..1) → plays a footfall there (set by main.js). */
     this.onStep = null;
+    /** (p, delta) → true if it seated them on a motorbike this frame (main.js: placeRider). */
+    this.seatAt = null;
     /** (from, to) → true if a smoke cloud hides the line between them (set by main.js). */
     this.concealed = null;
     this._targets = [];
@@ -299,6 +301,8 @@ export class RemotePlayers {
 
       p.root.position.set(b.x, b.y - feetOffset, b.z);
       p.root.rotation.y += angleDiff(p.bodyYaw, p.root.rotation.y) * k;
+      // On a motorbike: main.js puts them on its seat (and poses the ride) instead
+      p.riding = !!this.seatAt?.(p, delta);
       const inPlane = p.phase === PHASE_PLANE;
       this._footsteps(p, delta, b.y - feetOffset);
       p.root.visible = !inPlane;
@@ -323,8 +327,8 @@ export class RemotePlayers {
           const yaw = p.root.rotation.y;
           const sy = Math.sin(yaw), cy = Math.cos(yaw);
           p.soldier.update(p.animAcc, {
-            localForward: p.vx * sy + p.vz * cy,
-            localRight: -p.vx * cy + p.vz * sy,
+            localForward: p.riding ? 0 : p.vx * sy + p.vz * cy,
+            localRight: p.riding ? 0 : -p.vx * cy + p.vz * sy,
             aiming: !p.dead && (p.aim || p.fire || p.stance === "prone"),
             firing: p.fire,
             aimYawOffset: angleDiff(p.aimYaw, yaw),

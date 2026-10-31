@@ -2,7 +2,7 @@ import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { groundHeight } from "../world/Terrain.js";
 import { GROUP_VEHICLE } from "../physicsGroups.js";
-import { mergeStaticMeshes } from "../world/MergeStatic.js";
+import { mergeStaticMeshes, toFloatGeometry } from "../world/MergeStatic.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
 // Drivable vehicles: the auto-rickshaw, the Mahindra Thar and a tractor. Arcade handling
@@ -86,7 +86,129 @@ export const VEHICLES = {
     grip: 0.72, slide: 0.2, steerRate: 4, dust: 2.4,
     spin: [[0.86, -0.85, 0.78, 0.46, false], [-0.86, -0.85, 0.78, 0.46, false], [0.74, 1.2, 0.44, 0.28, true], [-0.74, 1.2, 0.44, 0.28, true]],
   },
+  // Motorbikes (public/models/bikes/, Poly Pizza, CC BY 3.0: credited in src/legal/credits.js). Two wheels:
+  // they lean into turns instead of sliding, rest on a kickstand when parked, and carry a
+  // pillion rider behind the driver (facing forward, or turned round to watch the road behind).
+  // bike: wheels [z, y, r] split off the model and spun (front first); grips / pegs: where the
+  // driver's hands and feet go; pillion: its hips (seat), pegs and the grab rail behind it;
+  // lean: most it leans over in a turn; stand: the kickstand's lean when parked.
+  sportbike: {
+    label: "sport bike",       // (the model is a Suzuki SV650: shown under a generic name)
+    length: 2.09, width: 0.75,
+    maxSpeed: 31,         // m/s (~110 km/h)
+    reverseSpeed: 2, accel: 9, brake: 15, coast: 1.2,
+    maxSteer: 0.5, wheelBase: 1.42,
+    fuelMax: 100, fuelStart: 50, burn: 0.7, idleBurn: 0.03, canFuel: 60,
+    enterRange: 2.2, headlight: 110,
+    seat: [0, 0.92, -0.14],
+    lamps: [[0, 0.86, 0.86]],
+    tails: [[0, 0.88, -0.93]],
+    wheels: { front: 0.74, rear: -0.68, track: 0.1 },
+    hits: { z: [-0.6, 0, 0.6], r: 0.38 },
+    box: [0.3, 0.55, 1.0, 0.55],
+    modelYaw: 0,
+    runOver: 3, tone: 1.45,
+    grip: 1.05, slide: 0.06, steerRate: 6, dust: 0.6,
+    bike: {
+      wheels: [[0.738, 0.303, 0.3], [-0.683, 0.303, 0.3]],
+      grips: [[0.31, 0.98, 0.33], [-0.31, 0.98, 0.33]],
+      pegs: [[0.17, 0.34, -0.06], [-0.17, 0.34, -0.06]],
+      hunch: 0.3,
+      pillion: { seat: [0, 1.02, -0.58], pegs: [[0.19, 0.42, -0.42], [-0.19, 0.42, -0.42]], grabs: [[0.17, 0.92, -0.86], [-0.17, 0.92, -0.86]] },
+      lean: 0.72, stand: 0.15, standAt: [0.12, -0.12],
+    },
+  },
+  motorbike: {
+    label: "army motorbike",
+    length: 2.2, width: 0.85,
+    maxSpeed: 22,         // m/s (~80 km/h): old and heavy, but at home on dirt
+    reverseSpeed: 2, accel: 6.5, brake: 11, coast: 1.0,
+    maxSteer: 0.55, wheelBase: 1.49,
+    fuelMax: 100, fuelStart: 65, burn: 0.6, idleBurn: 0.03, canFuel: 60,
+    enterRange: 2.3, headlight: 100,
+    seat: [0, 0.76, -0.05],
+    lamps: [[0, 0.93, 1.0]],
+    tails: [[0, 0.72, -1.02]],
+    wheels: { front: 0.83, rear: -0.66, track: 0.1 },
+    hits: { z: [-0.65, 0, 0.65], r: 0.4 },
+    box: [0.32, 0.5, 1.05, 0.5],
+    modelYaw: 0,
+    runOver: 3, tone: 0.9,
+    grip: 0.95, slide: 0.08, steerRate: 5.5, dust: 0.9,
+    bike: {
+      wheels: [[0.831, 0.27, 0.28], [-0.663, 0.27, 0.28]],
+      grips: [[0.38, 0.93, 0.26], [-0.38, 0.93, 0.26]],
+      pegs: [[0.2, 0.42, 0.22], [-0.2, 0.42, 0.22]],
+      hunch: 0.12,
+      pillion: { seat: [0, 0.86, -0.64], pegs: [[0.21, 0.44, -0.42], [-0.21, 0.44, -0.42]], grabs: [[0.2, 0.78, -0.95], [-0.2, 0.78, -0.95]] },
+      lean: 0.62, stand: 0.15, standAt: [0.14, 0.05],
+    },
+  },
 };
+
+/**
+ * Lifts a bike's wheels out of its model so they can turn: every connected piece of a mesh
+ * that lies inside a wheel's disc ([z, y, r] in the vehicle's frame) goes to that wheel.
+ * Returns [{ group, r }] (front first), each group centred on its axle; the rest of the model
+ * keeps the other triangles.
+ */
+function extractWheels(holder, wheels) {
+  holder.updateMatrixWorld(true);
+  const out = wheels.map(([z, y, r]) => {
+    const group = new THREE.Group();
+    group.position.set(0, y, z);
+    return { group, r, z, y, parts: new Map() };
+  });
+  const meshes = [];
+  holder.traverse(o => { if (o.isMesh && !o.isSkinnedMesh) meshes.push(o); });
+  const p = new THREE.Vector3();
+  for (const mesh of meshes) {
+    const g = mesh.geometry, pos = g.attributes.position, n = pos.count;
+    const index = g.index ? Array.from(g.index.array) : [...Array(n).keys()];
+    const world = [];
+    for (let i = 0; i < n; i++) world.push(p.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld).clone());
+    // Connected pieces: shared vertices and shared corners
+    const parent = new Int32Array(n).map((_, i) => i);
+    const find = i => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
+    const at = new Map();
+    world.forEach((v, i) => {
+      const k = `${v.x.toFixed(4)},${v.y.toFixed(4)},${v.z.toFixed(4)}`;
+      if (at.has(k)) parent[find(i)] = find(at.get(k)); else at.set(k, i);
+    });
+    for (let t = 0; t < index.length; t += 3) { parent[find(index[t])] = find(index[t + 1]); parent[find(index[t])] = find(index[t + 2]); }
+    // Which wheel (if any) each piece sits inside
+    const owner = new Map();
+    for (let i = 0; i < n; i++) {
+      const root = find(i);
+      if (owner.get(root) === -1) continue;
+      const v = world[i];
+      const w = out.findIndex(wh => Math.hypot(v.z - wh.z, v.y - wh.y) <= wh.r * 1.15 && Math.abs(v.x) < 0.25);
+      const cur = owner.get(root);
+      owner.set(root, cur === undefined ? w : cur === w ? w : -1);
+    }
+    const keep = [], taken = out.map(() => []);
+    for (let t = 0; t < index.length; t += 3) {
+      const w = owner.get(find(index[t]));
+      (w >= 0 ? taken[w] : keep).push(index[t], index[t + 1], index[t + 2]);
+    }
+    if (!taken.some(l => l.length)) continue;
+    taken.forEach((list, w) => {
+      if (!list.length) return;
+      const geo = toFloatGeometry(g);
+      geo.setIndex(list);
+      // Into the wheel's frame (centred on its axle)
+      geo.applyMatrix4(mesh.matrixWorld).translate(0, -out[w].y, -out[w].z);
+      const part = new THREE.Mesh(geo, mesh.material);
+      part.castShadow = true;
+      part.receiveShadow = true;
+      out[w].group.add(part);
+    });
+    // (on a copy: the model's clones share their geometry)
+    if (keep.length) { mesh.geometry = g.clone(); mesh.geometry.setIndex(keep); }
+    else mesh.removeFromParent();
+  }
+  return out;
+}
 
 const _v = new THREE.Vector3();
 const _q = new THREE.Quaternion();
@@ -195,9 +317,28 @@ export class Vehicle {
     // Centred on x/z, wheels on the ground
     holder.scale.setScalar(s);
     holder.position.set(-c.x * s, -box.min.y * s, -c.z * s);
+    // A bike's wheels come out of the model to turn on their own
+    const B = S.bike;
+    this.bikeWheels = B ? extractWheels(holder, B.wheels) : [];
     mergeStaticMeshes(holder); // one draw call per material, not per part
-    this.root.add(holder);
+    // (in a frame that dips on the brakes and squats on the throttle: the suspension)
+    this.chassis = new THREE.Group();
+    this.chassis.add(holder);
+    this.root.add(this.chassis);
     this.height = size.y * s;
+    for (const w of this.bikeWheels) {
+      mergeStaticMeshes(w.group);
+      this.root.add(w.group);
+    }
+    if (B) {
+      // The kickstand: down on the left while parked, folded up while ridden
+      this.kickstand = new THREE.Group();
+      this.kickstand.position.set(B.standAt[0], 0.3, B.standAt[1]);
+      const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.018, 0.32, 6).translate(0, -0.16, 0), new THREE.MeshStandardMaterial({ color: 0x222326, roughness: 0.6, metalness: 0.5 }));
+      rod.castShadow = true;
+      this.kickstand.add(rod);
+      this.chassis.add(this.kickstand);
+    }
 
     // Wheels the vehicle turns itself (steer group > spinning tyre)
     this.spinners = [];
@@ -243,7 +384,10 @@ export class Vehicle {
     };
 
     this.seat = new THREE.Vector3(...S.seat);
+    this.pillionSeat = B ? new THREE.Vector3(...B.pillion.seat) : null;
     this.driver = null;        // null, "local", or a remote player id
+    this.pillion = null;       // a bike's second rider: null, "local", or a remote player id
+    this.pillionFacing = 1;    // 1: facing forward, −1: turned round, facing back
     this.lightLevel = 0;
     this.throttle = 0;
     this.reset();
@@ -261,8 +405,15 @@ export class Vehicle {
     this._dust = 0;
     this.fuel = this.spec.fuelStart;
     this.driver = null;
+    this.pillion = null;
     this.throttle = 0;
     this.remote = null;
+    // A bike: how far it leans over (+ = left), and the suspension's dip (+ = nose down)
+    this.lean = this.spec.bike ? this.spec.bike.stand : 0;
+    this.leanV = 0;
+    this.dive = 0;
+    this.diveV = 0;
+    this._lastSpeed = 0;
     this._pose(0);
     this._settle = 0.5; // the next update places the collider
   }
@@ -280,8 +431,8 @@ export class Vehicle {
     const hR = groundHeight(this.x + fx * back - lx * track, this.z + fz * back - lz * track);
     const rear = (hL + hR) / 2;
     const pitch = Math.atan2(hF - rear, front - back);
-    // Leans out of a slide (a little body roll you can feel)
-    const roll = Math.atan2(hL - hR, track * 2) - this.slip * 0.035;
+    // Leans out of a slide (a little body roll you can feel); a bike leans into the turn
+    const roll = this.spec.bike ? -this.lean : Math.atan2(hL - hR, track * 2) - this.slip * 0.035;
     const y = rear + (hF - rear) * (-back / (front - back));
     if (delta > 0) {
       // A little suspension: ease into the new pose
@@ -292,6 +443,7 @@ export class Vehicle {
     } else {
       this.y = y; this.pitch = pitch; this.roll = roll;
     }
+    if (this.spec.bike) this.roll = roll;   // (its own spring already eased it)
     this.root.position.set(this.x, this.y, this.z);
     this.root.rotation.set(-this.pitch, this.yaw, this.roll);
   }
@@ -330,6 +482,11 @@ export class Vehicle {
     this.steer += (steerTarget - this.steer) * (1 - Math.exp(-(R.steerRate ?? 7) * delta));
     const grip = (R.grip ?? 0.9) * (input.grip ?? 1) * (input.handbrake ? 0.5 : 1);
     let yawRate = (v * Math.tan(this.steer)) / R.wheelBase;
+    // A bike turns only as hard as it can lean: v·ω ≤ g·tan(lean)
+    if (R.bike) {
+      const cap = 9.8 * Math.tan(R.bike.lean) / Math.max(1.5, Math.abs(v));
+      yawRate = THREE.MathUtils.clamp(yawRate, -cap, cap);
+    }
     // Sliding: the turn wants v·ω of sideways acceleration, the tyres give grip·g
     const want = v * yawRate, have = grip * 9.8;
     if (Math.abs(want) > have) {
@@ -387,6 +544,7 @@ export class Vehicle {
     this.remote = null;
     this.speed = 0;
     this.yawRate = 0;
+    this._settle = 0.5;   // (a bike settles onto its kickstand)
   }
 
   /**
@@ -409,8 +567,9 @@ export class Vehicle {
       this.speed = delta > 0 ? Math.hypot(this.x - prevX, this.z - prevZ) / delta * Math.sign(r.speed || 1) : 0;
       this.throttle = Math.min(1, Math.abs(r.speed) / this.spec.maxSpeed + 0.2);
     }
+    if (this.spec.bike) this._bikeDynamics(delta);
     // A parked vehicle nobody touches doesn't need re-posing every frame
-    const moving = this.driver !== null || this._settle > 0;
+    const moving = this.driver !== null || this._settle > 0 || (this.spec.bike && Math.abs(this.leanV) + Math.abs(this.diveV) > 0.01);
     if (moving) {
       this._pose(delta);
       this._settle = this.driver !== null ? 0.5 : this._settle - delta;
@@ -431,6 +590,7 @@ export class Vehicle {
       w.tyre.rotation.x += (this.speed / w.r) * delta;
       if (w.front) w.steer.rotation.y = this.steer;
     }
+    for (const w of this.bikeWheels) w.group.rotation.x += (this.speed / w.r) * delta;
 
     const on = this.driver !== null && this.fuel > 0;
     const want = on && darkness > 0.4 ? 1 : 0;
@@ -441,6 +601,53 @@ export class Vehicle {
     this.lampMat.emissiveIntensity = 0.3 * (on ? 1 : 0) + 3 * this.lightLevel;
     this.tailMat.emissiveIntensity = 1.5 * this.lightLevel;
   }
+
+  /**
+   * A bike's lean and suspension, from how it's moving (driven here or smoothed from the
+   * driver's packets): it leans into a turn as far as the turn needs (tan lean = v·ω / g),
+   * stands up when slow, rests on its kickstand when nobody's on it; the nose dips on the
+   * brakes and lifts on the throttle. The kickstand swings down when parked.
+   */
+  _bikeDynamics(delta) {
+    const B = this.spec.bike;
+    if (delta <= 0) return;
+    const ridden = this.driver !== null;
+    const v = this.speed;
+    let want;
+    if (ridden) {
+      want = THREE.MathUtils.clamp(Math.atan2(v * this.yawRate, 9.8), -B.lean, B.lean);
+      // Stopped with a foot down: tipped a little toward it
+      want += B.stand * 0.35 * (1 - Math.min(1, Math.abs(v) / 2));
+    } else {
+      want = Math.abs(v) < 0.5 ? B.stand : 0;
+    }
+    // Leaning is a spring: quick into a turn, a little settle after
+    const k = ridden ? 9 : 5;
+    this.leanV += ((want - this.lean) * k * k - 2 * k * 0.8 * this.leanV) * delta;
+    this.lean += this.leanV * delta;
+    const accel = (v - this._lastSpeed) / delta;
+    this._lastSpeed = v;
+    const diveWant = THREE.MathUtils.clamp(-accel * 0.008, -0.05, 0.07);
+    this.diveV += ((diveWant - this.dive) * 140 - 2 * 12 * 0.6 * this.diveV) * delta;
+    this.dive += this.diveV * delta;
+    this.chassis.rotation.x = this.dive;
+    if (this.kickstand) {
+      const down = !ridden && Math.abs(v) < 0.5 ? 1 : 0;
+      this.kickstand.userData.k = (this.kickstand.userData.k ?? 1) + (down - (this.kickstand.userData.k ?? 1)) * (1 - Math.exp(-10 * delta));
+      const kk = this.kickstand.userData.k;
+      // Down: out to the left and a little forward (onto the ground); up: tucked back along the frame
+      this.kickstand.rotation.set(THREE.MathUtils.lerp(1.45, 0.25, kk), 0, THREE.MathUtils.lerp(0, 0.55, kk));
+    }
+  }
+
+  /** A point given in the vehicle's own frame ([x, y, z] or a Vector3) in the world. */
+  pointWorld(local, out) {
+    this.root.updateMatrixWorld();
+    return Array.isArray(local) ? out.set(local[0], local[1], local[2]).applyMatrix4(this.root.matrixWorld) : out.copy(local).applyMatrix4(this.root.matrixWorld);
+  }
+
+  /** World position of the pillion rider's hips. */
+  pillionWorld(out) { return this.pointWorld(this.pillionSeat, out); }
 
   /** Points a (shared) spotlight out of this vehicle's lamps, at its current brightness. */
   aimHeadlight(light) {

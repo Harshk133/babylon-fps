@@ -42,6 +42,9 @@ const MODELS = [
   // collision proxy (COL_*): compress only. (cse_building_draco.glb is the same model with
   // Draco geometry: the game decodes meshopt, so this one is built from the plain file)
   { src: "public/models/cse_building.glb",        ratio: 1,    error: 0,     tex: 1024 },
+  // Motorbikes (Poly Pizza, CC BY 3.0: credits in src/vehicles/Vehicle.js): low-poly, untextured
+  { src: "public/models/bikes/sv650.glb",              ratio: 1, error: 0, tex: 256 },
+  { src: "public/models/bikes/military_motorbike.glb", ratio: 1, error: 0, tex: 256 },
   // Indian models (Sketchfab, CC BY: credits in src/world/IndiaAssets.js)
   { src: "public/models/india/autorickshaw.glb",  ratio: 1,    error: 0,     tex: 1024 },
   { src: "public/models/india/thar.glb",          ratio: 0.06, error: 0.01,  tex: 1024, prune: true }, // 223k triangles → ~15k
@@ -52,7 +55,7 @@ const MODELS = [
   { src: "public/models/india/rupees_2000.glb",   ratio: 1,    error: 0,     tex: 512 },
   // Made for the game (public/models/indian things/, originals stay local): already low-poly with
   // their own LODs. The water tower keeps its near mesh and collision mesh, and the
-  // "लातूर शहर महानगरपालिका" board at full width (it's read from the ground, 15 m up);
+  // board on the tank at full width (it's seen from the ground, 15 m up);
   // the chaiwala keeps the middle LOD (a 2 m figure: 3.7k triangles is plenty)
   {
     src: "public/models/indian things/WaterTower/WaterTower.glb", out: "public/models/india/water_tower.opt.glb", ratio: 1, error: 0, tex: 512,

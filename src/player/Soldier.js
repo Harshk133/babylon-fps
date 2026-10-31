@@ -212,6 +212,14 @@ export class Soldier {
 
     this.dead = false;
     this.seated = false;
+    /**
+     * On a motorbike (set by whoever seats it, every frame): { pose: "drive" | "front" | "back",
+     * w: 0 off … 1 on (mount / dismount), swing: 0..1 the right leg over the seat,
+     * lean: the bike's lean (+ = its left), axis: the bike's forward (world), hunch: lean
+     * over the tank, lh / rh / lf / rf: where the hands and feet go (world, or null) }.
+     * Drawn by _ride() over whatever clip plays.
+     */
+    this.ride = null;
     this.stance = "stand";
     this.aimWeight = 0;
     this.shootWeight = 0;
@@ -271,7 +279,7 @@ export class Soldier {
       lArm: bone("LeftArm"), rArm: bone("RightArm"), lFore: bone("LeftForeArm"), rFore: bone("RightForeArm"),
       lHand: bone("LeftHand"), rHand: bone("RightHand"), rPalm: bone("RightHandMiddle1"),
       lUpLeg: bone("LeftUpLeg"), rUpLeg: bone("RightUpLeg"), lLeg: bone("LeftLeg"), rLeg: bone("RightLeg"),
-      lFoot: bone("LeftFoot"),
+      lFoot: bone("LeftFoot"), rFoot: bone("RightFoot"),
     };
     // Every bone's rest transform, to go back to it (skeleton.pose() would rebuild the bones
     // from bind-time world matrices, which don't include this model's scale)
@@ -1001,7 +1009,7 @@ export class Soldier {
 
     // Stances
     // (swimming clips come with the extra set: until then, the standing ones)
-    const want = s.swim && this.F.tread ? "swim" : this.seated ? "stand" : this.stance;
+    const want = s.swim && this.F.tread ? "swim" : this.seated || this.ride ? "stand" : this.stance;
     for (const k in this.sw) {
       spring2(this.sw, this.swv, k, k === want ? 1 : 0, STANCE_RATE, dt);
     }
@@ -1158,7 +1166,7 @@ export class Soldier {
       const [a, b] = g.name === "climb" ? [SEG.climbFrom, SEG.climbTo] : [SEG.vaultFrom, SEG.vaultTo];
       return { act: this.F.climb, w: Math.min(1, g.t / 0.12, (g.dur - g.t) / 0.2), time: THREE.MathUtils.lerp(a, b, k) * this.F.climb.dur, lowerOnly: false };
     }
-    if (this.sw.prone > 0.5 || this.sw.swim > 0.5 || this.seated) { this.air.on = false; this.air.land = null; return none; }
+    if (this.sw.prone > 0.5 || this.sw.swim > 0.5 || this.seated || this.ride) { this.air.on = false; this.air.land = null; return none; }
     const air = this.air, inAir = (s.air ?? 0) > 0.5;
     const pick = name => (armed ? this.FL[name] : this.F[name]) ?? this.F[name];
     if (inAir) {
@@ -1469,11 +1477,13 @@ export class Soldier {
       turnBone(b.spine1, _up, -this.hipYaw * 0.45);
     }
 
-    // Driving: thighs forward, shins down
-    if (this.seated) {
+    // Driving: thighs forward, shins down (on a bike: _ride, below)
+    if (this.seated && !this.ride) {
       for (const leg of [b.lUpLeg, b.rUpLeg]) turnBone(leg, side, -1.45);
       for (const leg of [b.lLeg, b.rLeg]) turnBone(leg, side, 1.5);
     }
+    const riding = this.ride && this.ride.w > 0.01;
+    if (riding) this._ride(dt, side, fwd);
 
     // Badly hurt: hunched, a limp
     const wound = this.woundW * this.sw.stand;
@@ -1545,8 +1555,99 @@ export class Soldier {
         turnBone(b.spine, fwd, 0.08 * w * hard);
       }
     }
+    // On a bike the hands go last, onto whatever they hold (after the aim and the gun's own IK)
+    if (riding) this._rideHands(side, fwd, armed);
   }
 }
+
+const _rp = new THREE.Vector3(), _rt = new THREE.Vector3(), _rl = new THREE.Vector3();
+const _qr = new THREE.Quaternion(), _qr2 = new THREE.Quaternion();
+
+Soldier.prototype._ride = function (dt, side, fwd) {
+  const b = this.b, r = this.ride, w = Math.min(1, r.w);
+  // The ride's own springs: the lean and the hunch follow the bike a beat behind (the body's inertia)
+  const st = this._rideS ??= { lean: 0, lv: 0, hunch: 0, hv: 0 };
+  spring(st, "lean", "lv", r.lean ?? 0, 10, dt);
+  spring(st, "hunch", "hv", r.hunch ?? 0, 6, dt);
+  // The head and neck from the clip are no use here (the empty-handed idle tips the head back
+  // to drink): back toward their rest, looking ahead
+  const rest = this._rideRest ??= new Map(this._rest.filter(([bone]) => bone === b.neck || bone === b.head).map(([bone, , q]) => [bone, q]));
+  for (const [bone, q] of rest) { bone.quaternion.slerp(q, 0.85 * w); bone.updateMatrixWorld(true); }
+  // With the bike: the whole body tips round the hips (they're on the seat), a touch past it into the turn
+  if (r.axis) turnBone(b.hips, r.axis, -st.lean * 1.08 * w);
+  // Over the tank (the driver) or sitting up (a pillion); the head comes back up to watch the road
+  const h = st.hunch * w;
+  turnBone(b.spine, side, h * 0.4);
+  turnBone(b.spine1, side, h * 0.35);
+  turnBone(b.spine2, side, h * 0.25);
+  turnBone(b.neck, side, -h * 0.55);
+  // Legs: feet onto the pegs, knees forward and out round the tank. Mounting, the right leg
+  // swings up and back over the seat (swing peaks halfway on)
+  const swing = r.swing ?? 0;
+  for (const [up, low, foot, T, s] of [[b.lUpLeg, b.lLeg, b.lFoot, r.lf, 1], [b.rUpLeg, b.rLeg, b.rFoot, r.rf, -1]]) {
+    if (!T) continue;
+    _rt.copy(T);
+    if (s < 0 && swing > 0.01) _rt.addScaledVector(_up, 0.55 * swing).addScaledVector(fwd, -0.35 * swing).addScaledVector(side, -0.15 * swing);
+    _rp.copy(fwd).addScaledVector(side, s * 0.5).addScaledVector(_up, 0.15);
+    armIK(up, low, foot, _rt, w, _rp, 1);
+    // Feet flat on the pegs (toes forward, not pointing down the way the clip left them)
+    if (foot) turnBone(foot, side, -0.25 * w);
+  }
+};
+
+/** The hands on a bike: the driver's on the grips; a pillion holds on (the driver's waist, the rack) unless a gun's out. */
+Soldier.prototype._rideHands = function (side, fwd, armed) {
+  const b = this.b, r = this.ride, w = Math.min(1, r.w);
+  side.copy(_xAxis).applyQuaternion(this.root.getWorldQuaternion(_q2));
+  fwd.set(0, 0, 1).applyQuaternion(_q2);
+  if (r.pose === "drive" || !armed) {
+    // Out of reach from sitting up: turn the chest (forward, and over to the side in a lean)
+    // toward the hold that's furthest out, until both arms get there
+    if (r.lh && r.rh && b.lArm && b.rArm && b.lFore && b.lHand && b.spine1) {
+      const arm = b.lArm.getWorldPosition(_rp).distanceTo(b.lFore.getWorldPosition(_rt)) + _rt.distanceTo(b.lHand.getWorldPosition(_rl));
+      let bent = 0;
+      for (let i = 0; i < 4; i++) {
+        const gl = b.lArm.getWorldPosition(_rp).distanceTo(r.lh), gr = b.rArm.getWorldPosition(_rt).distanceTo(r.rh);
+        const far = gl > gr, gap = Math.max(gl, gr) - arm * 0.94;
+        if (gap < 0.01) break;
+        const pivot = b.spine1.getWorldPosition(_rl);
+        const sh = (far ? b.lArm : b.rArm).getWorldPosition(_rp).sub(pivot);
+        const to = _rt.copy(far ? r.lh : r.rh).sub(pivot);
+        const len = sh.length();
+        // Swing the shoulder toward its hold, by about as far as it's short (in radians at that lever)
+        _qr.setFromUnitVectors(sh.normalize(), to.normalize());
+        const k = Math.min(1, (gap / len) / Math.max(1e-3, sh.angleTo(to))) * w;
+        _qr2.identity().slerp(_qr, k * 0.55);
+        rotateBoneInWorld(b.spine1, _qr2);
+        _qr2.identity().slerp(_qr, k * 0.45);
+        if (b.spine2) rotateBoneInWorld(b.spine2, _qr2);
+        bent += 2 * Math.acos(Math.min(1, Math.abs(_qr.w))) * k;
+      }
+    }
+    for (const [arm, fore, hand, T, s] of [[b.lArm, b.lFore, b.lHand, r.lh, 1], [b.rArm, b.rFore, b.rHand, r.rh, -1]]) {
+      // No hold given: hands rest on the thighs, just behind the knees
+      let target = T;
+      if (!target) {
+        const up = s > 0 ? b.lUpLeg : b.rUpLeg, low = s > 0 ? b.lLeg : b.rLeg;
+        if (!up || !low) continue;
+        target = _rl.lerpVectors(up.getWorldPosition(_rt), low.getWorldPosition(_rl), 0.7).addScaledVector(_up, 0.1);
+      }
+      // Elbows out and down
+      _rp.set(0, -0.6, 0).addScaledVector(side, s * 0.8).addScaledVector(fwd, -0.3);
+      armIK(arm, fore, hand, target, w, _rp, 0.8);
+    }
+  }
+  // Eyes on the road whatever the chest is doing: the head's up (head → crown) back to the
+  // sky, tipped a little forward, half from the neck and half from the head
+  if (b.head && b.headTop && b.neck) {
+    for (const bone of [b.neck, b.head]) {
+      const cur = b.headTop.getWorldPosition(_rt).sub(b.head.getWorldPosition(_rp)).normalize();
+      const want = _rl.copy(_up).addScaledVector(fwd, 0.12).normalize();
+      _qr.setFromUnitVectors(cur, want);
+      rotateBoneInWorld(bone, _qr2.identity().slerp(_qr, 0.6 * w));
+    }
+  }
+};
 
 // Action keys that belong to the upper body (kept when a jump only takes the legs)
 const UPPER_KEYS = { rifle: 1, aim: 1, fire: 1, o_reload: 1, o_throw: 1, o_drink: 1 };

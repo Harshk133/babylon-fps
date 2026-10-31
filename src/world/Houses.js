@@ -58,8 +58,8 @@ const YARD_WALL_H = 1.8;
 const YARD_WALL_T = 0.24;
 const YARD_GATE = 4.2;                  // gate gap width
 const YARD_PIER = 3.6;                  // a pier every this many metres
-const CLIMB_REACH = 0.95;               // m from a yard wall's centreline that counts as "at the wall"
-const VAULT_REACH = 1.1;                // kit units from a window pane
+const CLIMB_REACH = 1.15;               // m from a yard wall's centreline that counts as "at the wall"
+const VAULT_REACH = 1.3;                // kit units from a window pane
 
 // ── House kinds ───────────────────────────────────────────────────────────────
 // Walls: [piece, x, z, rotY]. Walls spanning X are rotated 90°; the doorway is
@@ -745,7 +745,7 @@ export class Houses {
         if (Math.abs(perp) > CLIMB_REACH || Math.abs(along) > half - 0.3) continue;
         if (alongX && at > 0 && along > g0 && along < g1) continue; // the gate: just walk through
         const over = perp > 0 ? -1 : 1;                             // toward the wall and past it
-        if ((alongX ? flz : flx) * over < 0.55) continue;
+        if ((alongX ? flz : flx) * over < 0.35) continue;
         const nlx = alongX ? 0 : over, nlz = alongX ? over : 0;
         this._yardWorld(c, alongX ? along : at, alongX ? at : along, out);
         out.nx = nlx * c.cos + nlz * c.sin;
@@ -776,7 +776,7 @@ export class Houses {
         const along = dx * sx + dz * sz, perp = dx * sz - dz * sx;
         if (Math.abs(along) > g.hz + 0.1 || Math.abs(perp) > VAULT_REACH) continue;
         const over = perp > 0 ? -1 : 1;
-        if ((flx * sz - flz * sx) * over < 0.5) continue;
+        if ((flx * sz - flz * sx) * over < 0.35) continue;
         const sill = h.base + (g.y - g.hy) * S;
         if (sill - feetY < 0.25 || sill - feetY > 1.45) continue;
         this._toWorld(h, g.x, g.z, out);
