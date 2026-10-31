@@ -17,16 +17,41 @@ import { GROUP_WORLD, GROUP_PLAYER, GROUP_GLASS } from "../physicsGroups.js";
 // settles while it tracks you, strafing, crouching, reloads), throws grenades
 // and molotovs at people hiding, heals when it's safe, opens doors, and takes
 // a free vehicle when the zone is far. Skill varies per bot.
+//
+// They're meant to pass for people: a few of them (BOT_MIN..BOT_MAX) drift in
+// one by one during the warm-up (with a "joined" line like anyone else), now
+// and then one leaves between matches and someone new turns up, they wear the
+// relay's player colours, have a play style (rusher, camper or in between),
+// turn and speed up smoothly, glance about, hop, stop to loot, fool around in
+// the warm-up, turn toward gunfire, flick onto targets with a human reaction
+// (a little past, then settling, with a tremor), and say the odd thing in chat.
 
-export const BOT_COUNT = 7;
+export const BOT_COUNT = 7;       // typical number (BOT_MIN..BOT_MAX per room)
+const BOT_MIN = 5, BOT_MAX = 8;
 const BOT_PREFIX = "bot:";
 
+// Gamer tags of the sort people type (some get digits on the end)
 const NAMES = [
-  "Raju_OP", "SniperSingh", "Chintu.exe", "BhaiJaan99", "DesiGhost", "PinkyPro", "Golu_Gamer", "Bunty420",
-  "LallanTop", "KaaliBillee", "Sher_Khan", "Tinku_YT", "MadMonk", "ChaiSutta", "Babu_Rao", "Pappu_Pro",
-  "VeerZara", "Gabbar07", "Mogambo", "ThakurSaab", "Rocky_Bhai", "Dhoni_7", "Kalia", "NinjaNikhil",
+  "Raju_OP", "SniperSingh", "BhaiJaan", "DesiGhost", "PinkyPro", "Golu_Gamer", "Bunty", "LallanTop",
+  "Sher_Khan", "Tinku_YT", "MadMonk", "ChaiSutta", "Pappu_Pro", "Gabbar", "Rocky_Bhai", "NinjaNikhil",
+  "aarav.k", "rohit_sharma45", "xX_Vikram_Xx", "ishaan", "kabir.exe", "Meher", "ananya_s", "TheRealDev",
+  "sahil_plays", "Priyanshu", "noobmaster", "Yash_7", "arjun", "deadshot_dk", "Riya", "kunal_op",
+  "ShadowWolf", "pubg_legend", "Manav", "Tanmay", "silent_killer", "sneha", "Harsh_YT", "VikkyBoss",
+  "zxcAditya", "neel", "Om_Gaming", "lazyPanda", "Bablu", "guddu_bhaiya", "techno_raj", "Zoya",
 ];
-const COLORS = ["#ff7b54", "#5ad1ff", "#ffd23f", "#9cff6b", "#ff6bd6", "#b28cff", "#6bffd8", "#ffa94d"];
+// The relay's player colours, so bots don't stand out in the kill feed or the chat
+const COLORS = ["#4dd2ff", "#ffb347", "#7dff6a", "#ff6ad5", "#ffe14d", "#b48cff", "#ff6a6a", "#6affd8"];
+const STYLES = ["rusher", "rusher", "camper", "normal", "normal", "normal"];
+
+// What they say (rarely): lower case, short, the way people type mid-game
+const SAY = {
+  greet: ["hi", "hello guys", "yo", "kaise ho sab", "anyone from pune?", "hii", "bhai log ready?", "where we dropping", "sup", "gm all", "first time here lol", "lets gooo"],
+  start: ["gl", "gl hf", "drop city?", "dont land near me pls", "lets go", "all the best"],
+  kill: ["gg", "ez", "sorry bro", "nice try", "gg wp", "lol", "close one", "😂"],
+  death: ["lag", "bruh", "wtf", "how", "gg", "camper", "nice shot", "my ping 😭", "ok that was good", "bro what"],
+  bye: ["gtg", "bye guys", "brb", "gn"],
+};
+const pick = list => list[(Math.random() * list.length) | 0];
 
 // Weapons a bot prefers, worst to best (index = preference)
 const GUN_RANK = { pistol: 1, shotgun: 2, smg: 3, rifle: 4, sniper: 3.5 };
@@ -73,6 +98,10 @@ export class Bots {
     this.g = g;
     this.list = [];
     this.byId = new Map();
+    this.pending = [];     // bots about to "join" (host): { id, name, color, at }
+    this.chatQ = [];       // lines to say: { at, id, text }
+    this._chatAt = 0;
+    this._nextId = 1;
     this._netT = 0;
     this._nav = { x: 0, z: 0, fx: 0, fz: 0 };
     this._targets = [];
@@ -80,19 +109,118 @@ export class Bots {
   }
 
   get count() { return this.list.length; }
+  /** This machine runs the bots (or is about to: some haven't "joined" yet). */
+  get hosting() { return this.list.length > 0 || this.pending.length > 0; }
 
   // ── Roster ──────────────────────────────────────────────────────────────
-  /** Host: seven bots with fresh names join the room (as remote players). */
+  /** Host: a handful of bots will drift into the room over the next few seconds. */
   spawnAll() {
     this.clear();
-    const names = [...NAMES].sort(() => Math.random() - 0.5);
-    for (let i = 0; i < BOT_COUNT; i++) this._add(`${BOT_PREFIX}${i + 1}`, names[i], COLORS[i % COLORS.length]);
+    const n = BOT_MIN + ((Math.random() * (BOT_MAX - BOT_MIN + 1)) | 0);
+    const now = this.g.now();
+    for (let i = 0; i < n; i++) this._schedule(now + 0.8 + Math.random() * (i < 2 ? 4 : 14));
+  }
+
+  /** A new bot (fresh name, a colour nobody wears yet) joins at `at`. */
+  _schedule(at) {
+    const taken = new Set(), worn = new Set();
+    for (const p of this.g.remotePlayers.players.values()) { taken.add(p.name.toLowerCase()); worn.add(p.color); }
+    for (const p of this.g.net.players.values()) { taken.add(p.name.toLowerCase()); worn.add(p.color); }
+    for (const q of this.pending) { taken.add(q.name.toLowerCase()); worn.add(q.color); }
+    let name = null;
+    for (let k = 0; k < 30 && !name; k++) {
+      let n = pick(NAMES);
+      if (Math.random() < 0.35) n += Math.random() < 0.5 ? ((Math.random() * 99) | 0) : ((Math.random() * 9000 + 1000) | 0);
+      if (!taken.has(n.toLowerCase())) name = n;
+    }
+    name ??= `player${(Math.random() * 9000 + 1000) | 0}`;
+    const color = COLORS.find(c => !worn.has(c)) ?? pick(COLORS);
+    this.pending.push({ id: `${BOT_PREFIX}${this._nextId++}`, name, color, at });
+  }
+
+  /** Every bot that was about to join does it now (the match is starting). */
+  flushPending() {
+    for (const q of this.pending.splice(0)) this._join(q);
+  }
+
+  _join(q) {
+    const b = this._add(q.id, q.name, q.color);
+    b.joinedAt = this.g.now();
+    // Into the warm-up like a player: the practice kit, somewhere round the spawn
+    this._resetKit(b, true);
+    const a = Math.random() * Math.PI * 2, r = 8 + Math.random() * 16;
+    this._placeOnGround(b, Math.cos(a) * r, Math.sin(a) * r);
+    b.mode = "warm";
+    this.g.announce(b.id, "joined");
+    if (b.chatty && Math.random() < 0.55) this._say(b, "greet", 2 + Math.random() * 7);
+  }
+
+  /** A bot leaves the room (between matches), like a player closing the game. */
+  _remove(b) {
+    if (b.car) this._leaveCar(b);
+    this.g.announce(b.id, "left");
+    this.g.remotePlayers.remove(b.id);
+    this.list.splice(this.list.indexOf(b), 1);
+    this.byId.delete(b.id);
+  }
+
+  /** Queues something for bot `b` to say in the chat in `delay` seconds (spaced out, at most a couple a match). */
+  _say(b, kind, delay) {
+    if ((b.said ?? 0) >= 2) return;
+    b.said = (b.said ?? 0) + 1;
+    this.chatQ.push({ at: this.g.now() + delay, id: b.id, text: pick(SAY[kind]) });
+  }
+
+  /** Host: someone was eliminated. Bots might have something to say about it. */
+  onElim(v, k) {
+    const killer = isBotId(k) ? this.byId.get(k) : null;
+    const victim = isBotId(v) ? this.byId.get(v) : null;
+    if (killer && !victim && k !== v && killer.chatty && Math.random() < 0.3) this._say(killer, "kill", 1 + Math.random() * 2.5);
+    if (victim && k && !isBotId(k) && victim.chatty && Math.random() < 0.35) this._say(victim, "death", 1.5 + Math.random() * 3);
+  }
+
+  /**
+   * Host: a gunshot at (x, z). Bots that hear it react by their style: rushers
+   * head over, campers get down and face it, the rest stop and look.
+   */
+  hearShot(by, x, z) {
+    const br = this.g.br;
+    if (br.state !== "match") return;
+    const now = this.g.now();
+    for (const b of this.list) {
+      if (b.id === by || b.dead || b.phase !== PHASE_GROUND || b.car || b.enemy) continue;
+      const d = Math.hypot(x - b.x, z - b.z);
+      if (d > 110 || d < 3 || Math.random() < 0.15) continue;
+      const a = Math.atan2(x - b.x, z - b.z);
+      b.faceTo = a; b.faceT = 1.2 + Math.random();
+      if (b.style === "rusher" && b.weapon && d > 12) {
+        const k = Math.max(0, d - 15) / d;
+        b.goal = { x: b.x + (x - b.x) * k, z: b.z + (z - b.z) * k };
+        b.investigateUntil = now + 10;
+        b.mode = "hunt";
+      } else if (b.style === "camper") {
+        b.stance = 1;
+        b.pauseT = Math.max(b.pauseT, 2 + Math.random() * 3);
+      } else {
+        b.pauseT = Math.max(b.pauseT, 0.6 + Math.random());
+      }
+    }
   }
 
   _add(id, name, color, from = null) {
     const p = this.g.remotePlayers.add({ id, name, color });
     const b = {
       id, name, color, p,
+      style: pick(STYLES),
+      sprinter: Math.random() < 0.6,       // runs everywhere, or jogs now and then
+      jumpy: Math.random(),                // how often it hops
+      chatty: Math.random() < 0.5,
+      seed: Math.random() * 100,
+      joinedAt: -99, said: 0,
+      jy: 0, jv: 0,                        // hop height / speed
+      pauseT: 0, faceTo: 0, faceT: 0,      // standing still a moment / turning to look at something
+      lookOff: 0, lookWant: 0, lookT: 0, pitchOff: 0, // where it glances while it walks
+      react: 0.4, over: 0, investigateUntil: 0, warmFight: false,
       skill: 0.35 + Math.random() * 0.55,
       x: from?.x ?? 0, y: from?.y ?? 0, z: from?.z ?? 0, vx: 0, vz: 0,
       yaw: 0, aimYaw: 0, aimPitch: 0, stance: 0, phase: PHASE_GROUND, vy: 0,
@@ -118,6 +246,8 @@ export class Bots {
     }
     this.list.length = 0;
     this.byId.clear();
+    this.pending.length = 0;
+    this.chatQ.length = 0;
   }
 
   /** No longer the host (someone took over): stop running the bots, they stay as remote players. */
@@ -125,6 +255,8 @@ export class Bots {
     for (const b of this.list) if (b.car) b.car.driver = null;
     this.list.length = 0;
     this.byId.clear();
+    this.pending.length = 0;
+    this.chatQ.length = 0;
   }
 
   /** New host after the old one left: take over the bots it was running (with what they're carrying unknown). */
@@ -133,6 +265,7 @@ export class Bots {
     for (const [id, p] of this.g.remotePlayers.players) {
       if (!isBotId(id)) continue;
       const b = this._add(id, p.name, p.color, { x: p.body.position.x, y: p.body.position.y - this.g.feetOffset, z: p.body.position.z });
+      this._nextId = Math.max(this._nextId, Number(id.slice(BOT_PREFIX.length)) + 1 || this._nextId);
       b.hp = p.hp; b.dead = p.dead; b.phase = p.phase;
       b.weapon = p.weapon && WEAPONS[p.weapon] ? p.weapon : null;
       if (b.weapon) b.guns[b.weapon] = { mag: WEAPONS[b.weapon].magSize, reserve: BR_GUN_RESERVE[b.weapon] ?? 30 };
@@ -144,11 +277,23 @@ export class Bots {
   // ── Match flow (host) ───────────────────────────────────────────────────
   /** Warm-up: everyone back on their feet near the spawn, armed for practice, not shooting. */
   onWarmup() {
+    const now = this.g.now();
+    // Between matches people come and go: now and then one leaves, someone new turns up later
+    for (const b of [...this.list]) {
+      if (this.list.length > BOT_MIN - 1 && Math.random() < 0.18) {
+        if (b.chatty && Math.random() < 0.5) this.g.say(b.id, pick(SAY.bye));
+        this._remove(b);
+        if (Math.random() < 0.75) this._schedule(now + 3 + Math.random() * 16);
+      }
+    }
+    if (this.list.length + this.pending.length < BOT_MIN) this._schedule(now + 2 + Math.random() * 10);
     for (const b of this.list) {
       this._resetKit(b, true);
       const a = Math.random() * Math.PI * 2, r = 8 + Math.random() * 16;
       this._placeOnGround(b, Math.cos(a) * r, Math.sin(a) * r);
       b.mode = "warm";
+      b.said = 0;
+      b.style = Math.random() < 0.2 ? pick(STYLES) : b.style;
     }
   }
 
@@ -157,6 +302,8 @@ export class Bots {
     const route = this.g.br.route;
     const spots = this.g.dropSpots();
     for (const b of this.list) {
+      b.said = 0;
+      if (b.chatty && Math.random() < 0.18) this._say(b, "start", 0.5 + Math.random() * 4);
       this._resetKit(b, false);
       b.phase = PHASE_PLANE;
       b.mode = "plane";
@@ -204,7 +351,24 @@ export class Bots {
   // ── Per frame (host) ────────────────────────────────────────────────────
   update(delta) {
     const br = this.g.br;
-    if (!this.list.length || delta <= 0) return;
+    if (delta <= 0) return;
+    const now = this.g.now();
+    // Late arrivals: in when their moment comes (all of them before the drop)
+    if (this.pending.length) {
+      const flush = (br.state !== "warm" && br.state !== "count") || (br.state === "count" && br.countdown < 2.5);
+      for (let i = this.pending.length - 1; i >= 0; i--) {
+        if (flush || this.pending[i].at <= now) this._join(this.pending.splice(i, 1)[0]);
+      }
+    }
+    // The chat, one line at a time
+    if (this.chatQ.length && now >= this._chatAt) {
+      const i = this.chatQ.findIndex(c => c.at <= now);
+      if (i >= 0) {
+        const c = this.chatQ.splice(i, 1)[0];
+        if (this.byId.has(c.id)) { this.g.say(c.id, c.text); this._chatAt = now + 0.8; }
+      }
+    }
+    if (!this.list.length) return;
     this._gatherTargets();
     for (const b of this.list) {
       if (br.state === "match" && br.alive.has(b.id) === false && !b.dead) { b.dead = true; b.mode = "dead"; }
@@ -315,39 +479,57 @@ export class Bots {
     // Combat: track and shoot
     let speed = 0, gx = null, gz = null;
     const e = b.enemy;
-    if (e && match) {
+    const fights = match || (b.warmFight && (br.state === "warm" || br.state === "count"));
+    if (e && fights) {
       const dx = e.x - b.x, dz = e.z - b.z, d = Math.hypot(dx, dz);
       const want = Math.atan2(dx, dz);
-      const turn = (3 + b.skill * 6) * delta;
-      b.aimYaw += THREE.MathUtils.clamp(angleDiff(want, b.aimYaw), -turn, turn);
       const dy = e.y - (b.y + 1.5);
-      b.aimPitch = Math.atan2(dy, Math.max(1, d));
-      b.yaw = b.aimYaw;
-      b.aiming = true;
       b.seenFor += delta;
+      // A human hand: it keeps its old aim for a beat, flicks (sometimes a little past), then settles
+      if (b.seenFor > b.react * 0.5) {
+        const rate = 4 + b.skill * 6;
+        b.aimYaw += angleDiff(want + b.over, b.aimYaw) * (1 - Math.exp(-rate * delta));
+        b.aimPitch += (Math.atan2(dy, Math.max(1, d)) - b.aimPitch) * (1 - Math.exp(-rate * 0.8 * delta));
+        b.over *= Math.exp(-4 * delta);
+      }
+      b.aimYaw += gauss() * 0.003 * (1.4 - b.skill) * Math.min(1, delta * 60); // tremor
+      // The body follows the aim (a bit behind), strafing sideways under it
+      b.yaw += THREE.MathUtils.clamp(angleDiff(b.aimYaw, b.yaw), -7 * delta, 7 * delta);
+      b.aiming = true;
       // Aim settles while it keeps you in view, jumps when you move fast
       b.aimErr = Math.max(0.012 + (1 - b.skill) * 0.03, b.aimErr - delta * (0.08 + b.skill * 0.12)) + (e.speed ?? 0) * 0.0015;
-      const reaction = 0.55 - b.skill * 0.35;
       const facing = Math.abs(angleDiff(want, b.aimYaw)) < 0.12;
-      if (b.weapon && b.reloadT <= 0 && b.healT <= 0 && b.seenFor > reaction && facing && b.fireCd <= 0) this._fire(b, e, d);
-      // Keep its distance band, strafe across your sights
-      const [near, far] = RANGE[b.weapon] ?? [8, 25];
+      if (b.weapon && b.reloadT <= 0 && b.healT <= 0 && b.seenFor > b.react + 0.12 && facing && b.fireCd <= 0) this._fire(b, e, d);
+      // Keep its distance band (rushers close in, campers hang back), strafe across your sights
+      let [near, far] = RANGE[b.weapon] ?? [8, 25];
+      if (b.style === "rusher") { near *= 0.5; far *= 0.6; } else if (b.style === "camper") { near *= 1.3; }
       const fwd = d > far ? 1 : d < near ? -1 : 0;
-      if (b.strafeT <= 0) { b.strafeT = 0.7 + Math.random() * 1.4; b.strafe = Math.random() < 0.5 ? -1 : 1; if (Math.random() < 0.25) b.stance = b.stance ? 0 : 1; }
+      if (b.strafeT <= 0) {
+        b.strafeT = 0.4 + Math.random() * (b.style === "camper" ? 2.5 : 1.6);
+        b.strafe = Math.random() < 0.15 ? 0 : Math.random() < 0.5 ? -1 : 1;
+        // Crouch-peeking (campers), or a jump mid-fight (rushers)
+        if (Math.random() < (b.style === "camper" ? 0.35 : 0.1)) b.stance = b.stance ? 0 : 1;
+        if (b.style === "rusher" && !b.stance && Math.random() < 0.3) this._hop(b);
+      }
       const sx = Math.cos(want), sz = -Math.sin(want);
       gx = b.x + (dx / (d || 1)) * fwd * 4 + sx * b.strafe * 3;
       gz = b.z + (dz / (d || 1)) * fwd * 4 + sz * b.strafe * 3;
       speed = b.stance ? CREEP : JOG;
     } else {
       b.aiming = false;
-      b.stance = 0;
       if (b.healT > 0) b.stance = 1;
+      else if (b.pauseT <= 0 && !(b.style === "camper" && b.mode === "hold")) b.stance = 0;
+      if (b.pauseT > 0) { b.pauseT -= delta; } // stopped: to loot, listen or look about
       else if (b.pick?.active) { gx = b.pick.x; gz = b.pick.z; speed = RUN; }
-      else if (b.goal) { gx = b.goal.x; gz = b.goal.z; speed = b.mode === "warm" ? JOG * 0.7 : RUN; }
+      else if (b.goal) {
+        gx = b.goal.x; gz = b.goal.z;
+        speed = b.mode === "warm" ? JOG * (0.7 + Math.sin(this.g.now() * 0.3 + b.seed) * 0.3) : b.sprinter ? RUN : JOG + (RUN - JOG) * (Math.sin(this.g.now() * 0.2 + b.seed) > 0 ? 1 : 0.3);
+      }
     }
     if (gx !== null && b.healT <= 0) this._walk(b, gx, gz, speed, delta);
-    else { b.vx = b.vz = 0; }
-    if (!e && (Math.abs(b.vx) + Math.abs(b.vz) > 0.3)) { b.yaw = Math.atan2(b.vx, b.vz); b.aimYaw += angleDiff(b.yaw, b.aimYaw) * (1 - Math.exp(-6 * delta)); b.aimPitch *= 0.9; }
+    else this._ease(b, 0, 0, delta);
+    if (!e || !fights) this._lookAbout(b, delta);
+    this._updateHop(b, delta);
 
     // Pick up what it walked onto
     if (b.pick?.active && Math.hypot(b.pick.x - b.x, b.pick.z - b.z) < PICK_RANGE) this._take(b, b.pick);
@@ -360,13 +542,15 @@ export class Bots {
     const g = this.g, br = g.br;
     const match = br.state === "match";
     const now = g.now();
-    // Enemies in sight
+    // Enemies in sight (in the warm-up only now and then, and close by: messing about like people do)
     let best = null, bestD = Infinity;
-    if (match && b.weapon) {
+    const warm = br.state === "warm" || br.state === "count";
+    if (warm && Math.random() < 0.02) b.warmFight = Math.random() < 0.6;
+    if ((match || (warm && b.warmFight)) && b.weapon) {
       for (const t of this._targets) {
         if (t.id === b.id) continue;
         const dx = t.x - b.x, dz = t.z - b.z, d = Math.hypot(dx, dz);
-        if (d > SIGHT || d > bestD) continue;
+        if (d > (match ? SIGHT : 30) || d > bestD) continue;
         // Behind it: only if close or it was just shot
         const cos = (dx * Math.sin(b.yaw) + dz * Math.cos(b.yaw)) / (d || 1);
         if (cos < FOV_COS && d > 6 && now - b.hitAt > 2) continue;
@@ -375,7 +559,15 @@ export class Bots {
       }
     }
     if (best) {
-      if (b.enemy?.id !== best.id) { b.seenFor = 0; b.aimErr = 0.12 + (1 - b.skill) * 0.15; }
+      if (b.enemy?.id !== best.id) {
+        b.seenFor = 0;
+        b.aimErr = 0.12 + (1 - b.skill) * 0.15;
+        // How long it takes to react, and how far past the target the first flick goes
+        b.react = 0.28 + (1 - b.skill) * 0.3 + Math.random() * 0.25;
+        const off = angleDiff(Math.atan2(best.x - b.x, best.z - b.z), b.aimYaw);
+        b.over = off * (Math.random() < 0.6 ? 0.04 + Math.random() * 0.12 : -0.05);
+        b.pauseT = 0;
+      }
       b.enemy = best;
       b.lastSeen = { x: best.x, y: best.y, z: best.z };
       b.lastSeenAt = now;
@@ -408,6 +600,10 @@ export class Bots {
       if (!b.goal || Math.hypot(b.goal.x - b.x, b.goal.z - b.z) < 2) {
         const a = Math.random() * Math.PI * 2, r = 6 + Math.random() * 24;
         b.goal = { x: Math.cos(a) * r, z: Math.sin(a) * r };
+        // Idling about between runs: stand, hop about, crouch-spam
+        if (Math.random() < 0.4) b.pauseT = 0.8 + Math.random() * 3;
+        if (Math.random() < 0.25 + b.jumpy * 0.3) this._hop(b);
+        if (Math.random() < 0.12) { b.stance = 1; b.pauseT = Math.max(b.pauseT, 1); }
       }
       return;
     }
@@ -438,6 +634,14 @@ export class Bots {
     }
     b.pick = null;
     if (zoneGoal) { b.goal = zoneGoal; b.mode = "zone"; return; }
+    // Off toward gunfire it heard (rushers)
+    if (b.investigateUntil > now && b.goal && Math.hypot(b.goal.x - b.x, b.goal.z - b.z) > 3) { b.mode = "hunt"; return; }
+    // Campers sit tight a while once they're kitted out, crouched, watching
+    if (b.style === "camper" && b.weapon && b.gear.vest && b.mode !== "hold" && Math.random() < 0.08) {
+      b.mode = "hold"; b.stance = 1; b.pauseT = 8 + Math.random() * 20; b.goal = null;
+      return;
+    }
+    if (b.mode === "hold" && b.pauseT > 0) return;
     // Roam: toward the next town / loot spots, a little way at a time
     if (!b.goal || Math.hypot(b.goal.x - b.x, b.goal.z - b.z) < 3 || b.mode !== "roam") {
       const spots = g.dropSpots();
@@ -518,6 +722,7 @@ export class Bots {
     g.gesture(b.id, null, 0.6);
     b.pick = null;
     b.think = 0;
+    b.pauseT = 0.25 + Math.random() * 0.6;
   }
 
   /** Walks toward (gx, gz): pathing round houses (doors too), a wall probe, unsticking. */
@@ -535,17 +740,27 @@ export class Bots {
     if (r === 2) g.openDoorAt(nav.fx ?? nav.x, nav.fz ?? nav.z, b.y);
     let dx = tx - b.x, dz = tz - b.z;
     const d = Math.hypot(dx, dz);
-    if (d < 0.2) { b.vx = b.vz = 0; return; }
+    if (d < 0.2) { this._ease(b, 0, 0, delta); b.x += b.vx * delta; b.z += b.vz * delta; return; }
     dx /= d; dz /= d;
-    // A wall right ahead: try turning off a little, then more
+    // People don't run on rails: a slow weave on long runs
+    if (d > 10 && !b.enemy) {
+      const w = Math.sin(this.g.now() * 0.8 + b.seed) * 0.16;
+      const c = Math.cos(w), s = Math.sin(w);
+      const ux = dx * c + dz * s, uz = -dx * s + dz * c;
+      dx = ux; dz = uz;
+    }
+    // A wall right ahead: try turning off a little, then more (or hop it, sometimes)
     let ok = false;
     for (const turn of [0, 0.5, -0.5, 1.1, -1.1, 1.8, -1.8]) {
       const c = Math.cos(turn), s = Math.sin(turn);
       const ux = dx * c + dz * s, uz = -dx * s + dz * c;
       if (!this._blocked(b, ux, uz)) { dx = ux; dz = uz; ok = true; break; }
+      if (turn === 0 && Math.random() < 0.02) this._hop(b);
     }
     const v = ok ? Math.min(speed, d / Math.max(delta, 1e-3)) : 0;
-    b.vx = dx * v; b.vz = dz * v;
+    this._ease(b, dx * v, dz * v, delta);
+    // Running and hopping now and then (more in the warm-up)
+    if (v > JOG && !b.enemy && Math.random() < delta * (0.02 + b.jumpy * (b.mode === "warm" ? 0.35 : 0.08))) this._hop(b);
     b.x += b.vx * delta; b.z += b.vz * delta;
     const ground = g.groundHeight(b.x, b.z);
     b.y = g.surfaceAt(b.x, b.z, b.y, ground);
@@ -561,6 +776,50 @@ export class Bots {
       } else b.stuckN = 0;
       b.stuckT = 0; b.lastX = b.x; b.lastZ = b.z;
     }
+  }
+
+  /** Speeds up / slows down toward (vx, vz) instead of changing pace in one frame. */
+  _ease(b, vx, vz, delta) {
+    const k = 1 - Math.exp(-(vx || vz ? 7 : 10) * delta);
+    b.vx += (vx - b.vx) * k;
+    b.vz += (vz - b.vz) * k;
+  }
+
+  /**
+   * Out of a fight: the body turns smoothly toward where it's going, the head and gun
+   * wander (glances left and right, up at windows), or turn to something it heard.
+   */
+  _lookAbout(b, delta) {
+    const moving = Math.abs(b.vx) + Math.abs(b.vz) > 0.4;
+    if (b.faceT > 0) {
+      b.faceT -= delta;
+      b.yaw += THREE.MathUtils.clamp(angleDiff(b.faceTo, b.yaw), -9 * delta, 9 * delta);
+    } else if (moving) {
+      b.yaw += THREE.MathUtils.clamp(angleDiff(Math.atan2(b.vx, b.vz), b.yaw), -7 * delta, 7 * delta);
+    }
+    b.lookT -= delta;
+    if (b.lookT <= 0) {
+      b.lookT = 0.8 + Math.random() * (moving ? 3 : 1.6);
+      b.lookWant = Math.random() < 0.45 ? 0 : (Math.random() - 0.5) * (moving ? 1.1 : 2.6);
+      b.pitchOff = (Math.random() - 0.4) * 0.35;
+    }
+    b.lookOff += (b.lookWant - b.lookOff) * (1 - Math.exp(-3 * delta));
+    b.aimYaw += angleDiff(b.yaw + b.lookOff, b.aimYaw) * (1 - Math.exp(-5 * delta));
+    b.aimPitch += (b.pitchOff - b.aimPitch) * (1 - Math.exp(-3 * delta));
+  }
+
+  /** A jump (just the arc: it doesn't change where it can go). */
+  _hop(b) {
+    if (b.jy > 0 || b.stance || b.healT > 0 || b.car) return;
+    b.jv = 5.2;
+    b.jy = 0.001;
+  }
+
+  _updateHop(b, delta) {
+    if (b.jy <= 0) return;
+    b.jy += b.jv * delta;
+    b.jv -= GRAVITY * delta;
+    if (b.jy <= 0) { b.jy = 0; b.jv = 0; }
   }
 
   /** Picks the direction with the longest free run and walks it (force: hop 1.5 m that way regardless). */
@@ -679,6 +938,7 @@ export class Bots {
     car.driver = b.id;
     car.remote = null;
     b.car = car;
+    b.jy = b.jv = 0;
     b.carT = 0;
     b.mode = "drive";
     b.enemy = null;
@@ -746,7 +1006,8 @@ export class Bots {
     if (sx !== null && by !== null) {
       b.lastSeen = { x: sx, y: b.y + 1, z: sz };
       b.lastSeenAt = b.hitAt;
-      if (!b.enemy) b.yaw = b.aimYaw = Math.atan2(sx - b.x, sz - b.z);
+      // Spins round toward it (fast, but not in one frame); seeing them behind it is allowed for 2 s
+      if (!b.enemy) { b.faceTo = Math.atan2(sx - b.x, sz - b.z); b.faceT = 0.8; b.pauseT = 0; }
       b.think = Math.min(b.think, 0.1);
     }
     if (b.car && b.hp > 0) this._leaveCar(b);
@@ -759,6 +1020,7 @@ export class Bots {
     b.hp = 0;
     b.dead = true;
     b.mode = "dead";
+    b.jy = b.jv = 0;
     b.enemy = null;
     b.vx = b.vz = 0;
     b.respawnT = 3;
@@ -806,7 +1068,9 @@ export class Bots {
     const g = this.g;
     const s = (b.state ??= {});
     s.i = b.id; s.n = b.name; s.c = b.color;
-    s.x = r2(b.x); s.y = r2(b.y + g.feetOffset); s.z = r2(b.z);
+    s.x = r2(b.x); s.y = r2(b.y + (b.jy || 0) + g.feetOffset); s.z = r2(b.z);
+    s.air = b.jy > 0.05 ? 1 : undefined;
+    s.jn = g.now() - b.joinedAt < 3 ? 1 : undefined; // just arrived: the others show "joined"
     s.vx = r1(b.vx); s.vz = r1(b.vz);
     s.by = r2(b.yaw); s.ay = r2(b.aimYaw); s.ap = r2(b.aimPitch);
     s.aim = b.aiming ? 1 : 0; s.fire = b.firing > 0 ? 1 : 0;
@@ -830,13 +1094,26 @@ export class Bots {
   /** Not the host: the host's bots as remote players (and the vehicles they drive). */
   applyNet(msg) {
     const g = this.g;
+    const here = this._here ??= new Set();
+    here.clear();
     for (const s of msg.l ?? []) {
       if (!isBotId(s.i)) continue;
-      if (!g.remotePlayers.players.has(s.i)) g.remotePlayers.add({ id: s.i, name: s.n, color: s.c });
+      here.add(s.i);
+      if (!g.remotePlayers.players.has(s.i)) {
+        g.remotePlayers.add({ id: s.i, name: s.n, color: s.c });
+        if (s.jn) g.announce(s.i, "joined");
+      }
       g.remotePlayers.applyState(s.i, s);
       const car = s.veh ? g.vehicles[s.veh[5]] : null;
       if (car) car.setRemote(s.i, s.veh[0], s.veh[1], s.veh[2], s.veh[3], s.veh[4]);
       for (const v of g.vehicles) if (v !== car && v.driver === s.i) v.releaseRemote();
+    }
+    // A bot the host no longer lists has left the room
+    for (const id of [...g.remotePlayers.players.keys()]) {
+      if (!isBotId(id) || here.has(id)) continue;
+      g.announce(id, "left");
+      for (const v of g.vehicles) if (v.driver === id) v.releaseRemote();
+      g.remotePlayers.remove(id);
     }
   }
 }

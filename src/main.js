@@ -384,7 +384,7 @@ function respawnPlayer() {
   timeSinceHit = 99;
   knockbackVel.set(0, 0, 0);
   // Co-op: come back next to a living teammate
-  const mate = net.connected ? remotePlayers.targets().find(t => t.alive) : null;
+  const mate = net.inRoom ? remotePlayers.targets().find(t => t.alive) : null;
   const sx = mate ? mate.pos.x + 2 : 0, sz = mate ? mate.pos.z + 2 : 0;
   exitVehicle();
   const sy = groundHeight(sx, sz);
@@ -401,7 +401,7 @@ function respawnPlayer() {
   progress.resetRun();
   soldier.revive();
   setStance("stand", true);
-  if (!net.connected) director?.restart(); // solo: same level, from the top
+  if (!net.inRoom) director?.restart(); // solo: same level, from the top
   if (deathScreenEl) deathScreenEl.classList.remove("visible");
   requestLock();
 }
@@ -464,7 +464,7 @@ let hasPlayed = false;   // clicked into the game at least once
  * pointer lock). Co-op and the battle royale share one world, so they can't.
  */
 function canPause() {
-  return gameMode === "solo" && !net.connected && !bench.on;
+  return gameMode === "solo" && !net.inRoom && !bench.on;
 }
 function gamePaused() {
   return hud.paused && hasPlayed && playerHealth > 0 && canPause();
@@ -2928,7 +2928,7 @@ const _wheelScreen = new THREE.Vector3();
 // Short bullet-time moments (level cleared, headshot kills), solo only
 const bulletTime = { t: 0, scale: 1 };
 function slowFor(seconds, scale) {
-  if (gameMode !== "solo" || net.connected || bench.on) return;
+  if (gameMode !== "solo" || net.inRoom || bench.on) return;
   // Overlapping moments keep the slower of the two
   bulletTime.scale = bulletTime.t > 0 ? Math.min(bulletTime.scale, scale) : scale;
   bulletTime.t = Math.max(bulletTime.t, seconds);
@@ -3072,7 +3072,7 @@ const lootActions = new LootActions({
     const x = at?.x ?? p.x + Math.sin(bodyYaw) * 1.4 + (Math.random() - 0.5) * 0.6;
     const z = at?.z ?? p.z + Math.cos(bodyYaw) * 1.4 + (Math.random() - 0.5) * 0.6;
     const y = at?.y ?? floorY(x, z, feet);
-    const entry = net.connected ? spawnShared(kind, x, z, data, y) : pickups.spawn(kind, x, z, data, Infinity, null, y);
+    const entry = net.inRoom ? spawnShared(kind, x, z, data, y) : pickups.spawn(kind, x, z, data, Infinity, null, y);
     // You're standing on it: don't walk it straight back into the backpack
     pickups.lockAuto(entry);
   },
@@ -3487,6 +3487,8 @@ function fightsOn() { return isBR() && br.state === "match"; }
 
 /** A player fired at (x, z). id: their net id ("me" for you). */
 function noteShot(id, x, z) {
+  // The host's bots hear gunfire (and react by their style)
+  if (isBR() && net.isHost) bots.hearShot(id === "me" ? localTarget.id : id, x, z);
   if (!fightsOn()) return;
   const t = performance.now() / 1000;
   if (t - (_lastNoted.get(id) ?? -99) < SHOT_NOTE_GAP) return;
@@ -3569,7 +3571,7 @@ const waypoints = new Waypoints(scene);
 function setPin(id, x, z, share = false) {
   const p = x === null ? null : {
     x, z,
-    color: id === "me" ? (net.connected && !isBR() ? net.players.get(net.id)?.color ?? PIN_COLOR : PIN_COLOR) : net.players.get(id)?.color ?? "#ffffff",
+    color: id === "me" ? (net.inRoom && !isBR() ? net.players.get(net.id)?.color ?? PIN_COLOR : PIN_COLOR) : net.players.get(id)?.color ?? "#ffffff",
     label: id === "me" ? null : net.players.get(id)?.name ?? null,
   };
   worldMap.setPin(id, p);
@@ -3578,7 +3580,7 @@ function setPin(id, x, z, share = false) {
   for (const q of worldMap.pins.values()) pinList.push(q);
   if (id === "me" && p) sfx.click();
   // Squadmates see your pin; in the battle royale everyone's an enemy
-  if (share && gameMode === "coop" && net.connected) net.send(p ? { t: "pin", x: Math.round(x * 10) / 10, z: Math.round(z * 10) / 10 } : { t: "pin", c: 1 });
+  if (share && gameMode === "coop" && net.inRoom) net.send(p ? { t: "pin", x: Math.round(x * 10) / 10, z: Math.round(z * 10) / 10 } : { t: "pin", c: 1 });
 }
 
 function setMapOpen(open) {
@@ -4475,6 +4477,7 @@ const NET_LEVEL_HZ = 2;
 let netStateTimer = 0, netMonsterTimer = 0, netLevelTimer = 0, squadTimer = 0, wipeTimer = 0;
 let myName = "Survivor";
 let monsterSync = null;
+let coopHosting = false; // this machine runs the co-op horde (the room's host)
 
 const remotePlayers = new RemotePlayers({
   scene, world, loader: gltfLoader, effects, sfx, material: characterMaterial,
@@ -4562,8 +4565,10 @@ function onConnected(welcome) {
     // The host owns the monsters; ours become puppets of its snapshots
     zombieManager.clearAll();
     zombieManager.pool.setPuppetMode(true);
+    coopHosting = false;
     inventoryUI.feed(`Joined room "${net.room}" · host: ${net.players.get(net.hostId)?.name ?? "?"}`, "info");
   } else {
+    coopHosting = true;
     inventoryUI.feed(`Hosting room "${net.room}". Friends join with the same code.`, "info");
   }
   updateSquadPlayerCount();
@@ -4579,69 +4584,120 @@ function becomeHost() {
     return;
   }
   monsterSync?.becomeHost();
+  coopHosting = true;
   updateSquadPlayerCount();
   // Pick the fight back up from the current level
   director.start(director.level?.n ?? 1);
   inventoryUI.feed("You're hosting the horde now", "info");
 }
 
-net.on("joined", msg => {
-  remotePlayers.add(msg.p);
-  inventoryUI.feed(`${msg.p.name} joined the fight`, "weapon");
-  chat.system(`${msg.p.name} joined`);
+/** A player arrived (a "joined", or found in the roster after we were away). */
+function playerJoined(p) {
+  remotePlayers.add(p);
+  inventoryUI.feed(`${p.name} joined the fight`, "weapon");
+  chat.system(`${p.name} joined`);
   updateSquadPlayerCount();
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
     if (net.isHost) {
-      net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state } });
-      brAdmitLate(msg.p);
+      net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state } });
+      brAdmitLate(p);
     }
     return;
   }
   if (net.isHost) {
     // Catch the newcomer up on doors and lights
     net.send({
-      t: "world", to: msg.p.id,
+      t: "world", to: p.id,
       doors: houses.houses.map(h => h.doorOpen),
       lights: houses.houses.map(h => h.floors.map(f => f.lightOn)),
       veh: vehiclesState(),
       gate: collegeGate && { ...collegeGate.state },
     });
   }
-});
-net.on("left", msg => {
-  const name = remotePlayers.players.get(msg.id)?.name ?? "A player";
-  remotePlayers.remove(msg.id);
-  if (worldMap.pins.has(msg.id)) setPin(msg.id, null);
+}
+
+/** A player left the room (or wasn't in the roster any more when we got back). */
+function playerLeft(id) {
+  const name = remotePlayers.players.get(id)?.name ?? "A player";
+  remotePlayers.remove(id);
+  if (worldMap.pins.has(id)) setPin(id, null);
   for (const v of vehicles) {
-    if (v.driver === msg.id) v.releaseRemote();
-    if (v.pillion === msg.id) v.pillion = null;
+    if (v.driver === id) v.releaseRemote();
+    if (v.pillion === id) v.pillion = null;
   }
   inventoryUI.feed(`${name} left`, "info");
   chat.system(`${name} left`);
   updateSquadPlayerCount();
-  if (isBR()) brOnPlayerLeft(msg.id);
-});
+  if (isBR()) brOnPlayerLeft(id);
+}
+
+net.on("joined", msg => playerJoined(msg.p));
+net.on("left", msg => playerLeft(msg.id));
 net.on("host", msg => {
   if (msg.id === net.id) becomeHost();
-  else if (isBR() && bots.count) bots.release(); // someone took over while this tab was away: they run the bots now
-});
-net.on("disconnect", () => {
-  chat.setEnabled(false);
-  if (isBR()) bots.clear(); // whoever hosts the room now runs them
-  forgetRemotePlayers();
-  if (isBR()) {
-    brHud.showResult({ title: "CONNECTION LOST", sub: "Getting you back into the room…", foot: "", color: "#ff4b3a" });
-  } else {
-    const wasClient = localTarget.id !== net.hostId;
-    inventoryUI.feed("Connection lost: the horde carries on here while we reconnect", "info");
-    if (wasClient) becomeHost();
-    updateSquadPlayerCount();
-  }
-  scheduleReconnect(500);
+  else stepDownAsHost();
 });
 
-/** Everyone else leaves this machine's world at once (we lost the connection). */
+/** Whether this machine is running the room's monsters / bots right now. */
+function runningRoom() {
+  return isBR() ? bots.hosting : coopHosting;
+}
+
+/** Someone else runs the room now (we were away too long, or a battle royale player took over). */
+function stepDownAsHost() {
+  if (isBR()) {
+    if (bots.hosting) bots.release(); // they run the bots from here; ours stay as remote players
+    return;
+  }
+  if (!coopHosting) return;
+  coopHosting = false;
+  zombieManager.clearAll();
+  zombieManager.pool.setPuppetMode(true); // the new host's snapshots drive them
+  inventoryUI.feed(`${net.players.get(net.hostId)?.name ?? "A teammate"} runs the horde now`, "info");
+}
+
+// ─── Connection drops ────────────────────────────────────────────────────────
+// Net reconnects by itself and the relay keeps our slot (same id, the messages
+// we missed held for us) for 45 s, so a blip changes nothing: the game keeps
+// running here, everyone stays, and the banner says what's happening. Away
+// longer (or the server restarted) and we come back as a new player.
+net.on("reconnecting", info => {
+  if (info.closed) setNetStatus(`${info.reason} · you'll be back in when it ends`);
+  else if (info.reason === "No internet") setNetStatus("No internet · waiting for it to come back…");
+  else setNetStatus(info.retryIn ? `Can't reach the server · trying again in ${Math.ceil(info.retryIn / 1000)} s` : "Connection lost · reconnecting…");
+  if (!info.retryIn) chat.system("Connection lost: reconnecting…");
+});
+
+net.on("resumed", welcome => {
+  setNetStatus(null);
+  // Who came and went while we were away (those events aren't held for us)
+  const here = new Set(welcome.players.map(p => p.id));
+  for (const id of [...remotePlayers.players.keys()]) if (typeof id === "number" && !here.has(id)) playerLeft(id);
+  for (const p of welcome.players) if (p.id !== net.id && !remotePlayers.players.has(p.id)) playerJoined(p);
+  // The host may have changed meanwhile
+  if (net.isHost && !runningRoom()) becomeHost();
+  else if (!net.isHost && runningRoom()) stepDownAsHost();
+  if (isBR()) { br.hostQuiet = 0; br.gate = null; }
+  chat.system("Reconnected");
+});
+
+net.on("rejoined", welcome => {
+  // Our slot was gone: back as a new player (the room sees a fresh join)
+  setNetStatus(null);
+  if (isBR()) bots.clear();
+  forgetRemotePlayers();
+  if (isBR()) {
+    brHud.hideResult();
+    enterBattleRoyale(welcome);
+  } else {
+    onConnected(welcome);
+    if (net.isHost && !coopHosting) becomeHost();
+  }
+  chat.system("Reconnected");
+});
+
+/** Everyone else leaves this machine's world at once (we came back as a new player). */
 function forgetRemotePlayers() {
   for (const id of [...remotePlayers.players.keys()]) {
     if (worldMap.pins.has(id)) setPin(id, null);
@@ -4653,13 +4709,10 @@ function forgetRemotePlayers() {
   remotePlayers.clear();
 }
 
-// ─── Staying in the room: reloads, lost connections, invite links ─────────────
+// ─── The room we're in: reloads, invite links ────────────────────────────────
 // `myRoom` is the room we joined from the lobby. A reload rejoins it through the
-// address bar (Lobby.setRoomUrl / autoJoin); a lost connection is retried here
-// with a growing wait, straight away when the browser comes back online. A
-// battle royale that's down to its last few won't let us in: we keep trying
-// and get in when the next match opens.
-const myRoom = { mode: null, code: "", relay: "", name: "", timer: 0, tries: 0, busy: false };
+// address bar (Lobby.setRoomUrl / autoJoin); lost connections are Net's job.
+const myRoom = { mode: null, code: "" };
 const netStatusEl = document.createElement("div");
 netStatusEl.id = "net-status";
 netStatusEl.innerHTML = '<span class="ns-dot"></span><span class="ns-text"></span><button type="button" class="ns-leave">Leave room</button>';
@@ -4672,9 +4725,9 @@ function setNetStatus(text) {
   if (text) netStatusText.textContent = text;
 }
 
-/** Joined from the lobby: remember the room (for reconnecting) and put its link in the address bar. */
-function enteredRoom(mode, code, relayRoom, name) {
-  Object.assign(myRoom, { mode, code, relay: relayRoom, name, tries: 0 });
+/** Joined from the lobby: remember the room and put its link in the address bar. */
+function enteredRoom(mode, code) {
+  Object.assign(myRoom, { mode, code });
   Lobby.setRoomUrl(mode, code);
   document.body.classList.add("in-room");
 }
@@ -4682,56 +4735,9 @@ function enteredRoom(mode, code, relayRoom, name) {
 /** Back to a fresh page with the lobby (the room's link leaves the address bar). */
 function leaveRoom() {
   myRoom.mode = null;
-  clearTimeout(myRoom.timer);
   net.close();
   Lobby.setRoomUrl(null);
   location.reload();
-}
-
-function scheduleReconnect(ms) {
-  if (!myRoom.mode) return;
-  clearTimeout(myRoom.timer);
-  myRoom.timer = setTimeout(tryReconnect, ms);
-  setNetStatus("Connection lost · reconnecting…");
-}
-
-async function tryReconnect() {
-  if (!myRoom.mode || net.connected || myRoom.busy) return;
-  myRoom.busy = true;
-  myRoom.tries++;
-  setNetStatus(navigator.onLine === false ? "No internet · waiting for it to come back…" : `Reconnecting to "${myRoom.code}"…`);
-  try {
-    const welcome = await net.connect(Net.defaultUrl(), myRoom.name, myRoom.relay);
-    myRoom.tries = 0;
-    setNetStatus(null);
-    rejoined(welcome);
-  } catch (err) {
-    if (err.closed) {
-      // A battle royale in its final moments: in as soon as the next match opens
-      setNetStatus(`${err.message} · you'll be back in when it ends`);
-      myRoom.timer = setTimeout(tryReconnect, 8000);
-    } else {
-      const wait = Math.min(15000, 1000 * 2 ** Math.min(myRoom.tries, 4));
-      setNetStatus(navigator.onLine === false
-        ? "No internet · waiting for it to come back…"
-        : `Can't reach the server · trying again in ${Math.round(wait / 1000)} s`);
-      myRoom.timer = setTimeout(tryReconnect, wait);
-    }
-  } finally {
-    myRoom.busy = false;
-  }
-}
-window.addEventListener("online", () => { if (myRoom.mode && !net.connected) { myRoom.tries = 0; scheduleReconnect(300); } });
-
-/** Back in the room after a lost connection (a new player id: the room sees a fresh join). */
-function rejoined(welcome) {
-  if (isBR()) {
-    brHud.hideResult();
-    enterBattleRoyale(welcome);
-  } else {
-    onConnected(welcome);
-  }
-  chat.system("Reconnected");
 }
 
 /** Copies this room's invite link (the pause screen's button). */
@@ -4826,7 +4832,8 @@ function openChat() {
 
 net.on("chat", msg => {
   if (typeof msg.m !== "string" || !msg.m) return;
-  const p = net.players.get(msg.from);
+  // b: one of the host's bots said it
+  const p = msg.b && isBotId(msg.b) ? remotePlayers.players.get(msg.b) : net.players.get(msg.from);
   chat.add(p?.name ?? "?", p?.color, msg.m.slice(0, Chat.MAX_LEN));
   sfx.click();
 });
@@ -4891,7 +4898,7 @@ const takenLoot = new Set();   // host: ids already given out
 
 function claimLoot(entry, apply) {
   const id = entry.id;
-  if (id === null || !net.connected) { apply(); return; }
+  if (id === null || !net.inRoom) { apply(); return; }
   if (net.isHost) {
     if (takenLoot.has(id)) { pickups.release(entry); return; }
     takenLoot.add(id);
@@ -5052,7 +5059,7 @@ function updateSquad(delta) {
   if (squadTimer > 0) return;
   squadTimer = 0.25;
   let html = "";
-  if (net.connected && !isBR()) {
+  if (net.inRoom && !isBR()) {
     const me = net.players.get(net.id);
     const rows = [{ name: myName, color: me?.color ?? "#fff", hp: Math.max(0, playerHealth), kills: killsThisLife, me: true }];
     for (const p of remotePlayers.players.values()) rows.push({ name: p.name, color: p.color, hp: p.hp, kills: p.kills, dead: p.dead });
@@ -5787,6 +5794,20 @@ const bots = new Bots({
     net.send(msg);
     brHandleElim(msg);
   },
+  /** A bot joined or left: the same lines a person gets. */
+  announce(id, what) {
+    const name = remotePlayers.players.get(id)?.name;
+    if (!name) return;
+    inventoryUI.feed(what === "joined" ? `${name} joined the fight` : `${name} left`, what === "joined" ? "weapon" : "info");
+    chat.system(`${name} ${what}`);
+  },
+  /** A bot says something in the room chat (host). */
+  say(id, text) {
+    const p = remotePlayers.players.get(id);
+    if (!p || !net.modern) return; // an older relay would show it under the host's name
+    chat.add(p.name, p.color, text);
+    net.send({ t: "chat", m: text, b: id });
+  },
 });
 const _lootSpot = new THREE.Vector3();
 const _specIds = [];
@@ -5916,6 +5937,7 @@ function brEnterWarmup() {
 
 function brHostStart() {
   if (!net.isHost || (br.state !== "warm" && br.state !== "count")) return;
+  bots.flushPending(); // anyone about to join drops with everyone
   const seed = (Math.random() * 0xffffffff) >>> 0;
   const ids = [net.id, ...remotePlayers.players.keys()];
   net.send({ t: "brstart", seed, ids });
@@ -6264,6 +6286,7 @@ function brOnLocalDeath() {
 }
 
 function brHandleElim({ v, k, w, hs }) {
+  if (net.isHost) bots.onElim(v, k);
   const vName = brName(v);
   const kName = k !== null && k !== undefined ? brName(k) : null;
   const verb = hs ? "HEADSHOT" : ELIM_VERB[w] ?? WEAPONS[w]?.short ?? "KILLED";
@@ -6345,7 +6368,7 @@ function brOnPlayerLeft(id) {
 function brUpdate(delta) {
   // The match runs in the host's game loop, which stops when its tab is hidden or the phone
   // sleeps. Then an active player takes over, so the countdown and the drop never wait on them.
-  if (net.isClient) {
+  if (net.isClient && net.connected) {
     br.hostQuiet += delta;
     br.takeoverCd -= delta;
     if (br.hostQuiet > BR_HOST_QUIET && br.takeoverCd <= 0) {
@@ -6502,8 +6525,7 @@ net.on("brfull", msg => {
   bots.clear();
   brHud.showResult({ title: "MATCH IN ITS FINAL MOMENTS", sub: msg.reason || brClosedReason(), foot: "You'll join when the next match opens", color: "#4da3ff" });
   setNetStatus(`${msg.reason || brClosedReason()} · you'll be in when it ends`);
-  clearTimeout(myRoom.timer);
-  myRoom.timer = setTimeout(tryReconnect, 8000);
+  net.rejoinLater(8000); // a fresh join; the relay lets us in once the next match opens
 });
 net.on("elim", msg => { if (isBR()) brHandleElim(msg); });
 // Someone shot you: you apply it (you own your health) and remember who for the kill credit.
@@ -6542,7 +6564,7 @@ const lobby = new Lobby({
     myName = name;
     const welcome = await net.connect(Net.defaultUrl(), name, room);
     gameMode = "coop";
-    enteredRoom("coop", room, room, name);
+    enteredRoom("coop", room);
     onConnected(welcome);
     lobby.hide();
   },
@@ -6551,7 +6573,7 @@ const lobby = new Lobby({
     // Battle royale rooms live apart from the co-op ones with the same code
     const relayRoom = `br-${room}`.slice(0, 24);
     const welcome = await net.connect(Net.defaultUrl(), name, relayRoom);
-    enteredRoom("br", room, relayRoom, name);
+    enteredRoom("br", room);
     enterBattleRoyale(welcome);
     lobby.hide();
   },
