@@ -8,7 +8,7 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
 import { Soldier, SWAP_TIME, THROW_RECOVER, LAND_FROM_HEIGHT, setGearModels } from "./player/Soldier.js";
 import { loadGearModels } from "./items/GearModels.js";
-import { encodeAvatar } from "./player/Avatar.js";
+import { encodeAvatar, PALETTES } from "./player/Avatar.js";
 import { AvatarPicker } from "./ui/AvatarPicker.js";
 import { ScopeOverlay } from "./ui/ScopeOverlay.js";
 import { loadExtraAnimations } from "./player/MixamoAssets.js";
@@ -57,14 +57,14 @@ import { Vehicle, VEHICLES, standInJeep, standInTractor } from "./vehicles/Vehic
 import { LegalScreen, legalButton } from "./ui/LegalScreen.js";
 import { QUALITY, QUALITY_NAME, QUALITY_SETTING, QUALITY_PRESETS, saveQuality } from "./quality.js";
 import { Net } from "./net/Net.js";
+import { Lobby, copyText } from "./net/Lobby.js";
 import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "./net/RemotePlayers.js";
 import { MonsterSync } from "./net/MonsterSync.js";
 import { MonsterAudio } from "./audio/MonsterAudio.js";
-import { Lobby } from "./net/Lobby.js";
 import { BrHud } from "./br/BrHud.js";
 import { ZoneWall, createPlane, updatePlane, createParachute, setSkydivePose } from "./br/BrVisuals.js";
 import {
-  PLANE, FREEFALL, CHUTE, BR_AUTO_START, BR_END_HOLD, BR_WARMUP_RESPAWN, BR_MAX_PLAYERS,
+  PLANE, FREEFALL, CHUTE, BR_AUTO_START, BR_END_HOLD, BR_WARMUP_RESPAWN, BR_MAX_PLAYERS, BR_JOIN_CLOSE_AT,
   PVP_DAMAGE, PVP_HEADSHOT, PVP_HEAD_Y, BR_GUN_RESERVE,
   planeRoute, planeAt, zoneCircles, zoneAt, lootPlan, fmtClock,
 } from "./br/BattleRoyale.js";
@@ -4572,6 +4572,7 @@ function onConnected(welcome) {
 function becomeHost() {
   if (isBR()) {
     bots.adopt(); // the old host's bots carry on, run from here
+    br.gate = null; // tell the relay where the doors stand again
     // The match clock, zone and alive list are already here: just carry on
     inventoryUI.feed("You're hosting the match now", "info");
     brCheckWinner();
@@ -4591,7 +4592,10 @@ net.on("joined", msg => {
   updateSquadPlayerCount();
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
-    if (net.isHost) net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state } });
+    if (net.isHost) {
+      net.send({ t: "world", to: msg.p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state } });
+      brAdmitLate(msg.p);
+    }
     return;
   }
   if (net.isHost) {
@@ -4621,16 +4625,172 @@ net.on("left", msg => {
 net.on("host", msg => { if (msg.id === net.id) becomeHost(); });
 net.on("disconnect", () => {
   chat.setEnabled(false);
+  if (isBR()) bots.clear(); // whoever hosts the room now runs them
+  forgetRemotePlayers();
   if (isBR()) {
-    brHud.showResult({ title: "DISCONNECTED", sub: "Lost the connection to the server", foot: "Reload the page to play again", color: "#ff4b3a" });
+    brHud.showResult({ title: "CONNECTION LOST", sub: "Getting you back into the room…", foot: "", color: "#ff4b3a" });
+  } else {
+    const wasClient = localTarget.id !== net.hostId;
+    inventoryUI.feed("Connection lost: the horde carries on here while we reconnect", "info");
+    if (wasClient) becomeHost();
+    updateSquadPlayerCount();
+  }
+  scheduleReconnect(500);
+});
+
+/** Everyone else leaves this machine's world at once (we lost the connection). */
+function forgetRemotePlayers() {
+  for (const id of [...remotePlayers.players.keys()]) {
+    if (worldMap.pins.has(id)) setPin(id, null);
+    for (const v of vehicles) {
+      if (v.driver === id) v.releaseRemote();
+      if (v.pillion === id) v.pillion = null;
+    }
+  }
+  remotePlayers.clear();
+}
+
+// ─── Staying in the room: reloads, lost connections, invite links ─────────────
+// `myRoom` is the room we joined from the lobby. A reload rejoins it through the
+// address bar (Lobby.setRoomUrl / autoJoin); a lost connection is retried here
+// with a growing wait, straight away when the browser comes back online. A
+// battle royale that's down to its last few won't let us in: we keep trying
+// and get in when the next match opens.
+const myRoom = { mode: null, code: "", relay: "", name: "", timer: 0, tries: 0, busy: false };
+const netStatusEl = document.createElement("div");
+netStatusEl.id = "net-status";
+netStatusEl.innerHTML = '<span class="ns-dot"></span><span class="ns-text"></span><button type="button" class="ns-leave">Leave room</button>';
+document.body.append(netStatusEl);
+const netStatusText = netStatusEl.querySelector(".ns-text");
+netStatusEl.querySelector(".ns-leave").addEventListener("click", leaveRoom);
+
+function setNetStatus(text) {
+  netStatusEl.classList.toggle("on", !!text);
+  if (text) netStatusText.textContent = text;
+}
+
+/** Joined from the lobby: remember the room (for reconnecting) and put its link in the address bar. */
+function enteredRoom(mode, code, relayRoom, name) {
+  Object.assign(myRoom, { mode, code, relay: relayRoom, name, tries: 0 });
+  Lobby.setRoomUrl(mode, code);
+  document.body.classList.add("in-room");
+}
+
+/** Back to a fresh page with the lobby (the room's link leaves the address bar). */
+function leaveRoom() {
+  myRoom.mode = null;
+  clearTimeout(myRoom.timer);
+  net.close();
+  Lobby.setRoomUrl(null);
+  location.reload();
+}
+
+function scheduleReconnect(ms) {
+  if (!myRoom.mode) return;
+  clearTimeout(myRoom.timer);
+  myRoom.timer = setTimeout(tryReconnect, ms);
+  setNetStatus("Connection lost · reconnecting…");
+}
+
+async function tryReconnect() {
+  if (!myRoom.mode || net.connected || myRoom.busy) return;
+  myRoom.busy = true;
+  myRoom.tries++;
+  setNetStatus(navigator.onLine === false ? "No internet · waiting for it to come back…" : `Reconnecting to "${myRoom.code}"…`);
+  try {
+    const welcome = await net.connect(Net.defaultUrl(), myRoom.name, myRoom.relay);
+    myRoom.tries = 0;
+    setNetStatus(null);
+    rejoined(welcome);
+  } catch (err) {
+    if (err.closed) {
+      // A battle royale in its final moments: in as soon as the next match opens
+      setNetStatus(`${err.message} · you'll be back in when it ends`);
+      myRoom.timer = setTimeout(tryReconnect, 8000);
+    } else {
+      const wait = Math.min(15000, 1000 * 2 ** Math.min(myRoom.tries, 4));
+      setNetStatus(navigator.onLine === false
+        ? "No internet · waiting for it to come back…"
+        : `Can't reach the server · trying again in ${Math.round(wait / 1000)} s`);
+      myRoom.timer = setTimeout(tryReconnect, wait);
+    }
+  } finally {
+    myRoom.busy = false;
+  }
+}
+window.addEventListener("online", () => { if (myRoom.mode && !net.connected) { myRoom.tries = 0; scheduleReconnect(300); } });
+
+/** Back in the room after a lost connection (a new player id: the room sees a fresh join). */
+function rejoined(welcome) {
+  if (isBR()) {
+    brHud.hideResult();
+    enterBattleRoyale(welcome);
+  } else {
+    onConnected(welcome);
+  }
+  chat.system("Reconnected");
+}
+
+/** Copies this room's invite link (the pause screen's button). */
+function copyInvite(btn) {
+  if (!myRoom.mode) return;
+  copyText(Net.inviteUrl(myRoom.mode, myRoom.code)).then(ok => {
+    const label = btn.querySelector("span");
+    label.textContent = ok ? "Link copied!" : "Copy the address bar instead";
+    setTimeout(() => { label.textContent = "Copy invite link"; }, 2200);
+    if (ok) chat.system("Invite link copied: anyone who opens it joins this room");
+  });
+}
+{
+  // Pause screen: invite friends (shown only in a room, see body.in-room)
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "invite-btn";
+  b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg><span>Copy invite link</span>';
+  b.addEventListener("click", e => { e.stopPropagation(); copyInvite(b); });
+  b.addEventListener("pointerdown", e => e.stopPropagation());
+  startScreenEl?.append(b);
+}
+
+// ─── Outfits: nobody in a room dresses the same ──────────────────────────────
+// If a teammate (or a bot) already wears exactly your look, you get new colours
+// for this room (your saved look stays as it is). Of two human players the
+// newer one (higher id) changes, so they never both re-roll. In the battle
+// royale only in the warm-up lobby, never mid-match.
+let outfitTimer = 3;
+function checkOutfitClash(delta) {
+  if (!net.connected || (outfitTimer -= delta) > 0) return;
+  outfitTimer = 2;
+  if (isBR() && br.state !== "warm" && br.state !== "count") return;
+  const mine = encodeAvatar(soldier.avatar);
+  for (const [id, p] of remotePlayers.players) {
+    if (!p.hasState || p.avatarCode !== mine) continue;
+    if (typeof id === "number" && id > net.id) continue; // they're newer: they change
+    newOutfit();
     return;
   }
-  const wasClient = localTarget.id !== net.hostId;
-  remotePlayers.clear();
-  inventoryUI.feed("Disconnected from co-op: playing solo", "info");
-  if (wasClient) becomeHost();
-  updateSquadPlayerCount();
-});
+}
+
+function newOutfit() {
+  const a = { ...soldier.avatar };
+  const pick = n => Math.floor(Math.random() * n);
+  for (let i = 0; i < 24; i++) {
+    a.top = 1 + pick(PALETTES.top.length - 1);
+    a.bottom = 1 + pick(PALETTES.bottom.length - 1);
+    a.shoes = pick(PALETTES.shoes.length);
+    a.hair = pick(PALETTES.hair.length);
+    // One-piece characters only show the top colour, so that one has to differ too
+    let clash = false;
+    for (const p of remotePlayers.players.values()) {
+      const c = p.avatarCode;
+      if (c === encodeAvatar(a) || ((c & 7) === a.char && (c >> 3 & 7) === a.top)) clash = true;
+    }
+    if (!clash) break;
+  }
+  soldier.setAvatar(a).catch(err => console.warn(err));
+  lootScreen.preview?.soldier?.setAvatar(a).catch(err => console.warn(err));
+  inventoryUI.feed("Someone here wears your outfit: new colours for this room", "info");
+}
 
 net.on("st", msg => remotePlayers.applyState(msg.from, msg));
 
@@ -5526,6 +5686,8 @@ const br = {
   ghost: false,          // joined mid-match: watch until the next one
   started: 0,
   alive: new Set(),      // player ids still standing
+  outKeys: new Set(),    // tab keys (Net.key) knocked out of this match: rejoining, they spectate
+  gate: null,            // host: whether the relay was last told the room is closed to newcomers
   placement: 0,
   spectating: null,
   outside: false,
@@ -5672,6 +5834,7 @@ function enterBattleRoyale(welcome) {
   document.body.classList.add("mode-br");
   localTarget.id = net.id;
   remotePlayers.pvp = true;
+  br.gate = null;
   chat.setEnabled(true);
   chat.system(`Room "${welcome.room.slice(3)}" · press ${IS_TOUCH ? "the chat button" : "Y"} to chat`);
   for (const p of welcome.players) if (p.id !== net.id) remotePlayers.add(p);
@@ -5721,6 +5884,7 @@ function brEnterWarmup() {
   br.t = 0; br.countdown = 0; br.endTimer = 0;
   br.inMatch = false; br.ghost = false; br.started = 0;
   br.alive.clear();
+  br.outKeys.clear();
   br.route = null; br.circles = null;
   br.spectating = null; br.respawnTimer = 0; br.outside = false;
   br.won = false; br.shrinking = false;
@@ -5761,6 +5925,7 @@ function brStartMatch(seed, ids, t) {
   zoneAt(br.circles, t, br.zone);
   br.alive.clear();
   for (const id of ids) br.alive.add(id);
+  if (t === 0) br.outKeys.clear();
   br.started = ids.length;
   br.inMatch = br.alive.has(net.id);
   br.ghost = !br.inMatch;
@@ -5784,8 +5949,19 @@ function brStartMatch(seed, ids, t) {
   // Look along the route, a little down, so you can pick your spot
   aimYaw = Math.atan2(br.route.dx, br.route.dz);
   aimPitch = -0.35;
-  if (net.isHost) bots.onMatch();
-  if (br.inMatch) {
+  if (net.isHost && t === 0) bots.onMatch();
+  if (br.inMatch && t > 0) {
+    // Joined a match that's already on: aboard if the plane's still over the island, else straight out of the sky
+    const sky = brPlaneGone();
+    if (sky) brSkyDrop();
+    else setMapOpen(true);
+    gameHud.showBanner({
+      title: "DROPPING IN", sub: "You joined a match in progress",
+      text: sky ? `${IS_TOUCH ? "Push the joystick up" : "W"} to dive. Land, loot, and stay inside the blue zone.` : `${IS_TOUCH ? "JUMP" : "SPACE"} jumps. Land, loot, and stay inside the blue zone.`,
+      color: "#4da3ff", duration: 5,
+    });
+    sfx.levelStart();
+  } else if (br.inMatch) {
     setMapOpen(true);
     gameHud.showBanner({ title: "DROP ZONE", sub: "Pick your spot", text: `${IS_TOUCH ? "JUMP" : "SPACE"} jumps. Land, loot, and stay inside the blue zone.`, color: "#4da3ff", duration: 5 });
     sfx.levelStart();
@@ -5890,6 +6066,57 @@ function brJump() {
   characterRoot.visible = true;
   setMapOpen(false);
   sfx.throwWhoosh();
+}
+
+/** Too late to board: the plane has passed the middle and is past the eject line (or gone). */
+function brPlaneGone() {
+  return br.t >= br.route.duration - 3 || brMustEject();
+}
+
+/** A late joiner with no plane to jump from: freefall from plane height over a spot inside the zone. */
+function brSkyDrop() {
+  const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * br.zone.r * 0.6;
+  const x = br.zone.x + Math.cos(a) * r, z = br.zone.z + Math.sin(a) * r;
+  br.flight = PHASE_FALL;
+  br.fallTime = 0;
+  br.vy = -3;
+  characterBody.position.set(x, surfaceHeight(x, z) + PLANE.altitude + FEET_OFFSET, z);
+  characterBody.velocity.set(0, 0, 0);
+  moveVelocity.set(0, 0, 0);
+  // Face the middle of the zone
+  aimYaw = Math.atan2(br.zone.x - x, br.zone.z - z);
+  bodyYaw = aimYaw;
+  characterRoot.visible = true;
+  setMapOpen(false);
+  sfx.throwWhoosh();
+}
+
+/**
+ * Host: someone joined while a match is on. They drop in (plane or sky) unless the
+ * match is down to its last BR_JOIN_CLOSE_AT, or they were already knocked out of
+ * this match (a reload or a lost connection): then they watch until the next one.
+ */
+function brAdmitLate(p) {
+  if (br.state !== "match" || br.alive.has(p.id)) return;
+  if (p.k && br.outKeys.has(p.k)) return;
+  if (br.alive.size <= BR_JOIN_CLOSE_AT) {
+    net.send({ t: "brfull", to: p.id, reason: brClosedReason() }); // in case the relay doesn't close rooms yet
+    return;
+  }
+  br.alive.add(p.id);
+  net.send({ t: "brlate", id: p.id });
+}
+
+function brClosedReason() {
+  return `This match is down to its last ${BR_JOIN_CLOSE_AT} players`;
+}
+
+/** Host: tell the relay whether the room takes newcomers (closed while BR_JOIN_CLOSE_AT or fewer are left). */
+function brUpdateGate() {
+  const closed = br.state === "match" && br.alive.size <= BR_JOIN_CLOSE_AT;
+  if (closed === br.gate) return;
+  br.gate = closed;
+  net.send({ t: "roomlock", closed, reason: closed ? brClosedReason() : undefined });
 }
 
 /** Nobody rides past the far edge of the zone: the route runs a little beyond it. */
@@ -6044,6 +6271,8 @@ function brHandleElim({ v, k, w, hs }) {
   }
   if (br.state !== "match" || !br.alive.has(v)) return;
   br.alive.delete(v);
+  const vKey = v === net.id ? net.key : net.players.get(v)?.k;
+  if (vKey) br.outKeys.add(vKey);
   if (v === net.id) {
     br.inMatch = false;
     postFx.kick(0.4, 0xff2a1a);
@@ -6108,6 +6337,7 @@ function brOnPlayerLeft(id) {
 // ── Per frame ────────────────────────────────────────────────────────────────
 function brUpdate(delta) {
   if (net.isHost) bots.update(delta);
+  if (net.isHost) brUpdateGate();
   if (net.isHost) {
     // Someone else is here: count down to the drop
     if (br.state === "warm" && remotePlayers.count > 0) { br.state = "count"; br.countdown = BR_AUTO_START; br.netTimer = 0; }
@@ -6244,6 +6474,19 @@ net.on("br", msg => {
 net.on("brstart", msg => { if (isBR()) brStartMatch(msg.seed, msg.ids, 0); });
 net.on("brend", msg => { if (isBR()) brShowEnd(msg.w ?? null); });
 net.on("brwarm", () => { if (isBR()) brEnterWarmup(); });
+// A late joiner was let into the running match (they build it themselves from the host's "br")
+net.on("brlate", msg => { if (isBR() && br.state === "match" && msg.id !== net.id) br.alive.add(msg.id); });
+// The host turned us away (the match is in its final few): wait outside and get in when it ends
+net.on("brfull", msg => {
+  if (!isBR()) return;
+  net.close();
+  forgetRemotePlayers();
+  bots.clear();
+  brHud.showResult({ title: "MATCH IN ITS FINAL MOMENTS", sub: msg.reason || brClosedReason(), foot: "You'll join when the next match opens", color: "#4da3ff" });
+  setNetStatus(`${msg.reason || brClosedReason()} · you'll be in when it ends`);
+  clearTimeout(myRoom.timer);
+  myRoom.timer = setTimeout(tryReconnect, 8000);
+});
 net.on("elim", msg => { if (isBR()) brHandleElim(msg); });
 // Someone shot you: you apply it (you own your health) and remember who for the kill credit.
 // v: a bot was hit (the host owns bots' health); b: a bot did the shooting.
@@ -6281,13 +6524,16 @@ const lobby = new Lobby({
     myName = name;
     const welcome = await net.connect(Net.defaultUrl(), name, room);
     gameMode = "coop";
+    enteredRoom("coop", room, room, name);
     onConnected(welcome);
     lobby.hide();
   },
   async onBattleRoyale(name, room) {
     myName = name;
     // Battle royale rooms live apart from the co-op ones with the same code
-    const welcome = await net.connect(Net.defaultUrl(), name, `br-${room}`.slice(0, 24));
+    const relayRoom = `br-${room}`.slice(0, 24);
+    const welcome = await net.connect(Net.defaultUrl(), name, relayRoom);
+    enteredRoom("br", room, relayRoom, name);
     enterBattleRoyale(welcome);
     lobby.hide();
   },
@@ -6508,6 +6754,7 @@ function animate() {
   collegeGate?.update(delta);
   cseBuilding?.update(camera.position.x, camera.position.z);
   houses?.cull(camera);
+  checkOutfitClash(realDelta);
   if (isBR()) {
     brUpdate(delta);
   } else if (net.isClient) {
@@ -6936,7 +7183,7 @@ async function boot() {
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     if (BENCH_ENABLED) startBenchmark();
-    else lobby.show();
+    else { lobby.show(); lobby.autoJoin(); } // an invite link (or a reload inside a room) joins straight in
     // The inventory screen's 3D character loads in the background
     lootScreen.initPreview(gltfLoader);
     clearInterval(window.__ldTips);

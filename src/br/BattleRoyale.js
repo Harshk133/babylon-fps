@@ -6,6 +6,7 @@ export const BR_MAX_PLAYERS = 100;       // the relay's room limit
 export const BR_AUTO_START  = 25;         // seconds of countdown once 2+ players are in
 export const BR_END_HOLD    = 12;         // results screen before the next warm-up
 export const BR_WARMUP_RESPAWN = 3;       // dying in the warm-up just puts you back
+export const BR_JOIN_CLOSE_AT = 5;        // a running match takes new players until this few are left standing
 
 // ── The drop ──────────────────────────────────────────────────────────────────
 export const PLANE = {

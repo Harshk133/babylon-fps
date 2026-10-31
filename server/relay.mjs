@@ -18,7 +18,7 @@ const MAX_PER_BR_ROOM = 100; // battle royale rooms ("br-<code>")
 const CHAT_MAX = 120;        // characters per chat message (src/ui/Chat.js cuts at the same length)
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "").split(",").map(s => s.trim().replace(/\/$/, "")).filter(Boolean);
 
-const rooms = new Map(); // room name → { players: Map<id, client>, hostId }
+const rooms = new Map(); // room name → { players: Map<id, client>, hostId, closed }
 let nextId = 1;
 
 function send(ws, msg) {
@@ -31,15 +31,17 @@ function broadcast(room, msg, exceptId = null) {
 }
 
 function publicInfo(c) {
-  return { id: c.id, name: c.name, color: c.color };
+  return { id: c.id, name: c.name, color: c.color, k: c.key };
 }
 
 function join(ws, msg) {
   const roomName = String(msg.room ?? "horde").trim().slice(0, 24).toLowerCase() || "horde";
   let room = rooms.get(roomName);
-  if (!room) { room = { players: new Map(), hostId: null }; rooms.set(roomName, room); }
+  if (!room) { room = { players: new Map(), hostId: null, closed: null }; rooms.set(roomName, room); }
   const max = roomName.startsWith("br-") ? MAX_PER_BR_ROOM : MAX_PER_ROOM;
   if (room.players.size >= max) { send(ws, { t: "full" }); ws.close(); return null; }
+  // The host closed the doors (a battle royale down to its last few): try again after the match
+  if (room.closed && room.players.size) { send(ws, { t: "closed", reason: room.closed }); ws.close(); return null; }
 
   const used = new Set([...room.players.values()].map(c => c.color));
   const client = {
@@ -49,6 +51,8 @@ function join(ws, msg) {
     roomName,
     name: String(msg.name ?? "Survivor").replace(/[^\p{L}\p{N} _.-]/gu, "").trim().slice(0, 16) || "Survivor",
     color: COLORS.find(c => !used.has(c)) ?? COLORS[nextId % COLORS.length],
+    // The tab's own id (kept across reloads and reconnects), so the host can tell a returning player
+    key: String(msg.key ?? "").replace(/[^a-z0-9]/gi, "").slice(0, 24),
   };
   room.players.set(client.id, client);
   if (room.hostId === null) room.hostId = client.id;
@@ -97,6 +101,11 @@ export function attachRelay(httpServer, path = "/ws") {
         return;
       }
       if (msg.t === "ping") { send(ws, { t: "pong", ts: msg.ts }); return; }
+      if (msg.t === "roomlock") {
+        // The host opens / closes the room to new players; never forwarded
+        if (client.id === client.room.hostId) client.room.closed = msg.closed ? String(msg.reason ?? "closed").slice(0, 160) : null;
+        return;
+      }
       if (msg.t === "chat") {
         // Room chat: plain text, length-capped, to everyone, at most a few lines a second
         const now = Date.now();

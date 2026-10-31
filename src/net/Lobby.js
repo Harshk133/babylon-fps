@@ -1,8 +1,13 @@
 // Name / room entry shown after loading. Three modes: solo against the horde,
 // co-op against the horde, or a battle royale (players against each other).
 // Pick a mode card, then Play; the last mode is remembered.
+//
+// Invite links (?room=<code>&mode=coop|br, see Net.inviteUrl) join straight in
+// once the game has loaded (autoJoin). While you're in a room the address bar
+// shows its link (setRoomUrl), so a reload puts you back in the same room.
 
 import { IS_TOUCH } from "../input/TouchControls.js";
+import { Net } from "./Net.js";
 import "./lobby.css";
 
 const NAME_KEY = "babylon-fps:name";
@@ -26,15 +31,24 @@ export class Lobby {
     this.statusEl = document.getElementById("lobby-status");
     this.playBtn = document.getElementById("lobby-play");
     this.playSubEl = document.getElementById("lobby-play-sub");
+    this.copyBtn = document.getElementById("lobby-copy");
     this.modeBtns = [...this.el.querySelectorAll("[data-mode]")];
     this.open = false;
 
     const params = new URLSearchParams(location.search);
     this.nameEl.value = load(NAME_KEY, "");
-    this.roomEl.value = params.get("room") || load(ROOM_KEY, "horde");
-    // An invite link (?room=) means a friend is waiting: start on co-op
+    this.roomEl.value = (params.get("room") || load(ROOM_KEY, "horde")).replace(/^br-/, "");
+    // An invite link (?room=, ?mode=) means a friend is waiting: that mode (co-op if it doesn't say)
     const saved = load(MODE_KEY, "solo");
-    this.select(params.has("room") && saved === "solo" ? "coop" : MODES[saved] ? saved : "solo");
+    const linked = params.get("mode");
+    this.invite = params.has("room") && params.get("room").trim() ? (linked === "br" ? "br" : "coop") : null;
+    this.select(this.invite ?? (MODES[saved] ? saved : "solo"));
+
+    this.copyBtn?.addEventListener("click", () => {
+      const room = this.roomEl.value.trim().toLowerCase() || "horde";
+      copyText(Net.inviteUrl(this.mode === "br" ? "br" : "coop", room))
+        .then(ok => this.setStatus(ok ? "Invite link copied: send it to your friends" : "Couldn't copy: copy the address bar after you join", !ok));
+    });
 
     const name = () => {
       const n = this.nameEl.value.trim().slice(0, 16) || `Survivor${Math.floor(Math.random() * 900 + 100)}`;
@@ -51,7 +65,8 @@ export class Lobby {
         await connect(name(), room);
         this.setStatus("");
       } catch (err) {
-        this.setStatus(err.message || "Couldn't connect", true);
+        // A battle royale down to its last few players takes nobody new until the match ends
+        this.setStatus(err.closed ? `${err.message}. Try again when it ends.` : err.message || "Couldn't connect", true);
       } finally {
         clearTimeout(slow);
         this.setBusy(false);
@@ -83,6 +98,7 @@ export class Lobby {
       if (on) this.el.style.setProperty("--mode", btn.style.getPropertyValue("--mode"));
     }
     this.el.dataset.mode = mode;
+    if (this.copyBtn) this.copyBtn.hidden = mode === "solo";
     this.playSubEl.textContent = MODES[mode];
     this.setStatus("");
   }
@@ -98,6 +114,23 @@ export class Lobby {
     this.el.classList.toggle("busy", busy);
   }
 
+  /** Opened from an invite link (or reloaded inside a room): join it right away, once. */
+  autoJoin() {
+    if (!this.invite || this._autoJoined) return;
+    this._autoJoined = true;
+    this.playBtn.click();
+  }
+
+  /** The address bar shows the room's invite link while you're in it (a reload rejoins); null clears it. */
+  static setRoomUrl(mode, room) {
+    try {
+      const url = new URL(location.href);
+      if (mode) { url.searchParams.set("room", room); url.searchParams.set("mode", mode); }
+      else { url.searchParams.delete("room"); url.searchParams.delete("mode"); }
+      history.replaceState(history.state, "", url);
+    } catch { /* sandboxed */ }
+  }
+
   show() {
     this.open = true;
     this.el.classList.add("visible");
@@ -108,5 +141,24 @@ export class Lobby {
   hide() {
     this.open = false;
     this.el.classList.remove("visible");
+  }
+}
+
+/** Copies text to the clipboard (with the old execCommand fallback for plain-http LAN pages). */
+export async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch { /* not allowed */ }
+    ta.remove();
+    return ok;
   }
 }

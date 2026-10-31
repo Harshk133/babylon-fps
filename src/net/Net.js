@@ -1,5 +1,25 @@
 // Thin client for the co-op relay (server/relay.mjs). JSON messages with a
 // type field `t`; handlers are registered per type with on(type, fn).
+//
+// A lost connection is noticed quickly (unanswered pings, the browser going
+// offline) and reported once as "disconnect"; main.js then calls connect()
+// again with the same name and room. Every tab carries a key (`Net.key`,
+// kept across reloads) so the host can recognise a player who comes back.
+
+const KEY_STORE = "babylon-fps:netkey";
+const PING_EVERY = 2000;  // ms
+const PING_LOST = 9000;   // ms without a pong: the connection is gone
+
+/** This tab's id: survives a reload, a new tab gets its own (two tabs = two players). */
+function tabKey() {
+  try {
+    let k = sessionStorage.getItem(KEY_STORE);
+    if (!k) { k = Math.random().toString(36).slice(2, 12) + Date.now().toString(36); sessionStorage.setItem(KEY_STORE, k); }
+    return k;
+  } catch {
+    return Math.random().toString(36).slice(2, 12);
+  }
+}
 
 export class Net {
   constructor() {
@@ -12,6 +32,10 @@ export class Net {
     this.connected = false;
     this.ping = 0;
     this._pingTimer = null;
+    this._pingSent = 0;   // when the unanswered ping went out (0: none outstanding)
+    this.key = tabKey();
+    // The browser knows the network went: don't wait for the pings
+    window.addEventListener("offline", () => this._drop());
   }
 
   get isHost() { return this.connected && this.id === this.hostId; }
@@ -67,22 +91,35 @@ export class Net {
     for (const fn of this.handlers.get(type) ?? []) fn(msg);
   }
 
+  /**
+   * Invite link to a room: opening it joins straight in (see Lobby). mode: "coop" | "br";
+   * room: the code as typed (without the "br-" prefix). VITE_PUBLIC_URL sets the site
+   * address for builds that don't run on it (the Android app is https://localhost).
+   */
+  static inviteUrl(mode, room) {
+    const base = (import.meta.env.VITE_PUBLIC_URL || "").trim() || location.origin + location.pathname;
+    const url = new URL(base, location.href);
+    const here = new URLSearchParams(location.search);
+    for (const k of ["relay"]) if (here.has(k)) url.searchParams.set(k, here.get(k)); // same server when testing
+    url.searchParams.set("room", room);
+    url.searchParams.set("mode", mode);
+    return url.toString();
+  }
+
   /** Resolves with the welcome message, rejects on failure / timeout. */
   connect(url, name, room) {
+    this._detach();
     return new Promise((resolve, reject) => {
       let settled = false;
       const ws = new WebSocket(url);
       this.ws = ws;
       // Generous: free relay hosts (e.g. Render) sleep and take up to a minute to wake
       const timer = setTimeout(() => { if (!settled) { settled = true; ws.close(); reject(new Error("Timed out: is the co-op server running?")); } }, 75000);
-      ws.onopen = () => ws.send(JSON.stringify({ t: "join", name, room }));
+      ws.onopen = () => ws.send(JSON.stringify({ t: "join", name, room, key: this.key }));
       ws.onerror = () => { if (!settled) { settled = true; clearTimeout(timer); reject(new Error(`Can't reach the co-op server at ${url}`)); } };
       ws.onclose = () => {
-        const was = this.connected;
-        this.connected = false;
-        clearInterval(this._pingTimer);
-        if (!settled) { settled = true; clearTimeout(timer); reject(new Error("Connection closed")); }
-        else if (was) this._emit("disconnect", {});
+        if (!settled) { settled = true; clearTimeout(timer); this.ws = null; reject(new Error("Connection closed")); }
+        else this._drop();
       };
       ws.onmessage = ev => {
         let msg;
@@ -96,16 +133,21 @@ export class Net {
             this.connected = true;
             settled = true;
             clearTimeout(timer);
-            this._pingTimer = setInterval(() => this.send({ t: "ping", ts: performance.now() }), 2000);
+            this._pingSent = 0;
+            clearInterval(this._pingTimer);
+            this._pingTimer = setInterval(() => this._heartbeat(), PING_EVERY);
             resolve(msg);
             break;
           case "full":
             if (!settled) { settled = true; clearTimeout(timer); reject(new Error("That room is full")); }
             break;
+          case "closed":
+            if (!settled) { settled = true; clearTimeout(timer); reject(Object.assign(new Error(msg.reason || "That room isn't taking players right now"), { closed: true })); }
+            break;
           case "joined": this.players.set(msg.p.id, msg.p); break;
           case "left": this.players.delete(msg.id); break;
           case "host": this.hostId = msg.id; break;
-          case "pong": this.ping = Math.round(performance.now() - msg.ts); break;
+          case "pong": this.ping = Math.round(performance.now() - msg.ts); this._pingSent = 0; break;
         }
         this._emit(msg.t, msg);
       };
@@ -114,10 +156,43 @@ export class Net {
 
   /** to: player id, "host", or omitted for everyone else. */
   send(msg) {
-    if (this.connected && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+    if (this.connected && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
+  /** One ping in flight at a time; no answer within PING_LOST and the connection counts as gone. */
+  _heartbeat() {
+    if (!this.connected) return;
+    const now = performance.now();
+    if (this._pingSent) {
+      if (now - this._pingSent > PING_LOST) this._drop();
+      return;
+    }
+    this._pingSent = now;
+    this.send({ t: "ping", ts: now });
+  }
+
+  /** The connection is gone (closed, timed out or offline): report it once. */
+  _drop() {
+    if (!this.connected) return;
+    this.connected = false;
+    this._detach();
+    this._emit("disconnect", {});
+  }
+
+  /** Forget the current socket without it reporting anything more. */
+  _detach() {
+    clearInterval(this._pingTimer);
+    this._pingTimer = null;
+    const ws = this.ws;
+    if (!ws) return;
+    ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+    try { ws.close(); } catch { /* already closed */ }
+    this.ws = null;
+  }
+
+  /** Leave on purpose: no "disconnect" event. */
   close() {
-    this.ws?.close();
+    this.connected = false;
+    this._detach();
   }
 }

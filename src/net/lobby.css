@@ -361,6 +361,28 @@
 .lb-room-hint { display: block; margin-top: 5px; font-size: 11px; color: var(--bone-dim); }
 #lobby[data-mode="solo"] .lb-room { visibility: hidden; }
 
+/* Copy invite link (co-op / battle royale): level with the room code box, above its hint */
+.lb-copy {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 40px;
+  margin-bottom: 21px;
+  padding: 0 14px;
+  font: 600 13px/1 "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  color: var(--bone);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.lb-copy:hover { color: #fff; border-color: var(--mode); }
+.lb-copy[hidden] { display: none; }
+.lb-copy svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+
 .lb-play {
   position: relative;
   isolation: isolate;
@@ -460,6 +482,7 @@
   .mode-desc { font-size: 11px; line-height: 1.3; }
   .mode-tag { font-size: 12px; }
   .lb-room-hint { display: none; }
+  .lb-copy { margin-bottom: 0; }
   .lb-room .lb-label { display: block; margin-bottom: 2px; }
   .lb-play { min-width: 200px; padding: 6px 26px; }
   .lb-play-main { font-size: 36px; }
@@ -506,7 +529,74 @@
   .mode-tag { grid-area: tag; justify-self: start; margin: 2px 0 0; }
   .lb-launch { flex-direction: column; align-items: stretch; }
   .lb-room { max-width: none; }
+  .lb-copy { justify-content: center; margin-bottom: 0; }
   #lobby[data-mode="solo"] .lb-room { display: none; }
   .lb-play { margin-left: 0; align-items: center; min-width: 0; }
   #lobby-status { text-align: center; }
 }
+
+/* ── In a room (main.js: invite button, reconnect banner) ───────────────── */
+/* Pause screen: copy the room's invite link (bottom left; Credits sits bottom right) */
+.invite-btn {
+  position: absolute;
+  left: max(16px, env(safe-area-inset-left));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  display: none;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border: 1px solid rgba(77, 163, 255, 0.45);
+  background: rgba(8, 12, 20, 0.65);
+  font: 600 15px/1 var(--font-hud, "Teko", sans-serif);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #cfe5ff;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: border-color 0.2s, background 0.2s;
+}
+body.in-room .invite-btn { display: inline-flex; }
+.invite-btn:hover { border-color: #4da3ff; background: rgba(14, 26, 44, 0.8); }
+.invite-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+
+/* Connection lost / reconnecting (top centre, over everything but the lobby) */
+#net-status {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  left: 50%;
+  z-index: 1960;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 10px 8px 14px;
+  transform: translateX(-50%);
+  font: 600 14px/1.3 "Segoe UI", system-ui, sans-serif;
+  color: #ffe0d8;
+  background: rgba(30, 8, 6, 0.9);
+  border: 1px solid rgba(255, 106, 90, 0.55);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+#net-status.on { display: flex; }
+#net-status .ns-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ff6a5a;
+  animation: ns-blink 1s ease-in-out infinite;
+}
+#net-status .ns-leave {
+  flex: none;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  cursor: pointer;
+}
+#net-status .ns-leave:hover { background: rgba(255, 255, 255, 0.16); }
+@keyframes ns-blink { 50% { opacity: 0.25; } }

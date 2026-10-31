@@ -385,8 +385,12 @@
             <label class="lb-room">
               <span class="lb-label">Room code</span>
               <input id="lobby-room" maxlength="24" placeholder="horde" autocomplete="off" spellcheck="false">
-              <span class="lb-room-hint">Friends type the same code on this page to join you</span>
+              <span class="lb-room-hint">Friends type the same code on this page, or open your invite link</span>
             </label>
+            <button id="lobby-copy" class="lb-copy" type="button" title="Copy a link that joins this room">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg>
+              <span>Copy invite link</span>
+            </button>
             <button id="lobby-play" class="lb-play">
               <span class="lb-play-main">Play</span>
               <span class="lb-play-sub" id="lobby-play-sub">Solo</span>
