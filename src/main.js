@@ -1197,7 +1197,7 @@ function setKey(code, pressed, repeat) {
       case "KeyQ": cycleThrowable(); break;
       case "KeyH": useHeal(); break;
       case "KeyB": if (nearShop) setShopOpen(!shopUI.open); break;
-      case "KeyF": if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); break;
+      case "KeyF": if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); else if (nearCseDoor) useCseDoor(); break;
       case "KeyC": toggleStance("crouch"); break;
       case "KeyZ": toggleStance("prone"); break;
       case "KeyL": useLightSwitch(); break;
@@ -1463,7 +1463,8 @@ function updateCharacterMovement(delta) {
     characterBody.velocity.y = (floatY - characterBody.position.y) * 9;
   }
   // Guide the player through doorways instead of snagging on the jamb
-  if (houses?.doorAssist(characterBody.position.x, characterBody.position.z, moveVelocity.x, moveVelocity.z, _doorPull)) {
+  if (houses?.doorAssist(characterBody.position.x, characterBody.position.z, moveVelocity.x, moveVelocity.z, _doorPull)
+    || cseBuilding?.doorAssist(characterBody.position.x, characterBody.position.z, characterBody.position.y - FEET_OFFSET, moveVelocity.x, moveVelocity.z, _doorPull)) {
     characterBody.velocity.x += _doorPull.x;
     characterBody.velocity.z += _doorPull.z;
   }
@@ -2638,6 +2639,11 @@ function updatePickups(delta) {
       promptRows[n++] = "F";
       promptRows[n++] = gateHere.label;
     }
+    nearCseDoor = !nearDoor && !gateHere && !drive.on ? cseBuilding?.doorAt(characterBody.position.x, characterBody.position.z, characterBody.position.y - FEET_OFFSET) ?? null : null;
+    if (nearCseDoor) {
+      promptRows[n++] = "F";
+      promptRows[n++] = nearCseDoor.open ? "Close door" : "Open door";
+    }
     if (nearSwitch) {
       promptRows[n++] = "L";
       promptRows[n++] = nearSwitch.lightOn ? "Turn lights off" : "Turn lights on";
@@ -2679,7 +2685,7 @@ function updatePickups(delta) {
       }
     }
   } else {
-    nearDoor = nearSwitch = nearShop = null;
+    nearDoor = nearSwitch = nearShop = nearCseDoor = null;
   }
   // Walked away (or died): the shop closes
   if (shopUI.open && !nearShop) setShopOpen(false);
@@ -2692,6 +2698,16 @@ const promptRows = [];
 let nearDoor = null;
 let nearGatePart = null;   // "gate" | "booth": the college gate's lanes or its guard booth door
 let nearSwitch = null;
+let nearCseDoor = null;    // world/CseBuilding.js: a staff cabin or lab door
+
+function useCseDoor() {
+  const d = nearCseDoor, open = !d.open;
+  cseBuilding.setDoor(d.index, open);
+  playerAnim.clip("interact", 0.8);
+  sfx.doorBang({ x: d.x, y: d.y + 1.2, z: d.z });
+  makeNoise(d.x, d.z, open ? 9 : 12, "door");
+  net.send({ t: "csedoor", i: d.index, o: open });
+}
 
 function useDoor(open) {
   if (nearDoor && houses.setDoor(nearDoor, open)) {
@@ -4600,7 +4616,7 @@ function playerJoined(p) {
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
     if (net.isHost) {
-      net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state } });
+      net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state }, cse: cseBuilding?.openDoors() });
       brAdmitLate(p);
     }
     return;
@@ -4613,6 +4629,7 @@ function playerJoined(p) {
       lights: houses.houses.map(h => h.floors.map(f => f.lightOn)),
       veh: vehiclesState(),
       gate: collegeGate && { ...collegeGate.state },
+      cse: cseBuilding?.openDoors(),
     });
   }
 }
@@ -4864,12 +4881,14 @@ net.on("throw", msg => {
 });
 net.on("door", msg => { const h = houses.houses[msg.h]; if (h) houses.setDoor(h, msg.o); });
 net.on("gate", msg => collegeGate?.setState(msg.p, msg.o));
+net.on("csedoor", msg => cseBuilding?.setDoor(msg.i, msg.o));
 net.on("light", msg => {
   const f = houses.houses[msg.h]?.floors[msg.f ?? 0];
   if (f && f.lightOn !== msg.on) houses.toggleLight(f);
 });
 net.on("world", msg => {
   if (msg.gate) for (const part of ["gate", "booth"]) collegeGate?.setState(part, msg.gate[part], true);
+  if (msg.cse) for (const i of msg.cse) cseBuilding?.setDoor(i, true, true);
   msg.doors.forEach((o, i) => { if (houses.houses[i]) houses.setDoor(houses.houses[i], o); });
   // Per house: [ground, upstairs] (a plain boolean from an older client: the ground floor)
   msg.lights.forEach((ons, i) => {
@@ -5757,6 +5776,11 @@ const bots = new Bots({
   },
   spill: (items, x, y, z) => spillLoot(items, x, y, z),
   openDoorAt(x, z, y) {
+    const cse = cseBuilding?.doorAt(x, z, y);
+    if (cse && !cse.open) {
+      cseBuilding.setDoor(cse.index, true);
+      net.send({ t: "csedoor", i: cse.index, o: true });
+    }
     const door = houses?.interaction(x, z, y)?.door;
     if (!door || door.doorOpen || !houses.setDoor(door, true)) return;
     net.send({ t: "door", h: houses.houses.indexOf(door), o: true });
@@ -6793,6 +6817,7 @@ function animate() {
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
   collegeGate?.update(delta);
   cseBuilding?.update(camera.position.x, camera.position.z);
+  cseBuilding?.updateDoors(delta);
   houses?.cull(camera);
   checkOutfitClash(realDelta);
   if (isBR()) {

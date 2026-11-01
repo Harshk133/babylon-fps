@@ -11,9 +11,11 @@
 //
 // After its first load the game posts the URLs it downloaded ({ type:
 // "warm", urls }), and they're stored right away (from the HTTP cache).
-// Bump VERSION to drop everything cached.
+// Bump VERSION to drop everything cached. Model URLs aren't hashed, so refreshes
+// always ask the server (cache: "no-cache", a cheap 304 when unchanged): a plain
+// fetch here could be answered by the browser's HTTP cache with the old file.
 
-const VERSION = "v2";
+const VERSION = "v3";
 const CACHE = `babylon-fps-${VERSION}`;
 const ASSET_DIRS = /^\/(models|trees|texture|sounds|loading)\//;
 
@@ -40,7 +42,7 @@ async function cacheFirst(req) {
 async function staleWhileRevalidate(req, event) {
   const cache = await caches.open(CACHE);
   const hit = await cache.match(req);
-  const refresh = fetch(req).then(res => {
+  const refresh = fetch(req, { cache: "no-cache" }).then(res => {
     if (storable(res)) return cache.put(req, res.clone()).then(() => res);
     return res;
   });
@@ -86,7 +88,7 @@ self.addEventListener("message", event => {
         if (url.origin !== self.location.origin) continue;
         if (!url.pathname.startsWith("/assets/") && !ASSET_DIRS.test(url.pathname)) continue;
         if (await cache.match(url.href)) continue;
-        const res = await fetch(url.href);
+        const res = await fetch(url.href, { cache: "no-cache" });
         if (storable(res)) await cache.put(url.href, res);
       } catch { /* skipped; it'll be cached when next requested */ }
     }

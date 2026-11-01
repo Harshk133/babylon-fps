@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { GROUP_WORLD, GROUP_ZOMBIE } from "../physicsGroups.js";
-import { mergeStaticMeshes } from "./MergeStatic.js";
+import { mergeStaticMeshes, toFloatGeometry } from "./MergeStatic.js";
 
 // The CSE building (public/models/cse_building.glb, optimized copy loaded
 // first): a three-storey classroom block round a covered atrium with a
@@ -24,7 +24,15 @@ import { mergeStaticMeshes } from "./MergeStatic.js";
 //   INTERIOR_RANGE.
 // - furniture with few copies is baked into those merged meshes (one draw call
 //   per material, not per part); only the desks and fans stay instanced.
+// - plain-coloured opaque materials become vertex colours on a few shared ones
+//   (flattenColours), which is most of the model's 74 materials.
 // - only the big structure casts shadows.
+//
+// Doors: 20 staff cabins and 2 labs on the upper floors, each a node DOOR_<id>
+// at its hinge, closed as exported, with openAngle (the signed swing) in its
+// extras. All leaves are drawn by a few
+// InstancedMeshes, written only while a door moves; each has a kinematic box like
+// the house doors. F works the nearest (main.js: useCseDoor, net csedoor, world.cse).
 //
 // Colliders come from the model's collision proxy (COL_Structure and the
 // instanced INST_COL_DeskBox):
@@ -48,7 +56,11 @@ const LIFT = 0.03;                 // m: the paving this far over the ground
 const DETAIL_RANGE = 120;          // m from the walls: window frames, curtains, doors, stairs, railings drawn within this
 const INTERIOR_RANGE = 45;         // m from the walls: furniture, lights, boards, the court drawn within this
 const DESK_GAP = 0.45;             // m: desks closer than this in a line share one collider
-const BAKE_MAX = 30;               // furniture with this many copies or fewer is merged, not instanced
+const BAKE_MAX = 40;               // furniture with this many copies or fewer is merged, not instanced
+const DOOR_TIME = 0.6;             // s for a full swing
+const DOOR_REACH = 1.7;            // m from the doorway to offer the door
+const DOOR_CLEAR = 0.55;           // m each side of a doorway kept clear of colliders (only the collider: see clearDoorways)
+const DOOR_FLOOR = 1.6;            // m of height: the door has to be on your floor
 const GROUND_PART = 1.2;           // m over the floor: a collider this low blocks the way (minimap, pathing, vehicles)
 const LOW_PART = 0.5;              // m over the floor: colliders under this let monsters through (plinth, steps, dais)
 const CELL = 12;                   // m: colliders are grouped into one body per cell
@@ -56,7 +68,7 @@ const RAMP_T = 0.2;                // m: ramp thickness
 const LOOT_EVERY = 15;             // a loot spot on every this many desks
 
 const OUTDOOR = /^INST_(PeachColumn|PorchColumn|Tree|Bush)/;
-const INTERIOR = /^(INST_|Classrooms_|Central_Atrium_|Toilets_|Props_|Lighting_)/;
+const INTERIOR = /^(INST_(?!Motorbike)|Classrooms_|Computer_Labs_|Staff_Rooms_|Central_Atrium_|Toilets_|Props_|Lighting_)/;
 const DETAIL = /(_frame|_alu|_curtain|_jamb|_sign|_door|_iron|_light|_paint|^INST_Motorbike|^Railings_|^Staircases_|^Corridors_)/;
 const SHADOW = /(_wall|_beige|_floor|roof_slab|_column|_clad|_acp|_fascia|_granite|PeachColumn|INST_Tree)/;
 const DIRT = /_dirt$/;             // the model's ground slab (see the top of this file)
@@ -295,6 +307,102 @@ function bakeInstances(im, group) {
   group.remove(im);
 }
 
+/**
+ * Plain-coloured opaque meshes in a group get vertex colours and share a material per
+ * roughness / metalness / side, so they merge into a handful of draw calls.
+ * Shadow casters keep theirs (a merged mesh casts as a whole).
+ */
+function flattenColours(group, shared) {
+  group.traverse(o => {
+    const m = o.material;
+    if (!o.isMesh || o.isInstancedMesh || o.castShadow || !m?.isMeshStandardMaterial) return;
+    if (m.transparent || m.alphaTest > 0 || m.polygonOffset || m.map || m.normalMap || m.roughnessMap || m.metalnessMap || m.aoMap || m.emissiveMap) return;
+    if (m.emissive.r + m.emissive.g + m.emissive.b > 0) return;
+    const rough = Math.round(m.roughness * 5) / 5, metal = Math.round(m.metalness * 2) / 2;
+    const key = `${rough}|${metal}|${m.side}`;
+    if (!shared.has(key)) shared.set(key, new THREE.MeshStandardMaterial({ name: `Flat_${key}`, vertexColors: true, roughness: rough, metalness: metal, side: m.side }));
+    const g = toFloatGeometry(o.geometry), n = g.attributes.position.count;
+    const had = g.attributes.color, c = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      c[i * 3] = m.color.r * (had ? had.getX(i) : 1);
+      c[i * 3 + 1] = m.color.g * (had ? had.getY(i) : 1);
+      c[i * 3 + 2] = m.color.b * (had ? had.getZ(i) : 1);
+    }
+    g.setAttribute("color", new THREE.BufferAttribute(c, 3));
+    g.deleteAttribute("uv");
+    o.geometry = g;
+    o.material = shared.get(key);
+  });
+}
+
+const easeDoor = t => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+
+/**
+ * Takes the door nodes out of the model: [{ id, hinge, closed, swing, c, h, leaves }],
+ * hinge in the model's frame, the collider's centre c and half size h and the leaf
+ * geometries in the door's own frame (closed or open, the door turns about its origin).
+ * The collider is the leaf's own box: the exported COL_DOOR_ children sit at the model's
+ * origin (their parent's transform is applied twice).
+ */
+function takeDoors(model) {
+  const nodes = [], doors = [];
+  model.traverse(o => { if (/^DOOR_/.test(o.name)) nodes.push(o); });
+  const inv = new THREE.Matrix4(), rel = new THREE.Matrix4();
+  for (const node of nodes) {
+    inv.copy(node.matrixWorld).invert();
+    const leaves = [], col = new THREE.Box3();
+    node.traverse(o => {
+      if (!o.isMesh) return;
+      let isCol = o.material?.name === "Collision_Proxy";
+      for (let n = o; n && n !== node && !isCol; n = n.parent) isCol = /^COL_/.test(n.name);
+      if (isCol) return;
+      rel.multiplyMatrices(inv, o.matrixWorld);
+      const geometry = toFloatGeometry(o.geometry).applyMatrix4(rel);
+      geometry.computeBoundingBox();
+      col.union(geometry.boundingBox);
+      leaves.push({ geometry, material: o.material });
+    });
+    const q = new THREE.Quaternion().setFromRotationMatrix(node.matrixWorld);
+    doors.push({
+      id: node.userData.doorId ?? node.name.slice(5),
+      hinge: new THREE.Vector3().setFromMatrixPosition(node.matrixWorld),
+      closed: 2 * Math.atan2(q.y, q.w),
+      swing: node.userData.openAngle ?? Math.PI / 2,
+      c: col.getCenter(new THREE.Vector3()),
+      h: col.getSize(new THREE.Vector3()).multiplyScalar(0.5),
+      leaves,
+      open: false, t: 0, slots: [], body: null, x: 0, y: 0, z: 0, ax: 0, az: 0, index: doors.length,
+    });
+  }
+  for (const node of nodes) node.removeFromParent();
+  return doors;
+}
+
+/**
+ * Two cabins have a partition ending 35 cm in front of the door, off-centre: its end and
+ * the jamb leave 0.64 m, less than the player's 0.7 m. A collider standing that close
+ * in front of a doorway is cut back to DOOR_CLEAR (the wall is still drawn: a shoulder
+ * clips it by a few cm). The doorway's own walls, beside the opening, aren't touched.
+ */
+function clearDoorways(doors, shapes) {
+  const cut = new Set();
+  for (const d of doors) {
+    const ax = Math.cos(d.closed), az = -Math.sin(d.closed);
+    const along = Math.abs(az) > Math.abs(ax) ? "z" : "x", depth = along === "z" ? "x" : "z";
+    const mid = { x: d.hinge.x + ax * d.c.x, z: d.hinge.z + az * d.c.x };
+    const half = d.h.x - 0.03;
+    for (const sh of shapes) {
+      const b = sh.box;
+      if (!b || b.max.y < d.hinge.y + 0.3 || b.min.y > d.hinge.y + 1.9) continue;
+      if (b.min[along] > mid[along] + half || b.max[along] < mid[along] - half) continue;
+      if (b.min[depth] > mid[depth] + 0.1 && b.min[depth] < mid[depth] + DOOR_CLEAR) b.min[depth] = mid[depth] + DOOR_CLEAR;
+      if (b.max[depth] < mid[depth] - 0.1 && b.max[depth] > mid[depth] - DOOR_CLEAR) b.max[depth] = mid[depth] - DOOR_CLEAR;
+      if (b.min[depth] >= b.max[depth]) cut.add(sh);
+    }
+  }
+  return cut.size ? shapes.filter(sh => !cut.has(sh)) : shapes;
+}
+
 /** The glTF node name a mesh came from (multi-material nodes load as a group of unnamed meshes). */
 const nodeName = o => (o.parent?.parent ? o.parent.name : o.name);
 
@@ -313,9 +421,12 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
   const model = gltf.scene;
   model.updateMatrixWorld(true);
   const rootInv = new THREE.Matrix4().copy(model.matrixWorld).invert();
+  const doors = takeDoors(model);
+  model.updateMatrixWorld(true);
 
   // ── Colliders, in the model's frame: { box } or { c, h, q } (an oriented box)
-  const shapes = [], treads = [];
+  let shapes = [];
+  const treads = [];
   let desks = [];
   const collision = [], dirt = [];
   let bench = null;
@@ -346,6 +457,7 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
     }
   }
   stairRamps(treads, shapes);
+  shapes = clearDoorways(doors, shapes);
   desks = mergeBoxes(desks);
 
   // Model frame → world: the building's centre on (def.x, def.z), turned by rot
@@ -437,15 +549,53 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
       m.polygonOffsetFactor = paint ? -4 : -2;
       m.polygonOffsetUnits = paint ? -8 : -4;
     }
-    const group = DETAIL.test(name) ? detail : OUTDOOR.test(name) ? shell : INTERIOR.test(name) ? interior : shell;
+    const group = OUTDOOR.test(name) ? shell : INTERIOR.test(name) ? interior : DETAIL.test(name) ? detail : shell;
     o.castShadow = group === shell && !m.transparent && SHADOW.test(name);
     o.receiveShadow = true;
     group.attach(o);
     if (o.isInstancedMesh && o.count <= BAKE_MAX) bakeInstances(o, group);
   }
-  mergeStaticMeshes(shell);
-  mergeStaticMeshes(detail);
-  mergeStaticMeshes(interior);
+  const flats = new Map();
+  for (const g of [shell, detail, interior]) {
+    flattenColours(g, flats);
+    mergeStaticMeshes(g);
+  }
+
+  // The door leaves: one InstancedMesh per material and shape, the matrices written as doors move
+  const buckets = new Map();
+  for (const d of doors) {
+    for (const leaf of d.leaves) {
+      leaf.geometry.computeBoundingBox();
+      const b = leaf.geometry.boundingBox;
+      const key = `${leaf.material.uuid}|${leaf.geometry.attributes.position.count}|${b.min.toArray().concat(b.max.toArray()).map(v => v.toFixed(2)).join()}`;
+      if (!buckets.has(key)) buckets.set(key, { ...leaf, list: [] });
+      buckets.get(key).list.push(d);
+    }
+    d.leaves = null;
+  }
+  const doorMeshes = [];
+  const _mtx = new THREE.Matrix4(), _dq = new THREE.Quaternion(), _up = new THREE.Vector3(0, 1, 0), _one = new THREE.Vector3(1, 1, 1);
+  const writeDoor = d => {
+    _mtx.compose(d.hinge, _dq.setFromAxisAngle(_up, d.closed + d.swing * easeDoor(d.t)), _one);
+    for (let i = 0; i < d.slots.length; i += 2) {
+      d.slots[i].setMatrixAt(d.slots[i + 1], _mtx);
+      d.slots[i].instanceMatrix.needsUpdate = true;
+    }
+  };
+  for (const { geometry, material, list } of buckets.values()) {
+    if (material.transparent) {
+      material.depthWrite = false;
+      material.forceSinglePass = true;
+    }
+    const im = new THREE.InstancedMesh(geometry, material, list.length);
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    im.receiveShadow = true;
+    list.forEach((d, i) => d.slots.push(im, i));
+    doorMeshes.push(im);
+    interior.add(im);
+  }
+  for (const d of doors) writeDoor(d);
+  for (const im of doorMeshes) im.computeBoundingSphere();
 
   const root = new THREE.Group();
   root.position.set(def.x, baseY, def.z);
@@ -458,6 +608,27 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
   root.updateMatrixWorld(true);
   root.traverse(o => { o.matrixAutoUpdate = false; });
   chunks?.add(root, def.x, def.z, def.r);
+
+  // Each door's kinematic box, and its doorway in the world
+  const _bq = new CANNON.Quaternion();
+  const poseDoor = d => {
+    d.body.quaternion.copy(_bq.setFromEuler(0, rot + d.closed + d.swing * easeDoor(d.t), 0));
+    d.body.aabbNeedsUpdate = true;
+  };
+  for (const d of doors) {
+    const yaw = rot + d.closed, s = Math.sin(yaw), cc = Math.cos(yaw);
+    const w = toWorld(d.hinge.x, d.hinge.z);
+    d.body = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, material, collisionFilterGroup: GROUP_WORLD });
+    d.body.addShape(new CANNON.Box(new CANNON.Vec3(Math.max(d.h.x, 0.04), Math.max(d.h.y, 0.04), Math.max(d.h.z, 0.04))), new CANNON.Vec3(d.c.x, d.c.y, d.c.z));
+    d.body.position.set(w.x, baseY + d.hinge.y, w.z);
+    poseDoor(d);
+    world.addBody(d.body);
+    d.x = w.x + d.c.x * cc + d.c.z * s;
+    d.z = w.z - d.c.x * s + d.c.z * cc;
+    d.y = baseY + d.hinge.y;
+    d.ax = cc; d.az = -s;     // along the doorway
+  }
+  const moving = [];
 
   // The building's footprint (model frame): its ground-floor slabs (main block, rear wing, stair tower)
   const slabs = [], foot = new THREE.Box3();
@@ -488,6 +659,61 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
     inside,
     /** Where a monster stands: on the ground floor inside the building, else on the ground. */
     surfaceAt: (x, z, ground) => (inside(x, z) ? Math.max(ground, baseY) : ground),
+    doors,
+    /** The nearest door you can reach at (x, z) with your feet at feetY, or null. */
+    doorAt(x, z, feetY) {
+      if (Math.abs(x - def.x) > def.r || Math.abs(z - def.z) > def.r) return null;
+      let best = null, bd = DOOR_REACH;
+      for (const d of doors) {
+        if (Math.abs(d.y - feetY) > DOOR_FLOOR) continue;
+        const dist = Math.hypot(d.x - x, d.z - z);
+        if (dist < bd) { bd = dist; best = d; }
+      }
+      return best;
+    },
+    /** Swing door i open or shut (instant: a late join). */
+    setDoor(i, open, instant = false) {
+      const d = doors[i];
+      if (!d || d.open === open) return;
+      d.open = open;
+      if (instant) {
+        d.t = open ? 1 : 0;
+        writeDoor(d);
+        poseDoor(d);
+      } else if (!moving.includes(d)) {
+        moving.push(d);
+      }
+    },
+    /** Indices of the open doors. */
+    openDoors: () => doors.filter(d => d.open).map(d => d.index),
+    /**
+     * The doorways are only just wider than you: walking through an open one, a nudge
+     * (written to out) toward its middle, so you don't catch on the frame.
+     */
+    doorAssist(x, z, feetY, vx, vz, out) {
+      if (Math.abs(x - def.x) > def.r || Math.abs(z - def.z) > def.r || (vx === 0 && vz === 0)) return false;
+      for (const d of doors) {
+        if (d.t < 0.5 || Math.abs(d.y - feetY) > DOOR_FLOOR) continue;
+        const dx = x - d.x, dz = z - d.z;
+        const along = dx * d.ax + dz * d.az, depth = -dx * d.az + dz * d.ax;
+        if (Math.abs(along) > 0.8 || Math.abs(depth) > 0.8) continue;
+        const pull = THREE.MathUtils.clamp(-along * 6, -1.6, 1.6);
+        out.x = d.ax * pull;
+        out.z = d.az * pull;
+        return true;
+      }
+      return false;
+    },
+    /** Each frame: advances the swinging doors. */
+    updateDoors(delta) {
+      for (let i = moving.length - 1; i >= 0; i--) {
+        const d = moving[i], to = d.open ? 1 : 0;
+        d.t = to > d.t ? Math.min(to, d.t + delta / DOOR_TIME) : Math.max(to, d.t - delta / DOOR_TIME);
+        writeDoor(d);
+        poseDoor(d);
+        if (d.t === to) moving.splice(i, 1);
+      }
+    },
     /** Each frame with the camera position: the detail and the interior are only drawn up close. */
     update(x, z) {
       const l = toLocal(x, z);
