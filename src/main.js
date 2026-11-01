@@ -49,7 +49,7 @@ import { Grass, GRASS_FLATTENERS } from "./world/Grass.js";
 import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves, adoptCavesData } from "./world/Caves.js";
 import { scatterRocks } from "./world/Rocks.js";
 import { COLLEGE_GATE, placeCollegeGate } from "./world/CollegeGate.js";
-import { CSE_BUILDING, placeCseBuilding } from "./world/CseBuilding.js";
+import { CSE_BUILDING, placeCseBuilding, cseTint } from "./world/CseBuilding.js";
 import { loadIndiaModels } from "./world/IndiaAssets.js";
 import { propSpots, placeIndiaProps } from "./world/IndiaProps.js";
 import { mergeStaticMeshes } from "./world/MergeStatic.js";
@@ -4100,7 +4100,7 @@ async function loadWorld() {
     // the channel at the bridges); the ground sinks to the cave floors under the massifs
     modify: (x, z, h) => caveTerrain(x, z, roads.modify(x, z, river.modify(x, z, h))),
     // Field soil, river mud, road shoulders, then sand and wet sand down the beach
-    tint: (x, z, c) => { farmland.tint(x, z, c); plots.tint(x, z, c); city.tint(x, z, c); river.tint(x, z, c); roads.tint(x, z, c); beachTint(x, z, c); },
+    tint: (x, z, c) => { farmland.tint(x, z, c); plots.tint(x, z, c); city.tint(x, z, c); if (cseGltf) cseTint(x, z, c); river.tint(x, z, c); roads.tint(x, z, c); beachTint(x, z, c); },
     // No grass on roads, through floors, props, parked vehicles, rock, water or sand; trimmed in yards; crops in the fields
     grassMask: (x, z) => {
       if (houses.blocks(x, z, 1.5) || nearParked(x, z, 0.3)) return 0;

@@ -13,7 +13,7 @@
 // "warm", urls }), and they're stored right away (from the HTTP cache).
 // Bump VERSION to drop everything cached.
 
-const VERSION = "v1";
+const VERSION = "v2";
 const CACHE = `babylon-fps-${VERSION}`;
 const ASSET_DIRS = /^\/(models|trees|texture|sounds|loading)\//;
 

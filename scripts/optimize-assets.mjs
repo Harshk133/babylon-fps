@@ -39,9 +39,10 @@ const MODELS = [
   // The college gate (animated leaves and booth door, its own collision mesh): compress only
   { src: "public/models/msbecl_gate_final.glb",   ratio: 1,    error: 0,     tex: 1024 },
   // The CSE building: low-poly, instanced furniture (EXT_mesh_gpu_instancing) and its own
-  // collision proxy (COL_*): compress only. (cse_building_draco.glb is the same model with
-  // Draco geometry: the game decodes meshopt, so this one is built from the plain file)
-  { src: "public/models/cse_building.glb",        ratio: 1,    error: 0,     tex: 1024 },
+  // collision proxy (COL_*): compress only, minus its ground slab (the game tints the terrain
+  // instead). (cse_building_draco.glb is the same model with Draco geometry: the game decodes
+  // meshopt, so this one is built from the plain file)
+  { src: "public/models/cse_building.glb",        ratio: 1,    error: 0,     tex: 1024, dropNodes: ["Exterior_Structure_dirt"] },
   // Motorbikes (Poly Pizza, CC BY 3.0: credits in src/vehicles/Vehicle.js): low-poly, untextured
   { src: "public/models/bikes/sv650.glb",              ratio: 1, error: 0, tex: 256 },
   { src: "public/models/bikes/military_motorbike.glb", ratio: 1, error: 0, tex: 256 },
@@ -211,6 +212,9 @@ for (const m of MODELS) {
   const ratio = m.tris ? Math.min(1, (m.tris * 3) / before) : m.ratio;
   if (m.keepNodes) {
     for (const node of doc.getRoot().listNodes()) if (node.getMesh() && !m.keepNodes.includes(node.getName())) node.dispose();
+  }
+  if (m.dropNodes) {
+    for (const node of doc.getRoot().listNodes()) if (m.dropNodes.includes(node.getName())) node.dispose();
   }
   if (m.keepAnimations) {
     for (const anim of doc.getRoot().listAnimations()) {

@@ -6,7 +6,7 @@ import { toFloatGeometry } from "./MergeStatic.js";
 // Municipal water towers (public/models/india/water_tower.opt.glb, made for
 // the game; sources in public/models/indian things/WaterTower/): a concrete
 // tank on eight legs, 15 m up, with a spiral stair round a pole on one side and
-// a blank board (cream, maroon border) on the tank. You can walk up the stair to the
+// a board reading शहर महानगरपालिका on the tank. You can walk up the stair to the
 // railed roof of the tank, a sniper's perch with loot on it. Monsters stay on
 // the ground (they're pinned to it), so up there only the ranged ones reach you.
 //

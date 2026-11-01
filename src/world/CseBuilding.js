@@ -5,19 +5,25 @@ import { mergeStaticMeshes } from "./MergeStatic.js";
 
 // The CSE building (public/models/cse_building.glb, optimized copy loaded
 // first): a three-storey classroom block round a covered atrium with a
-// badminton court, on its own paved campus west of the North Road, north of
+// badminton court, on its own campus west of the North Road, north of
 // Ravencross. The model is in metres with its main entrance on +Z, which is
-// turned toward the road: the building spans local x −6..34, z −30..0, floors
-// at 0 / 3.6 / 7.2, a skylit roof at 10.8; the paving (x −16..46, z −46..16)
-// sits 0.45 below the ground floor, with steps up at the entrances.
+// turned toward the road: the building spans local x 0..31, z −52.5..0 (a
+// stair tower and porch out to x 33.9), floors at 0 / 3.6 / 7.2, a skylit roof
+// at 10.8. The paving (x −2.5..36.5, z −55..2.5) and an L of asphalt road with
+// parking bays (out to x 46, z −62..11) sit 0.45 below the ground floor, with
+// steps up at the entrances. The model's dirt slab (x −22..58, z −75..22) isn't
+// used: the terrain under the campus is tinted to earth (cseTint) and blends
+// into the country, where an 80 × 97 m rectangle would need a pad of its own.
 //
-// Drawing (the exported file is ~90 meshes plus instanced furniture):
+// Drawing (the exported file is ~115 meshes, 22 of them instanced furniture):
 // - every static part is merged into one mesh per material, in three groups
-//   drawn by distance: the shell (walls, floors, roof, glass, paving, trees)
-//   always, the detail (window frames, curtains, doors, stairs, railings)
-//   within DETAIL_RANGE, the interior (desks, fans, lights, boards, plants,
-//   the court) within INTERIOR_RANGE. The furniture stays instanced (one draw
-//   call per part for all 455 desks).
+//   drawn by distance from the building: the shell (walls, floors, roof, glass,
+//   paving, trees) always, the detail (window frames, curtains, doors, stairs,
+//   railings, road paint, parked bikes) within DETAIL_RANGE, the interior
+//   (desks, fans, lights, boards, plants, toilets, the court) within
+//   INTERIOR_RANGE.
+// - furniture with few copies is baked into those merged meshes (one draw call
+//   per material, not per part); only the desks and fans stay instanced.
 // - only the big structure casts shadows.
 //
 // Colliders come from the model's collision proxy (COL_Structure and the
@@ -28,27 +34,39 @@ import { mergeStaticMeshes } from "./MergeStatic.js";
 //   grown greedily. A plain 12-triangle box is used as it is.
 // - every stair also gets a ramp per flight along its nosings (found from the
 //   treads), so the controller walks it like the house stairs.
-// - desks are merged into whole rows. Desks, the paving, the plinth and the
+// - desks are merged into whole rows, placed by the visible desks' instances
+//   (the proxy's own instances are all exported at the origin). Desks, the plinth and the
 //   entrance steps are for players, bullets and grenades only: monsters walk
 //   through them and are held on the ground floor by surfaceAt().
 
 /** Where it stands: centre of the building (m), facing the named road; r: the campus radius. */
-export const CSE_BUILDING = { name: "CSE Building", road: "North Road", x: -50, z: 216, r: 45 };
+export const CSE_BUILDING = { name: "CSE Building", road: "North Road", x: -50, z: 216, r: 48 };
 
-const CENTRE = { x: 14, z: -15 };  // the building's centre in the model
+const CENTRE = { x: 18, z: -25.5 };  // the campus's centre in the model (paving + roads)
 const PAVING_TOP = -0.44;          // model y of the paving's top: it sits on the flattened ground
 const LIFT = 0.03;                 // m: the paving this far over the ground
-const DETAIL_RANGE = 130;          // m: window frames, curtains, doors, stairs, railings drawn within this
-const INTERIOR_RANGE = 70;         // m: furniture, lights, boards, the court drawn within this
+const DETAIL_RANGE = 120;          // m from the walls: window frames, curtains, doors, stairs, railings drawn within this
+const INTERIOR_RANGE = 45;         // m from the walls: furniture, lights, boards, the court drawn within this
+const DESK_GAP = 0.45;             // m: desks closer than this in a line share one collider
+const BAKE_MAX = 30;               // furniture with this many copies or fewer is merged, not instanced
 const GROUND_PART = 1.2;           // m over the floor: a collider this low blocks the way (minimap, pathing, vehicles)
 const LOW_PART = 0.5;              // m over the floor: colliders under this let monsters through (plinth, steps, dais)
 const CELL = 12;                   // m: colliders are grouped into one body per cell
 const RAMP_T = 0.2;                // m: ramp thickness
 const LOOT_EVERY = 15;             // a loot spot on every this many desks
 
-const INTERIOR = /^(INST_(?!PeachColumn|Tree|Bush)|Classrooms_|Central_Atrium_|Props_|Lighting_)/;
-const DETAIL = /(_frame|_alu|_curtain|_jamb|_sign|_door|_iron|_light|^Railings_|^Staircases_|^Corridors_)/;
-const SHADOW = /(_wall|_beige|_floor|roof_slab|_column|_clad|_fascia|_granite|PeachColumn|INST_Tree)/;
+const OUTDOOR = /^INST_(PeachColumn|PorchColumn|Tree|Bush)/;
+const INTERIOR = /^(INST_|Classrooms_|Central_Atrium_|Toilets_|Props_|Lighting_)/;
+const DETAIL = /(_frame|_alu|_curtain|_jamb|_sign|_door|_iron|_light|_paint|^INST_Motorbike|^Railings_|^Staircases_|^Corridors_)/;
+const SHADOW = /(_wall|_beige|_floor|roof_slab|_column|_clad|_acp|_fascia|_granite|PeachColumn|INST_Tree)/;
+const DIRT = /_dirt$/;             // the model's ground slab (see the top of this file)
+
+const _soil = new THREE.Color(0x8a6f4d);
+/** Terrain vertex tint: bare earth over the campus, fading out at its edge. */
+export function cseTint(x, z, c) {
+  const d = Math.hypot(x - CSE_BUILDING.x, z - CSE_BUILDING.z), r = CSE_BUILDING.r;
+  if (d < r + 8) c.lerp(_soil, 0.8 * (1 - THREE.MathUtils.smoothstep(d, r - 3, r + 8)));
+}
 
 /** A mesh's triangles in the root's frame, split into connected pieces: { pts, list: [[a, b, c], …] per piece }. */
 function pieces(mesh, rootInv) {
@@ -226,7 +244,7 @@ function stairRamps(treads, out) {
   }
 }
 
-/** Merges boxes that sit side by side with the same height and width into one (the desk rows). */
+/** Merges boxes in line with the same height and width, across gaps nobody fits through (the desk columns: the aisles stay). */
 function mergeBoxes(boxes) {
   const eq = (a, b) => Math.abs(a - b) < 0.02;
   let merged = true;
@@ -236,8 +254,8 @@ function mergeBoxes(boxes) {
       for (let k = i + 1; k < boxes.length; k++) {
         const a = boxes[i], b = boxes[k];
         if (!eq(a.min.y, b.min.y) || !eq(a.max.y, b.max.y)) continue;
-        const sameX = eq(a.min.x, b.min.x) && eq(a.max.x, b.max.x) && a.min.z <= b.max.z + 0.05 && b.min.z <= a.max.z + 0.05;
-        const sameZ = eq(a.min.z, b.min.z) && eq(a.max.z, b.max.z) && a.min.x <= b.max.x + 0.05 && b.min.x <= a.max.x + 0.05;
+        const sameX = eq(a.min.x, b.min.x) && eq(a.max.x, b.max.x) && a.min.z <= b.max.z + DESK_GAP && b.min.z <= a.max.z + DESK_GAP;
+        const sameZ = eq(a.min.z, b.min.z) && eq(a.max.z, b.max.z) && a.min.x <= b.max.x + DESK_GAP && b.min.x <= a.max.x + DESK_GAP;
         if (!sameX && !sameZ) continue;
         a.union(b);
         boxes.splice(k, 1);
@@ -249,19 +267,36 @@ function mergeBoxes(boxes) {
   return boxes;
 }
 
-/** Every instance of an InstancedMesh as a box in the root's frame. */
-function instanceBoxes(mesh, rootInv) {
-  if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+/** Every instance of an InstancedMesh as a box in the root's frame (box: its own geometry's, or the one given). */
+function instanceBoxes(mesh, rootInv, box = null) {
+  if (!box) {
+    if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+    box = mesh.geometry.boundingBox;
+  }
   const out = [], m = new THREE.Matrix4(), w = new THREE.Matrix4().multiplyMatrices(rootInv, mesh.matrixWorld);
   for (let i = 0; i < mesh.count; i++) {
     mesh.getMatrixAt(i, m);
-    out.push(mesh.geometry.boundingBox.clone().applyMatrix4(m.premultiply(w)));
+    out.push(box.clone().applyMatrix4(m.premultiply(w)));
   }
   return out;
 }
 
+/** Replaces a small InstancedMesh with plain meshes in its group, so mergeStaticMeshes takes them. */
+function bakeInstances(im, group) {
+  const m = new THREE.Matrix4();
+  for (let i = 0; i < im.count; i++) {
+    const copy = new THREE.Mesh(im.geometry, im.material);
+    copy.castShadow = im.castShadow;
+    copy.receiveShadow = im.receiveShadow;
+    im.getMatrixAt(i, m);
+    copy.applyMatrix4(m.premultiply(im.matrix));
+    group.add(copy);
+  }
+  group.remove(im);
+}
+
 /** The glTF node name a mesh came from (multi-material nodes load as a group of unnamed meshes). */
-const nodeName = o => (o.name && !/^(mesh_|Mesh)/.test(o.name) ? o.name : o.parent?.name ?? "");
+const nodeName = o => (o.parent?.parent ? o.parent.name : o.name);
 
 /**
  * gltf: the loaded model. roads: world/Roads.js. groundAt(x, z): the finished
@@ -282,18 +317,28 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
   // ── Colliders, in the model's frame: { box } or { c, h, q } (an oriented box)
   const shapes = [], treads = [];
   let desks = [];
-  const collision = [];
+  const collision = [], dirt = [];
+  let bench = null;
   model.traverse(o => {
-    if (o.isMesh && (/^(COL_|INST_COL_)/.test(nodeName(o)) || o.material?.name === "Collision_Proxy")) collision.push(o);
+    if (!o.isMesh) return;
+    if (/^(COL_|INST_COL_)/.test(nodeName(o)) || o.material?.name === "Collision_Proxy") collision.push(o);
+    else if (DIRT.test(nodeName(o))) dirt.push(o);
+    else if (!bench && o.isInstancedMesh && /DeskBench/.test(nodeName(o))) bench = o;
   });
   for (const mesh of collision) {
-    if (mesh.isInstancedMesh) { desks.push(...instanceBoxes(mesh, rootInv)); continue; }
+    if (mesh.isInstancedMesh) {
+      // The desk's collision box, where the desks actually stand
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      if (bench) desks.push(...instanceBoxes(bench, rootInv, mesh.geometry.boundingBox));
+      continue;
+    }
     const { pts, list } = pieces(mesh, rootInv);
     for (const tris of list) {
       collectTreads(pts, tris, treads);
       if (tris.length <= 12) {
         const box = new THREE.Box3();
         for (const t of tris) for (const i of t) box.expandByPoint(pts[i]);
+        if (box.max.y < PAVING_TOP - 0.05) continue;   // the dirt slab: the terrain is the floor there
         shapes.push({ box });
       } else {
         for (const box of solidBoxes(pts, tris)) shapes.push({ box });
@@ -343,7 +388,7 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
   };
   // Walls, floors, columns, railings, the upper stairs: solid for everything
   addBodies(shapes.filter(s => !s.low));
-  // Paving, plinth, entrance steps, the dais and the desks: monsters walk through
+  // Plinth, entrance steps, the dais and the desks: monsters walk through
   // (surfaceAt holds them on the floor); a ledge would stop them
   const low = shapes.filter(s => s.low);
   for (const box of desks) low.push({ c: box.getCenter(new THREE.Vector3()), h: box.getSize(new THREE.Vector3()).multiplyScalar(0.5) });
@@ -360,18 +405,18 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
 
   // Loot on the desk tops, on every floor
   const lootSpots = [];
-  model.traverse(o => {
-    if (lootSpots.length || !o.isInstancedMesh || !/DeskBench/.test(nodeName(o))) return;
-    instanceBoxes(o, rootInv).forEach((b, i) => {
+  if (bench) {
+    instanceBoxes(bench, rootInv).forEach((b, i) => {
       if (i % LOOT_EVERY) return;
       const c = b.getCenter(new THREE.Vector3());
       const w = toWorld(c.x, c.z);
       lootSpots.push({ x: w.x, y: baseY + b.max.y + 0.02, z: w.z });
     });
-  });
+  }
 
   // ── Drawing
   for (const o of collision) o.removeFromParent();
+  for (const o of dirt) o.removeFromParent();
   model.updateMatrixWorld(true);
   const shell = new THREE.Group(), detail = new THREE.Group(), interior = new THREE.Group();
   const parts = [];
@@ -384,16 +429,19 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
       m.forceSinglePass = true;
     }
     if (m.map) m.map.anisotropy = anisotropy;
-    if (/paving/.test(name)) {
-      // A hair over the flattened ground: pulled forward in depth so it never flickers into the grass
+    if (/paving|asphalt|_paint/.test(name)) {
+      // A hair over the flattened ground (the paint a hair over the road): pulled
+      // forward in depth so they never flicker into the terrain or each other
+      const paint = /_paint/.test(name);
       m.polygonOffset = true;
-      m.polygonOffsetFactor = -2;
-      m.polygonOffsetUnits = -4;
+      m.polygonOffsetFactor = paint ? -4 : -2;
+      m.polygonOffsetUnits = paint ? -8 : -4;
     }
-    const group = INTERIOR.test(name) ? interior : DETAIL.test(name) ? detail : shell;
+    const group = DETAIL.test(name) ? detail : OUTDOOR.test(name) ? shell : INTERIOR.test(name) ? interior : shell;
     o.castShadow = group === shell && !m.transparent && SHADOW.test(name);
     o.receiveShadow = true;
     group.attach(o);
+    if (o.isInstancedMesh && o.count <= BAKE_MAX) bakeInstances(o, group);
   }
   mergeStaticMeshes(shell);
   mergeStaticMeshes(detail);
@@ -411,9 +459,13 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
   root.traverse(o => { o.matrixAutoUpdate = false; });
   chunks?.add(root, def.x, def.z, def.r);
 
-  // The building's footprint (model frame) for inside(): its walls, not the paving
-  const foot = new THREE.Box3();
-  for (const { box } of shapes) if (box && box.max.y - box.min.y > 2) foot.union(box);
+  // The building's footprint (model frame): its ground-floor slabs (main block, rear wing, stair tower)
+  const slabs = [], foot = new THREE.Box3();
+  for (const { box } of shapes) {
+    if (!box || box.min.y > -0.2 || Math.abs(box.max.y) > 0.05 || (box.max.x - box.min.x) * (box.max.z - box.min.z) < 5) continue;
+    slabs.push(box);
+    foot.union(box);
+  }
   const _l = { x: 0, z: 0 };
   const toLocal = (x, z) => {
     const dx = x - def.x, dz = z - def.z;
@@ -423,9 +475,10 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
   };
   /** True under the building's roof. */
   const inside = (x, z) => {
-    if (Math.abs(x - def.x) > 32 || Math.abs(z - def.z) > 32) return false;
+    if (Math.abs(x - def.x) > def.r || Math.abs(z - def.z) > def.r) return false;
     const l = toLocal(x, z);
-    return l.x > foot.min.x && l.x < foot.max.x && l.z > foot.min.z && l.z < foot.max.z;
+    for (const b of slabs) if (l.x > b.min.x && l.x < b.max.x && l.z > b.min.z && l.z < b.max.z) return true;
+    return false;
   };
 
   return {
@@ -437,7 +490,8 @@ export function placeCseBuilding({ gltf, scene, world, material, roads, groundAt
     surfaceAt: (x, z, ground) => (inside(x, z) ? Math.max(ground, baseY) : ground),
     /** Each frame with the camera position: the detail and the interior are only drawn up close. */
     update(x, z) {
-      const d = Math.hypot(x - def.x, z - def.z);
+      const l = toLocal(x, z);
+      const d = Math.hypot(Math.max(foot.min.x - l.x, 0, l.x - foot.max.x), Math.max(foot.min.z - l.z, 0, l.z - foot.max.z));
       detail.visible = d < DETAIL_RANGE;
       interior.visible = d < INTERIOR_RANGE;
     },
