@@ -30,6 +30,8 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
  * the wheel turns. dust: puffs per m/s per wheel on loose ground (emitDust).
  * spin: wheels built and spun by the vehicle itself [x, z, radius, width, front].
  */
+const BIKE_TURN_IN = 10;   // 1/s: how fast a bike's turn rate reaches what the steering asks
+
 export const VEHICLES = {
   rickshaw: {
     label: "auto-rickshaw",
@@ -91,7 +93,8 @@ export const VEHICLES = {
   // pillion rider behind the driver (facing forward, or turned round to watch the road behind).
   // bike: wheels [z, y, r] split off the model and spun (front first); grips / pegs: where the
   // driver's hands and feet go; pillion: its hips (seat), pegs and the grab rail behind it;
-  // lean: most it leans over in a turn; stand: the kickstand's lean when parked.
+  // lean: most it leans over in a turn; stand: the kickstand's lean when parked;
+  // turn: the hardest it corners (m/s² sideways: arcade, about 2 g, not what a real lean allows).
   sportbike: {
     label: "sport bike",       // (the model is a Suzuki SV650: shown under a generic name)
     length: 2.09, width: 0.75,
@@ -108,14 +111,14 @@ export const VEHICLES = {
     box: [0.3, 0.55, 1.0, 0.55],
     modelYaw: 0,
     runOver: 3, tone: 1.45,
-    grip: 1.05, slide: 0.06, steerRate: 6, dust: 0.6,
+    grip: 1.05, slide: 0.12, steerRate: 6, dust: 0.6,
     bike: {
       wheels: [[0.738, 0.303, 0.3], [-0.683, 0.303, 0.3]],
       grips: [[0.31, 0.98, 0.33], [-0.31, 0.98, 0.33]],
       pegs: [[0.17, 0.34, -0.06], [-0.17, 0.34, -0.06]],
       hunch: 0.3,
       pillion: { seat: [0, 1.02, -0.58], pegs: [[0.19, 0.42, -0.42], [-0.19, 0.42, -0.42]], grabs: [[0.17, 0.92, -0.86], [-0.17, 0.92, -0.86]] },
-      lean: 0.72, stand: 0.15, standAt: [0.12, -0.12],
+      lean: 0.72, turn: 22, stand: 0.15, standAt: [0.12, -0.12],
     },
   },
   motorbike: {
@@ -134,14 +137,14 @@ export const VEHICLES = {
     box: [0.32, 0.5, 1.05, 0.5],
     modelYaw: 0,
     runOver: 3, tone: 0.9,
-    grip: 0.95, slide: 0.08, steerRate: 5.5, dust: 0.9,
+    grip: 0.95, slide: 0.14, steerRate: 5.5, dust: 0.9,
     bike: {
       wheels: [[0.831, 0.27, 0.28], [-0.663, 0.27, 0.28]],
       grips: [[0.38, 0.93, 0.26], [-0.38, 0.93, 0.26]],
       pegs: [[0.2, 0.42, 0.22], [-0.2, 0.42, 0.22]],
       hunch: 0.12,
       pillion: { seat: [0, 0.86, -0.64], pegs: [[0.21, 0.44, -0.42], [-0.21, 0.44, -0.42]], grabs: [[0.2, 0.78, -0.95], [-0.2, 0.78, -0.95]] },
-      lean: 0.62, stand: 0.15, standAt: [0.14, 0.05],
+      lean: 0.62, turn: 20, stand: 0.15, standAt: [0.14, 0.05],
     },
   },
 };
@@ -482,17 +485,20 @@ export class Vehicle {
     this.steer += (steerTarget - this.steer) * (1 - Math.exp(-(R.steerRate ?? 7) * delta));
     const grip = (R.grip ?? 0.9) * (input.grip ?? 1) * (input.handbrake ? 0.5 : 1);
     let yawRate = (v * Math.tan(this.steer)) / R.wheelBase;
-    // A bike turns only as hard as it can lean: v·ω ≤ g·tan(lean)
+    // A bike corners up to spec.bike.turn (v·ω ≤ turn: a tighter line the slower you go)
     if (R.bike) {
-      const cap = 9.8 * Math.tan(R.bike.lean) / Math.max(1.5, Math.abs(v));
+      const cap = R.bike.turn / Math.max(1.5, Math.abs(v));
       yawRate = THREE.MathUtils.clamp(yawRate, -cap, cap);
     }
     // Sliding: the turn wants v·ω of sideways acceleration, the tyres give grip·g
-    const want = v * yawRate, have = grip * 9.8;
+    // (a bike's tyres hold its full turn on asphalt, and let go on dirt or the handbrake)
+    const want = v * yawRate, have = grip * (R.bike ? R.bike.turn / R.grip : 9.8);
     if (Math.abs(want) > have) {
       this.slip -= Math.sign(want) * (Math.abs(want) - have) * (R.slide ?? 0.15) * delta;
       if (input.handbrake) yawRate *= 1.15;
     }
+    // Eased in, so a tap of the key at speed doesn't snap a bike round
+    if (R.bike) yawRate = this.yawRate + (yawRate - this.yawRate) * (1 - Math.exp(-BIKE_TURN_IN * delta));
     this.slip *= Math.exp(-grip * 2.6 * delta);
     if (Math.abs(this.slip) < 0.01) this.slip = 0;
     this.skid = Math.abs(this.slip);
@@ -604,7 +610,7 @@ export class Vehicle {
 
   /**
    * A bike's lean and suspension, from how it's moving (driven here or smoothed from the
-   * driver's packets): it leans into a turn as far as the turn needs (tan lean = v·ω / g),
+   * driver's packets): it leans into a turn with how hard the turn is, to spec.bike.lean at its limit,
    * stands up when slow, rests on its kickstand when nobody's on it; the nose dips on the
    * brakes and lifts on the throttle. The kickstand swings down when parked.
    */
@@ -615,7 +621,7 @@ export class Vehicle {
     const v = this.speed;
     let want;
     if (ridden) {
-      want = THREE.MathUtils.clamp(Math.atan2(v * this.yawRate, 9.8), -B.lean, B.lean);
+      want = B.lean * THREE.MathUtils.clamp(v * this.yawRate / B.turn, -1, 1);
       // Stopped with a foot down: tipped a little toward it
       want += B.stand * 0.35 * (1 - Math.min(1, Math.abs(v) / 2));
     } else {
