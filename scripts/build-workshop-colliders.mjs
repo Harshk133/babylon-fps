@@ -1,0 +1,99 @@
+// Writes src/world/workshopColliders.js from public/models/college_workshop.glb.
+// The model has no collision mesh, and welding its ~100k vertices into pieces takes
+// long enough to feel on a phone, so the boxes are worked out once, here, and
+// shipped as data (the same on every client):   node scripts/build-workshop-colliders.mjs
+import { writeFileSync } from "node:fs";
+import { NodeIO } from "@gltf-transform/core";
+import { ALL_EXTENSIONS } from "@gltf-transform/extensions";
+
+const SRC = "public/models/college_workshop.glb", OUT = "src/world/workshopColliders.js";
+const GAP = 0.1;       // m: parts closer than this are one object
+const MIN_H = 0.35;    // m: lower than this you just walk over it
+const GROUND = 0.5;    // m over its floor: an object starting higher is hanging, not standing
+const FLOOR = { hall: 0, yard: -0.45 };
+const GROUPS = {
+  // Monsters walk through these (a bench corner would hold them up); players and bullets don't
+  props: { floor: FLOOR.hall, nodes: ["GLB_Workshop_Equipment", "GLB_Furniture", "GLB_Machine_Shop", "GLB_Carpentry_Shop", "GLB_Fitting_Shop", "GLB_Welding_Shop", "GLB_Project_Area"] },
+  columns: { floor: FLOOR.hall, nodes: ["GLB_Support_Columns"] },
+  yard: { floor: FLOOR.yard, nodes: ["GLB_Exterior_Props"] },
+  vehicles: { floor: FLOOR.yard, nodes: ["GLB_Vehicles"] },
+};
+
+const doc = await new NodeIO().registerExtensions(ALL_EXTENSIONS).read(SRC);
+const nodes = new Map(doc.getRoot().listNodes().map(n => [n.getName(), n]));
+
+/** A node's connected pieces in the model's frame, as [minX, minY, minZ, maxX, maxY, maxZ]. */
+function pieces(node) {
+  const w = node.getWorldMatrix(), out = [], v = [0, 0, 0];
+  for (const prim of node.getMesh().listPrimitives()) {
+    const a = prim.getAttribute("POSITION"), ix = prim.getIndices(), n = a.getCount();
+    const parent = new Int32Array(n).map((_, i) => i);
+    const find = i => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
+    const pts = [], at = new Map();
+    for (let i = 0; i < n; i++) {
+      a.getElement(i, v);
+      const p = [0, 1, 2].map(k => w[k] * v[0] + w[k + 4] * v[1] + w[k + 8] * v[2] + w[k + 12]);
+      pts.push(p);
+      const key = p.map(c => c.toFixed(3)).join();
+      if (at.has(key)) parent[find(i)] = find(at.get(key)); else at.set(key, i);
+    }
+    for (let t = 0; t < ix.getCount(); t += 3) {
+      const r = find(ix.getScalar(t));
+      parent[find(ix.getScalar(t + 1))] = r;
+      parent[find(ix.getScalar(t + 2))] = find(r);
+    }
+    const boxes = new Map();
+    for (let i = 0; i < n; i++) {
+      const r = find(i), p = pts[i];
+      if (!boxes.has(r)) boxes.set(r, [...p, ...p]);
+      const b = boxes.get(r);
+      for (let k = 0; k < 3; k++) { b[k] = Math.min(b[k], p[k]); b[k + 3] = Math.max(b[k + 3], p[k]); }
+    }
+    out.push(...boxes.values());
+  }
+  return out;
+}
+
+const near = (a, b, gap) => a[0] <= b[3] + gap && b[0] <= a[3] + gap && a[2] <= b[5] + gap && b[2] <= a[5] + gap && a[1] <= b[4] + gap && b[1] <= a[4] + gap;
+
+/** Indices of pieces that touch, in groups. */
+function groupsOf(list, gap) {
+  const parent = list.map((_, i) => i);
+  const find = i => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
+  for (let i = 0; i < list.length; i++) for (let k = i + 1; k < list.length; k++) if (near(list[i], list[k], gap)) parent[find(k)] = find(i);
+  const out = new Map();
+  list.forEach((b, i) => { const r = find(i); if (!out.has(r)) out.set(r, []); out.get(r).push(b); });
+  return [...out.values()];
+}
+
+/** Pieces that touch, joined into one box. */
+const cluster = list => groupsOf(list, GAP).map(g => {
+  const o = [...g[0]];
+  for (const b of g) for (let k = 0; k < 3; k++) { o[k] = Math.min(o[k], b[k]); o[k + 3] = Math.max(o[k + 3], b[k + 3]); }
+  return o;
+});
+
+const round = b => b.map(c => +c.toFixed(2));
+const result = {};
+for (const [name, { floor, nodes: list }] of Object.entries(GROUPS)) {
+  result[name] = list.flatMap(n => cluster(pieces(nodes.get(n))))
+    .filter(b => b[1] < floor + GROUND && b[4] - b[1] >= MIN_H)
+    .map(round);
+  console.log(name, result[name].length, "largest footprints:", result[name].map(b => +((b[3] - b[0]) * (b[5] - b[2])).toFixed(1)).sort((p, q) => q - p).slice(0, 8).join(" "));
+}
+
+// A tree: the trunk is the lowest piece of each joined group; bushes (no height) and the
+// potted plants on the ledges (not on the ground) are left out
+result.trees = groupsOf(pieces(nodes.get("GLB_Vegetation")), 0.02)
+  .filter(g => Math.max(...g.map(b => b[4])) >= 2.5 && Math.min(...g.map(b => b[1])) < FLOOR.yard + 0.2)
+  .map(g => {
+    const trunk = g.reduce((p, q) => (q[1] < p[1] ? q : p));
+    return [+((trunk[0] + trunk[3]) / 2).toFixed(2), +((trunk[2] + trunk[5]) / 2).toFixed(2)];
+  });
+console.log("trees", result.trees.length);
+
+const row = list => list.map(b => `[${b.join(",")}]`).join(",");
+writeFileSync(OUT, `// Generated by scripts/build-workshop-colliders.mjs from the college workshop model. Don't edit.
+// Boxes in the model's frame: [minX, minY, minZ, maxX, maxY, maxZ]. TREES: trunks [x, z].
+${Object.entries(result).map(([k, v]) => `export const ${k.toUpperCase()} = [${row(v)}];`).join("\n")}
+`);

@@ -50,6 +50,7 @@ import { Caves, caveTerrain, caveGrass, caveBlocks, precomputeCaves, adoptCavesD
 import { scatterRocks } from "./world/Rocks.js";
 import { COLLEGE_GATE, placeCollegeGate } from "./world/CollegeGate.js";
 import { CSE_BUILDING, placeCseBuilding, cseTint } from "./world/CseBuilding.js";
+import { COLLEGE_WORKSHOP, placeCollegeWorkshop, workshopTint } from "./world/CollegeWorkshop.js";
 import { loadIndiaModels } from "./world/IndiaAssets.js";
 import { propSpots, placeIndiaProps } from "./world/IndiaProps.js";
 import { mergeStaticMeshes } from "./world/MergeStatic.js";
@@ -1923,6 +1924,7 @@ function updateMood(delta) {
   caveDepth += (deep - caveDepth) * (1 - Math.exp(-3 * delta));
   indoor = !!houses?.houseAt(camera.position.x, camera.position.z) || !!indiaBuildings?.inside(camera.position.x, camera.position.z) || deep > 0.05
     || !!cseBuilding?.inside(camera.position.x, camera.position.z)
+    || !!collegeWorkshop?.inside(camera.position.x, camera.position.z)
     || !!city?.inside(camera.position.x, camera.position.z, camera.position.y - 1.6);
   env.update(delta, camera, weather);
   if (caveDepth > 0.001) dimUnderground(caveDepth);
@@ -2010,7 +2012,8 @@ function updateThirdPersonCamera(delta) {
   const inside = alive && !drive.on && !ride.on && !climb.active && !brAirborne()
     && (!!houses?.houseAt(characterBody.position.x, characterBody.position.z)
       || !!indiaBuildings?.inside(characterBody.position.x, characterBody.position.z)
-      || !!cseBuilding?.inside(characterBody.position.x, characterBody.position.z));
+      || !!cseBuilding?.inside(characterBody.position.x, characterBody.position.z)
+      || !!collegeWorkshop?.inside(characterBody.position.x, characterBody.position.z));
   fpBlend += ((inside ? 1 : 0) - fpBlend) * (1 - Math.exp(-8 * delta));
   if (!inside && fpBlend < 0.01) fpBlend = 0;
   soldier.setFirstPerson(fpBlend > 0.5);
@@ -2856,7 +2859,7 @@ function spawnWorldLoot() {
     pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
   });
   // Shivpur's shops and rooftops, the building sites and the CSE building's classrooms
-  [...(city?.lootSpots ?? []), ...(plots?.lootSpots ?? []), ...(cseBuilding?.lootSpots ?? [])].forEach((sp, i) => {
+  [...(city?.lootSpots ?? []), ...(plots?.lootSpots ?? []), ...(cseBuilding?.lootSpots ?? []), ...(collegeWorkshop?.lootSpots ?? [])].forEach((sp, i) => {
     if (lootRng() < 0.45) return;
     const kind = HOUSE_LOOT[(i * 7 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
     pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
@@ -3224,7 +3227,7 @@ let _wasOnGround = true, _fallSpeed = 0;
 /** What feet hit at (x, feetY, z): house floors are wood, caves stone, the rest grass. */
 function footSurface(x, feetY, z) {
   if (houses?.floorAt(x, feetY, z)) return "wood";
-  if (caves?.inside(x, z, feetY) || indiaBuildings?.inside(x, z) || cseBuilding?.inside(x, z)) return "concrete";
+  if (caves?.inside(x, z, feetY) || indiaBuildings?.inside(x, z) || cseBuilding?.inside(x, z) || collegeWorkshop?.inside(x, z)) return "concrete";
   return "grass";
 }
 
@@ -3338,7 +3341,7 @@ function playerVisibility() {
   else if (Math.hypot(moveVelocity.x, moveVelocity.z) < 0.5) v *= 0.85;
   const floor = houses?.floorAt(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
   if (floor && !floor.lightOn) v *= 0.45;
-  if (indiaBuildings?.inside(characterBody.position.x, characterBody.position.z) || cseBuilding?.inside(characterBody.position.x, characterBody.position.z)) v *= 0.7;
+  if (indiaBuildings?.inside(characterBody.position.x, characterBody.position.z) || cseBuilding?.inside(characterBody.position.x, characterBody.position.z) || collegeWorkshop?.inside(characterBody.position.x, characterBody.position.z)) v *= 0.7;
   if (city?.inside(characterBody.position.x, characterBody.position.z, characterBody.position.y - FEET_OFFSET)) v *= 0.7;
   // Deep in the sugarcane only movement gives you away
   if (farmland?.inCane(characterBody.position.x, characterBody.position.z)) v *= sprinting ? 0.6 : 0.35;
@@ -3848,6 +3851,7 @@ let plots = null;          // world/Plots.js: walled plots and building sites al
 const chunks = new WorldChunks(); // world/Chunks.js: far static meshes aren't drawn
 let collegeGate = null;    // world/CollegeGate.js, placed in loadWorld()
 let cseBuilding = null;    // world/CseBuilding.js: the CSE department block behind the gate
+let collegeWorkshop = null; // world/CollegeWorkshop.js: the workshop hall, up the North Road
 let waterTowers = null;    // world/WaterTowers.js: { towers, lootSpots, blocks() }, built in loadWorld()
 let indiaModels = {};      // world/IndiaAssets.js: { rickshaw, thar, truck, … } (null where missing)
 let townLabels = [];       // town names for the world map
@@ -3917,6 +3921,7 @@ async function loadWorld() {
     // (the two big tree models arrive after the game starts: plantTrees())
     settle(loadGLB("/models/msbecl_gate_final.glb")),
     settle(loadGLB("/models/cse_building.glb")),
+    settle(loadGLB("/models/college_workshop.glb")),
     settle(loadGLB("/models/bikes/sv650.glb")),
     settle(loadGLB("/models/bikes/military_motorbike.glb")),
     indiaDownload,
@@ -3924,7 +3929,7 @@ async function loadWorld() {
   // The caves' rock: from the worker (started at boot), or here if it couldn't run
   await cavesPrecomputed;
   precomputeCaves();
-  const [autoGltf, wrlScene, houseKit, gateGltf, cseGltf, sportbikeGltf, motorbikeGltf, india] = await downloads;
+  const [autoGltf, wrlScene, houseKit, gateGltf, cseGltf, workshopGltf, sportbikeGltf, motorbikeGltf, india] = await downloads;
   loadMark("world downloaded");
   sfx.preload();
   indiaModels = india;
@@ -3982,6 +3987,7 @@ async function loadWorld() {
   // Water towers by the towns, clear of the caves, the river, the beach and everything above
   // The CSE building's grounds (placed after the terrain; everything else keeps off them)
   const campus = cseGltf ? [{ x: CSE_BUILDING.x, z: CSE_BUILDING.z, r: CSE_BUILDING.r, fade: 18 }] : [];
+  if (workshopGltf) campus.push({ x: COLLEGE_WORKSHOP.x, z: COLLEGE_WORKSHOP.z, r: COLLEGE_WORKSHOP.r, fade: 18 });
   const taken = [...parked.map(p => ({ x: p.x, z: p.z, r: VEHICLES[p.kind].length / 2 })), ...stalls.map(s => ({ x: s.x, z: s.z, r: 2.4 })), ...props, ...chaiSpots.map(c => ({ ...c, r: CHAIWALA_R })), ...campus];
   const towerSpots = india.waterTower ? waterTowerSpots(roads, (x, z, r) => caveBlocks(x, z, r + 4) || river.wet(x, z, r + 2)
     || Math.hypot(x, z) < 26 + r || Math.hypot(x, z) > shoreRadius(x, z) - 30 - r
@@ -4116,7 +4122,7 @@ async function loadWorld() {
     // the channel at the bridges); the ground sinks to the cave floors under the massifs
     modify: (x, z, h) => caveTerrain(x, z, roads.modify(x, z, river.modify(x, z, h))),
     // Field soil, river mud, road shoulders, then sand and wet sand down the beach
-    tint: (x, z, c) => { farmland.tint(x, z, c); plots.tint(x, z, c); city.tint(x, z, c); if (cseGltf) cseTint(x, z, c); river.tint(x, z, c); roads.tint(x, z, c); beachTint(x, z, c); },
+    tint: (x, z, c) => { farmland.tint(x, z, c); plots.tint(x, z, c); city.tint(x, z, c); if (cseGltf) cseTint(x, z, c); if (workshopGltf) workshopTint(x, z, c); river.tint(x, z, c); roads.tint(x, z, c); beachTint(x, z, c); },
     // No grass on roads, through floors, props, parked vehicles, rock, water or sand; trimmed in yards; crops in the fields
     grassMask: (x, z) => {
       if (houses.blocks(x, z, 1.5) || nearParked(x, z, 0.3)) return 0;
@@ -4162,7 +4168,15 @@ async function loadWorld() {
     });
     townLabels.push({ name: CSE_BUILDING.name, x: CSE_BUILDING.x, z: CSE_BUILDING.z });
   }
-  const nearGate = (x, z, pad) => !!collegeGate?.blocks(x, z, pad) || !!cseBuilding?.blocks(x, z, pad);
+  // The college workshop, on its flattened grounds by the road
+  if (workshopGltf) {
+    collegeWorkshop = placeCollegeWorkshop({
+      gltf: workshopGltf, scene, world, material: staticMaterial, roads, groundAt: groundHeight, mapObstacles, navObstacles, chunks,
+      anisotropy: Math.min(renderer.capabilities.getMaxAnisotropy(), QUALITY.anisotropy),
+    });
+    townLabels.push({ name: COLLEGE_WORKSHOP.name, x: COLLEGE_WORKSHOP.x, z: COLLEGE_WORKSHOP.z });
+  }
+  const nearGate = (x, z, pad) => !!collegeGate?.blocks(x, z, pad) || !!cseBuilding?.blocks(x, z, pad) || !!collegeWorkshop?.blocks(x, z, pad);
 
   // Dukaan stalls and the Indian props (after the terrain too)
   shops = buildShops({ scene, world, material: staticMaterial, spots: stalls, groundAt: groundHeight, mapObstacles, navObstacles });
@@ -6037,6 +6051,7 @@ function brSpawnLoot(seed) {
   for (const sp of plots?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   for (const sp of waterTowers?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   for (const sp of cseBuilding?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
+  for (const sp of collegeWorkshop?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
     pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`, it.y ?? null);
   });
@@ -6817,6 +6832,7 @@ function animate() {
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
   collegeGate?.update(delta);
   cseBuilding?.update(camera.position.x, camera.position.z);
+  collegeWorkshop?.update(camera.position.x, camera.position.z);
   cseBuilding?.updateDoors(delta);
   houses?.cull(camera);
   checkOutfitClash(realDelta);
@@ -7202,6 +7218,8 @@ async function boot() {
     zombieManager.navigate = (zx, zz, tx, tz, out, big, zy, ty) => {
       // Through the cave tunnels when the monster or its target is in one; legs in the open use the houses' pathing
       // In or out of a panchayat office / town building: through its doorway
+      const hall = collegeWorkshop?.navigate(zx, zz, tx, tz, out, big, (ax, az, bx, bz, o) => houses.navigate(ax, az, bx, bz, o, big, zy, zy)) ?? -1;
+      if (hall >= 0) return hall;
       const ib = indiaBuildings?.navigate(zx, zz, tx, tz, out, big, (ax, az, bx, bz, o) => houses.navigate(ax, az, bx, bz, o, big, zy, zy)) ?? -1;
       if (ib >= 0) return ib;
       const r = caves.navigate(zx, zz, tx, tz, out, big, zy, ty, (ax, az, bx, bz, o) => houses.navigate(ax, az, bx, bz, o, big, zy, zy));
@@ -7212,9 +7230,10 @@ async function boot() {
     // House floors and stairs are walkable surfaces too (monsters follow you upstairs), and the CSE building's ground floor
     zombieManager.surfaceAt = (x, z, y, ground) => {
       const h = houses.surfaceAt(x, z, y, ground);
-      return cseBuilding ? cseBuilding.surfaceAt(x, z, h) : h;
+      const c = cseBuilding ? cseBuilding.surfaceAt(x, z, h) : h;
+      return collegeWorkshop ? collegeWorkshop.surfaceAt(x, z, c) : c;
     };
-    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z) && !cseBuilding?.blocks(x, z)
+    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z) && !cseBuilding?.blocks(x, z) && !collegeWorkshop?.blocks(x, z)
       && waterDepthAt(x, z) < 0.3 && Math.hypot(x, z) < shoreRadius(x, z) - 6 && !city?.blocks(x, z, 2);
     zombieManager.onDoorBang = (x, z) => {
       sfx.doorBang({ x, y: groundHeight(x, z) + 1.2, z });
@@ -7244,7 +7263,7 @@ async function boot() {
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, ride, pillionKey, keys, climb, queueJump() { jumpQueued = true; }, get touch() { return touch; }, get stamina() { return { stamina, cap: staminaCap(), exhausted }; }, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, ride, pillionKey, keys, climb, queueJump() { jumpQueued = true; }, get touch() { return touch; }, get stamina() { return { stamina, cap: staminaCap(), exhausted }; }, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, get collegeWorkshop() { return collegeWorkshop; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     if (BENCH_ENABLED) startBenchmark();

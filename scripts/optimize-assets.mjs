@@ -43,6 +43,14 @@ const MODELS = [
   // instead). (cse_building_draco.glb is the same model with Draco geometry: the game decodes
   // meshopt, so this one is built from the plain file)
   { src: "public/models/cse_building.glb",        ratio: 1,    error: 0,     tex: 1024, dropNodes: ["Exterior_Structure_dirt"] },
+  // The college workshop: low-poly, on one 128 px colour atlas (kept as it is: lossy WebP would smear
+  // its swatches together) and baked textures for the shell, the floor and the walls. Its terrain
+  // slab, 16 m block and compound wall go (the game tints the terrain). (college_workshop_draco.glb
+  // is the same model with Draco geometry: the game decodes meshopt)
+  {
+    src: "public/models/college_workshop.glb", ratio: 1, error: 0, tex: 1024,
+    dropNodes: ["BAKE_Ground_Terrain", "GLB_Neighbouring_Buildings"], keepTex: /Color_Atlas/,
+  },
   // Motorbikes (Poly Pizza, CC BY 3.0: credits in src/vehicles/Vehicle.js): low-poly, untextured
   { src: "public/models/bikes/sv650.glb",              ratio: 1, error: 0, tex: 256 },
   { src: "public/models/bikes/military_motorbike.glb", ratio: 1, error: 0, tex: 256 },
@@ -241,7 +249,7 @@ for (const m of MODELS) {
     ...(m.animQuant ? [quantizeRotationKeys()] : []),
     prune(),
     ...(m.hiTex ? [textureCompress({ encoder: sharp, targetFormat: "webp", pattern: m.hiTex.pattern, resize: [m.hiTex.size, m.hiTex.size], quality: m.hiTex.quality })] : []),
-    textureCompress({ encoder: sharp, targetFormat: "webp", resize: [m.tex, m.tex], quality: 85, ...(m.hiTex ? { pattern: new RegExp(`^(?!.*(${m.hiTex.pattern.source})).+`) } : {}) }),
+    textureCompress({ encoder: sharp, targetFormat: "webp", resize: [m.tex, m.tex], quality: 85, ...(m.hiTex || m.keepTex ? { pattern: new RegExp(`^(?!.*(${(m.hiTex?.pattern ?? m.keepTex).source})).+`) } : {}) }),
     unpartition(),
     reorder({ encoder: MeshoptEncoder }),
     quantize(),
