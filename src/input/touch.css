@@ -333,6 +333,11 @@ body.touch .lil-gui { display: none !important; }
     animation: rotate-phone 1.8s ease-in-out infinite;
   }
 }
+/* Only the game itself needs a sideways phone: the menus work upright too */
+@media (orientation: portrait) {
+  body.touch:has(#lobby.visible) #rotate-hint,
+  body.touch:has(#legal.open) #rotate-hint { display: none; }
+}
 @keyframes rotate-phone {
   0%, 25% { transform: rotate(0); }
   60%, 100% { transform: rotate(-90deg); }
@@ -464,7 +469,7 @@ body.touch #br-result { zoom: 0.75; }
 body.touch #grain { display: none; }
 
 /* The world map, sized for a 360 px tall screen */
-body.touch .wm-frame canvas { width: min(calc(100vh - 24px), calc(100vw - 250px)); height: min(calc(100vh - 24px), calc(100vw - 250px)); }
+body.touch .wm-frame canvas { width: min(calc(100dvh - 24px), calc(100vw - 250px)); height: min(calc(100dvh - 24px), calc(100vw - 250px)); }
 body.touch .wm-side { width: 210px; gap: 8px; }
 body.touch .wm-title { font-size: 28px; }
 body.touch .wm-pin { font-size: 19px; }
@@ -473,7 +478,31 @@ body.touch .wm-legend { font-size: 15px; }
 body.touch .wm-buttons button { padding: 11px 0 8px; }
 
 /* Full-screen panels that must fit a 360 px tall screen */
-body.touch #start-screen { zoom: 0.72; }
+body.touch #start-screen { zoom: 0.72; gap: 10px; }
+/* The live HUD would show through (and sit on top of) the menus */
+body.touch:has(#lobby.visible) :is(#hud, #combat-hud, #hotbar, #minimap, #level-hud, #crosshair, #kill-feed, #vehicle-hud, #squad),
+body.touch:has(#start-screen.visible) :is(#hud, #combat-hud, #hotbar, #minimap, #level-hud, #crosshair, #kill-feed, #vehicle-hud, #squad),
+body.touch:has(#inventory.visible) #hotbar { visibility: hidden; }
+/* The close button sits at the top right, over this panel's header */
+body.touch .ls > .ls-col:last-of-type .ls-head { padding-right: 118px; }
+/* A real tap target (the screen's zoom shrinks it) */
+body.touch #start-screen .lg-open { min-height: 58px; padding-inline: 16px; }
+/* Credits sits left of the settings gear, not under it (divided by the screen's zoom) */
+body.touch #start-screen .lg-open { right: calc((max(16px, env(safe-area-inset-right)) + 76px) / 0.72); }
+@media (max-height: 460px) {
+  body.touch .start-tip { display: none; }
+}
+@media (max-height: 350px) {
+  body.touch #start-screen { zoom: 0.62; gap: 6px; }
+  body.touch #start-screen .lg-open { right: calc((max(16px, env(safe-area-inset-right)) + 76px) / 0.62); }
+  /* The rest you find out by touching them */
+  body.touch .touch-controls div:nth-child(n+5) { display: none; }
+  /* The address bar is taking its share: smaller buttons and map, or they run into each other */
+  #touch-ui { --s: calc(var(--tc-size, 1) * 0.8px); }
+  body.touch #minimap { zoom: 0.44; }
+  body.touch .wm-legend, body.touch .wm-help { display: none; }
+  body.touch .wm-title { font-size: 22px; }
+}
 body.touch .touch-controls {
   flex-direction: column;
   gap: 6px;
