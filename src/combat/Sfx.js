@@ -772,6 +772,33 @@ export class Sfx {
   }
 
   /** Something heavy hitting the ground (a dragon crashing, a rickshaw crash). */
+  /** A vehicle hitting something, strength 0..1: the crunch, sheet metal, and glass if it's hard. */
+  vehicleCrash(at, strength, tree = false) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const s = Math.min(1, strength), t = ctx.currentTime;
+    this.play("door_bang", { at, vol: 0.5 + s * 0.7, rate: 0.55 + Math.random() * 0.15, ref: 10, wet: 0.3 });
+    if (s > 0.35) this.play("crash", { at, vol: s * 1.3, ref: 16, rolloff: 0.8, wet: 0.5 });
+    if (s > 0.4 && !tree) this.play("glass", { at, vol: s * 0.8, delay: 0.05, rate: 0.9 + Math.random() * 0.2, ref: 8, wet: 0.3 });
+    this._withAt(at, { ref: 10, wet: 0.3 }, () => {
+      // The thump of the body, and (not off a tree) metal crumpling and ringing on after it
+      this._noise(t, 0.16 + s * 0.3, "lowpass", 1400, 90, 0.6 + s * 0.7);
+      this._sweep(t, 90, 30, 0.2 + s * 0.3, 0.5 + s * 0.8);
+      if (tree) return;
+      this._noise(t + 0.015, 0.2 + s * 0.35, "bandpass", 2600, 700, 0.3 + s * 0.45, 1.4);
+    });
+  }
+
+  /** One grain of metal dragging along something (called several times a second while it scrapes). */
+  vehicleScrape(at, vol) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime, f = 2400 + Math.random() * 2600;
+    this._withAt(at, { ref: 7, wet: 0.2 }, () => {
+      this._noise(t, 0.09 + Math.random() * 0.06, "bandpass", f, f * 0.6, 0.22 * vol, 1.6);
+    });
+  }
+
   thud(at = null, heavy = true) {
     const ctx = this.ctx;
     if (!ctx) return;

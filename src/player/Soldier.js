@@ -283,9 +283,21 @@ export class Soldier {
     };
     // Every bone's rest transform, to go back to it (skeleton.pose() would rebuild the bones
     // from bind-time world matrices, which don't include this model's scale)
+    // (from the hips down, not only isBone: a rig's head joints can hang under plain nodes, see collectBones)
     this._rest = [];
-    model.traverse(o => { if (o.isBone) this._rest.push([o, o.position.clone(), o.quaternion.clone(), o.scale.clone()]); });
+    this.b.hips.traverse(o => this._rest.push([o, o.position.clone(), o.quaternion.clone(), o.scale.clone()]));
     this.root.updateMatrixWorld(true);
+    // The head as modelled (bind pose): its rotation against the chest, and which way is really
+    // up in its own frame. Head → crown won't do for that: Kabir's leans 21° forward.
+    const rootQ = this.root.getWorldQuaternion(new THREE.Quaternion()).invert();
+    const headQ = this.b.head.getWorldQuaternion(new THREE.Quaternion());
+    this._headRest = this.b.spine2.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(headQ);
+    this._headUp = new THREE.Vector3(0, 1, 0).applyQuaternion(headQ.invert().multiply(rootQ.invert()));
+    // What the clips last posed on the bones the procedural pass turns (see _mix)
+    this._clipPose = [...new Set(Object.values(this.b))].filter(Boolean).map(bone => ({ bone, q: bone.quaternion.clone() }));
+    // The clips were made on a straight neck and replace this rig's own forward bend (Kabir 5°,
+    // Remy 9°), leaving the character gazing upward: put it back on top of them
+    this._neckBend = this.b.neck.quaternion.w < 0.9999 ? this.b.neck.quaternion.clone() : null;
     // Metres per unit of the clips' (retargeted) hips motion, for speed matching
     this.unit = this.b.hips.parent.getWorldScale(_v0).y;
     this.clipSpeed = name => (this.clips.speed[name] ?? 1) * this.unit;
@@ -732,6 +744,35 @@ export class Soldier {
     for (const id of Object.keys(inHand)) this.guns[id] = { model: inHand[id].model, back: onBack.map(o => o[id].model), muzzle: inHand[id].muzzle };
   }
 
+  /**
+   * One mixer step on the clips' own pose. The mixer only writes a value that changed, so a
+   * still pose (a paused game, a held key) would leave last frame's procedural turns on the
+   * bones and the next pass would add to them: a wounded or flinching head went right round.
+   */
+  _mix(dt) {
+    const pose = this._clipPose;
+    for (let i = 0; i < pose.length; i++) pose[i].bone.quaternion.copy(pose[i].q);
+    this.mixer.update(dt);
+    for (let i = 0; i < pose.length; i++) pose[i].q.copy(pose[i].bone.quaternion);
+    if (this._neckBend) this.b.neck.quaternion.multiply(this._neckBend);
+  }
+
+  /**
+   * A neck only goes so far: the head (against the chest, from how it's modelled) is held
+   * within maxAngle radians, whatever the passes before asked of it.
+   */
+  _limitHead(maxAngle) {
+    const b = this.b;
+    b.spine2.getWorldQuaternion(_hq);
+    _hr.copy(_hq).invert().multiply(b.head.getWorldQuaternion(_hq2)).multiply(_hq3.copy(this._headRest).invert());
+    const angle = 2 * Math.acos(Math.min(1, Math.abs(_hr.w)));
+    if (angle <= maxAngle) return;
+    _hr.slerp(_hq3.identity(), 1 - maxAngle / angle);
+    _hq.multiply(_hr).multiply(this._headRest);    // where the head may be, in the world
+    b.head.quaternion.copy(b.head.parent.getWorldQuaternion(_hq2).invert().multiply(_hq));
+    b.head.updateWorldMatrix(false, false);
+  }
+
   /** Bones back to their rest transforms. */
   _restPose() {
     for (const [bone, p, q, sc] of this._rest) { bone.position.copy(p); bone.quaternion.copy(q); bone.scale.copy(sc); }
@@ -1028,7 +1069,7 @@ export class Soldier {
     if (this.dead) {
       if (this.deathAct) this.deathAct.target = 1;
       this._blend(dt, 9);
-      this.mixer.update(dt);
+      this._mix(dt);
       return;
     }
 
@@ -1147,7 +1188,7 @@ export class Soldier {
     }
 
     this._blend(dt, BLEND_RATE);
-    this.mixer.update(dt);
+    this._mix(dt);
     this._procedural(dt, s, armed, speed);
   }
 
@@ -1557,8 +1598,14 @@ export class Soldier {
     }
     // On a bike the hands go last, onto whatever they hold (after the aim and the gun's own IK)
     if (riding) this._rideHands(side, fwd, armed);
+    this._limitHead(riding ? RIDE_HEAD_MAX : HEAD_MAX);
   }
 }
+
+const _hq = new THREE.Quaternion(), _hq2 = new THREE.Quaternion(), _hq3 = new THREE.Quaternion(), _hr = new THREE.Quaternion();
+// How far the head may turn from the chest. The prone clips look up about 73° on purpose;
+// on a bike the eyes stay on the road only as far as a neck really goes.
+const HEAD_MAX = 1.4, RIDE_HEAD_MAX = 0.95;
 
 const _rp = new THREE.Vector3(), _rt = new THREE.Vector3(), _rl = new THREE.Vector3();
 const _qr = new THREE.Quaternion(), _qr2 = new THREE.Quaternion();
@@ -1639,9 +1686,9 @@ Soldier.prototype._rideHands = function (side, fwd, armed) {
   }
   // Eyes on the road whatever the chest is doing: the head's up (head → crown) back to the
   // sky, tipped a little forward, half from the neck and half from the head
-  if (b.head && b.headTop && b.neck) {
+  if (b.head && b.neck) {
     for (const bone of [b.neck, b.head]) {
-      const cur = b.headTop.getWorldPosition(_rt).sub(b.head.getWorldPosition(_rp)).normalize();
+      const cur = _rt.copy(this._headUp).applyQuaternion(b.head.getWorldQuaternion(_qr));
       const want = _rl.copy(_up).addScaledVector(fwd, 0.12).normalize();
       _qr.setFromUnitVectors(cur, want);
       rotateBoneInWorld(bone, _qr2.identity().slerp(_qr, 0.6 * w));

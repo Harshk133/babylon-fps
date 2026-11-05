@@ -213,6 +213,20 @@ function extractWheels(holder, wheels) {
   return out;
 }
 
+// A crash: the directions tested round a probe for which way the surface faces
+const RING = 8;
+const RING_C = Array.from({ length: RING }, (_, i) => Math.cos((i / RING) * Math.PI * 2));
+const RING_S = Array.from({ length: RING }, (_, i) => Math.sin((i / RING) * Math.PI * 2));
+const SCRAPE_MIN = 2.5;       // m/s: slower than this just stops
+const SCRAPE_ANGLE = 0.55;    // speed into the surface / speed: below it, it glances off and slides (about 33°)
+const JOLT_K = 150, JOLT_D = 9;   // the body's springs after a hit
+const DAMAGE_CLEAR = 22;      // s for a smashed engine (damage 1) to stop smoking
+const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
+// Bits of bodywork a hit knocks off, per kind: [r, g, b, gloss]
+const PAINT = {
+  rickshaw: [0.1, 0.3, 0.16, 0.5], thar: [0.14, 0.17, 0.12, 0.5], tractor: [0.55, 0.1, 0.08, 0.5],
+  sportbike: [0.1, 0.16, 0.42, 0.6], motorbike: [0.2, 0.24, 0.13, 0.3],
+};
 const _v = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _e = new THREE.Euler(0, 0, 0, "YXZ");
@@ -406,6 +420,13 @@ export class Vehicle {
     this.slip = 0;            // m/s sideways (+ = to the left): the slide
     this.skid = 0;            // how hard it's sliding (dust, tyre smoke)
     this._dust = 0;
+    this.spin = 0;            // rad/s: a hit off-centre knocks the nose round
+    this.jolt = 0; this.joltV = 0;           // nose down (+) after a hit: the body pitches on its springs
+    this.joltRoll = 0; this.joltRollV = 0;
+    this.damage = 0;          // 0..1 how smashed up the engine is: it smokes, and it clears with time
+    this._smoke = 0;
+    this.nextHit = 0;         // (effects aren't repeated on every frame of one contact)
+    this.contact = { on: false, scrape: false, x: 0, z: 0, nx: 0, nz: 0, vx: 0, vz: 0 };
     this.fuel = this.spec.fuelStart;
     this.driver = null;
     this.pillion = null;
@@ -448,7 +469,7 @@ export class Vehicle {
     }
     if (this.spec.bike) this.roll = roll;   // (its own spring already eased it)
     this.root.position.set(this.x, this.y, this.z);
-    this.root.rotation.set(-this.pitch, this.yaw, this.roll);
+    this.root.rotation.set(-this.pitch + this.jolt, this.yaw, this.roll + this.joltRoll);
   }
 
   /**
@@ -502,7 +523,9 @@ export class Vehicle {
     this.slip *= Math.exp(-grip * 2.6 * delta);
     if (Math.abs(this.slip) < 0.01) this.slip = 0;
     this.skid = Math.abs(this.slip);
-    const yaw = this.yaw + yawRate * delta;
+    this.spin *= Math.exp(-3.5 * delta);
+    if (Math.abs(this.spin) < 0.01) this.spin = 0;
+    const yaw = this.yaw + (yawRate + this.spin) * delta;
     const sy = Math.sin(yaw), cy = Math.cos(yaw);
     const nx = this.x + (sy * v + cy * this.slip) * delta;
     const nz = this.z + (cy * v - sy * this.slip) * delta;
@@ -510,11 +533,9 @@ export class Vehicle {
     let crash = 0;
     // Already wedged into something (parked, spawned or synced there): let it drive out, or it would never move again
     const wedged = this._blockedAt(this.x, this.z, this.yaw, blocked);
+    this.contact.on = false;
     if (!wedged && this._blockedAt(nx, nz, yaw, blocked)) {
-      crash = Math.abs(v);
-      this.speed = -v * 0.25; // bounce back a little
-      this.yawRate = 0;
-      this.slip = 0;
+      crash = this._collide(delta, v, yaw, nx, nz, blocked);
     } else {
       this.x = nx; this.z = nz; this.yaw = yaw;
       this.speed = v;
@@ -525,6 +546,103 @@ export class Vehicle {
       this.fuel = Math.max(0, this.fuel - (R.idleBurn + R.burn * this.throttle * (0.5 + 0.5 * Math.abs(v) / R.maxSpeed)) * delta);
     }
     return crash;
+  }
+
+  /**
+   * The move to (nx, nz) hit something. Works out where and which way the surface faces (from
+   * which directions round the probe are solid). A shallow angle slides along it, scraping
+   * and losing speed; steeper than that stops the vehicle dead with a small bounce, and a hit
+   * off-centre knocks the nose round. Returns the speed going into the surface; the
+   * details are in this.contact.
+   */
+  _collide(delta, v, yaw, nx, nz, blocked) {
+    const sy = Math.sin(yaw), cy = Math.cos(yaw);
+    const vx = sy * v + cy * this.slip, vz = cy * v - sy * this.slip;
+    const sp = Math.hypot(vx, vz);
+    const { z: probes, r } = this.spec.hits;
+    // The probe that hit (the one furthest along the way we're going, if several did)
+    let px = nx, pz = nz, best = -Infinity;
+    for (const o of probes) {
+      const x = nx + sy * o, z = nz + cy * o;
+      const along = o * Math.sign(v || 1);
+      if (along > best && blocked(x, z, r, this)) { best = along; px = x; pz = z; }
+    }
+    // The surface's normal: away from whichever directions round the probe are solid
+    let sx = 0, sz = 0;
+    for (let i = 0; i < RING; i++) {
+      const c = RING_C[i], s = RING_S[i];
+      if (blocked(px + c * r * 1.4, pz + s * r * 1.4, r * 0.5, this)) { sx -= c; sz -= s; }
+    }
+    let l = Math.hypot(sx, sz);
+    if (l < 1e-3 || sx * vx + sz * vz > 0) { sx = -vx; sz = -vz; l = sp || 1; }
+    sx /= l; sz /= l;
+    const into = Math.max(0, -(vx * sx + vz * sz));
+    const c = this.contact;
+    c.on = true; c.scrape = false;
+    c.x = px - sx * r; c.z = pz - sz * r;
+    c.nx = sx; c.nz = sz; c.vx = vx; c.vz = vz;
+
+    if (sp > SCRAPE_MIN && into / sp < SCRAPE_ANGLE) {
+      const tx = vx + sx * into, tz = vz + sz * into;
+      const dir = v >= 0 ? 1 : -1;
+      const turn = wrapPi(Math.atan2(tx * dir, tz * dir) - yaw);
+      const y2 = yaw + turn * Math.min(1, 5 * delta);
+      const mx = this.x + tx * delta + sx * 0.02, mz = this.z + tz * delta + sz * 0.02;
+      if (!this._blockedAt(mx, mz, y2, blocked)) {
+        this.x = mx; this.z = mz; this.yaw = y2;
+        this.yawRate = turn * Math.min(5, 1 / Math.max(delta, 1e-3)) * 0.5;
+        this.speed = v * Math.exp(-(0.5 + (into / sp) * 3) * delta);   // friction against the wall
+        this.slip *= 0.8;
+        c.scrape = true;
+        return into;
+      }
+      // (Nowhere to slide: pinned in a corner, so it stops like a head-on)
+    }
+    // Nose-on: the ends crumple, it barely rebounds. A vehicle spins about where it was hit.
+    const ax = px - this.x, az = pz - this.z;
+    this.spin = THREE.MathUtils.clamp((ax * sz - az * sx) * into * 0.14, -1.8, 1.8);
+    this.speed = -v * (0.14 + 0.16 * (1 - Math.min(1, into / 18)));
+    this.yawRate = 0;
+    this.slip = 0;
+    return into;
+  }
+
+  /**
+   * The body's reaction to a hit, here and on everyone else's screen. strength 0..1, side: which
+   * way it rolls (−1..1), dir: 1 nose-first, −1 tail-first.
+   */
+  impact(strength, side = 0, dir = 1) {
+    const B = this.spec.bike;
+    this.joltV += dir * strength * (B ? 1.6 : 1.1);
+    this.joltRollV += side * strength * (B ? 1.2 : 0.9);
+    // A bike wobbles hard: the lean spring takes the kick and shakes it out
+    if (B) this.leanV += side * strength * 5;
+    if (strength > 0.3) this.damage = Math.min(1, this.damage + strength * 0.7);
+    this._settle = Math.max(this._settle, 0.6);
+  }
+
+  /** The colour of its bodywork ([r, g, b, gloss]), for the bits a crash knocks off. */
+  paintColor(out) {
+    const p = PAINT[this.kind] ?? PAINT.thar;
+    out[0] = p[0]; out[1] = p[1]; out[2] = p[2]; out[3] = p[3];
+    return out;
+  }
+
+  /** Smoke from a smashed engine: thick and dark at first, thinning as it clears. fx: DustFX. */
+  emitDamageSmoke(fx, delta, color) {
+    const R = this.spec;
+    this._smoke = Math.min(3, this._smoke + (2 + this.damage * 7) * delta);
+    const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
+    const fwd = R.length * 0.28, y = this.y + (R.bike ? 0.55 : 0.85);
+    while (this._smoke >= 1) {
+      this._smoke -= 1;
+      fx.emit(
+        this.x + sy * fwd + (Math.random() - 0.5) * 0.25, y, this.z + cy * fwd + (Math.random() - 0.5) * 0.25,
+        (Math.random() - 0.5) * 0.5 + sy * this.speed * 0.5, 1.4 + Math.random() * 1.4, (Math.random() - 0.5) * 0.5 + cy * this.speed * 0.5,
+        0.5 + this.damage * 0.8 + Math.random() * 0.4,
+        color,
+      );
+    }
   }
 
   _blockedAt(x, z, yaw, blocked) {
@@ -574,6 +692,15 @@ export class Vehicle {
       this.throttle = Math.min(1, Math.abs(r.speed) / this.spec.maxSpeed + 0.2);
     }
     if (this.spec.bike) this._bikeDynamics(delta);
+    if (delta > 0) {
+      // The jolt of a hit: springs, a little under-damped, so the body rocks and settles
+      const d = Math.min(delta, 0.05);
+      this.joltV += (-this.jolt * JOLT_K - this.joltV * JOLT_D) * d;
+      this.jolt += this.joltV * d;
+      this.joltRollV += (-this.joltRoll * JOLT_K - this.joltRollV * JOLT_D) * d;
+      this.joltRoll += this.joltRollV * d;
+      if (this.damage > 0) this.damage = Math.max(0, this.damage - delta / DAMAGE_CLEAR);
+    }
     // A parked vehicle nobody touches doesn't need re-posing every frame
     const moving = this.driver !== null || this._settle > 0 || (this.spec.bike && Math.abs(this.leanV) + Math.abs(this.diveV) > 0.01);
     if (moving) {

@@ -149,9 +149,15 @@ export function loadCharacter(loader, def) {
   return _chars.get(def.id);
 }
 
+/**
+ * Every node of the skeleton, joint or not. A clip's track targets a node by name, and some rigs
+ * (Remy) wrap each head joint in plain nodes with the clean name: Neck > Neck_1 > Neck_2 (the
+ * joint). Those wrappers are what the clips have to drive, or the head never moves.
+ */
 function collectBones(root) {
   const names = [];
-  root.traverse(o => { if (o.isBone) names.push(o.name); });
+  const hips = root.getObjectByName("Hips");
+  (hips ?? root).traverse(o => { if (hips || o.isBone) names.push(o.name); });
   return names;
 }
 

@@ -37,6 +37,7 @@ import { River } from "./world/River.js";
 import { Farmland, layoutFields } from "./world/Farmland.js";
 import { buildSea, buildBoats, waterUniforms } from "./world/Water.js";
 import { DustFX, DUST } from "./vehicles/DustFX.js";
+import { CrashFX, CRASH_KIND } from "./vehicles/CrashFX.js";
 import { City } from "./world/City.js";
 import { Plots } from "./world/Plots.js";
 import { WorldChunks, splitInstanced } from "./world/Chunks.js";
@@ -5186,17 +5187,21 @@ function vehicleSpawns(roads) {
   });
 }
 
+let solidKind = 0;
 /** True if a circle at (x, z) overlaps anything solid on the obstacle list (or the map edge). self: a vehicle to ignore. */
 function solidAt(x, z, r, self = null) {
+  const prevKind = solidKind;            // (what it hit, for the crash effects: only ever a real hit)
+  solidKind = CRASH_KIND.EDGE;
   if (Math.hypot(x, z) > PLAY_RADIUS - r) return true;
   if (seaDepth(x, z) > 0.7) return true; // nothing drives into the sea
+  solidKind = CRASH_KIND.HARD;
   if (caves?.solidAt(x, z, r)) return true;
   for (const o of mapObstacles) {
     if (o.vehicle) continue;
     const dx = x - o.x, dz = z - o.z;
     if (o.type === "circle") {
       const rr = (o.hit ?? o.r) + r;
-      if (dx * dx + dz * dz < rr * rr) return true;
+      if (dx * dx + dz * dz < rr * rr) { if (o.hit !== undefined) solidKind = CRASH_KIND.TREE; return true; }
       continue;
     }
     if (Math.abs(dx) > o.w + o.d + r || Math.abs(dz) > o.w + o.d + r) continue;
@@ -5214,6 +5219,7 @@ function solidAt(x, z, r, self = null) {
       if (dx * dx + dz * dz < rr * rr) return true;
     }
   }
+  solidKind = prevKind;
   return false;
 }
 
@@ -5450,17 +5456,91 @@ function updateDriving(delta) {
   if (surf.water > 0.25) car.speed *= Math.exp(-Math.min(2.5, surf.water * 2) * delta);
   progress.drive(Math.abs(car.speed) * delta);
   jumpQueued = false;
-  if (crash > 3) {
-    cameraTrauma = Math.min(1, cameraTrauma + Math.min(0.7, crash * 0.05));
-    sfx.thud(null, false);
-    if (crash > 10) dealDamageToPlayer((crash - 10) * 3, 0, 0, 0.5);
-  }
+  const hit = vehicleHit(car, crash);
+  if (hit && crash > 10 && !car.contact.scrape) dealDamageToPlayer((crash - 10) * 3, 0, 0, 0.5);
   // The camera swings in behind you unless you're looking around with the mouse
   if (now - drive.lastMouse > 1.2 && Math.abs(car.speed) > 1.5) {
     aimYaw += angleDiff(car.yaw, aimYaw) * (1 - Math.exp(-2.2 * delta));
     aimPitch += (-0.16 - aimPitch) * (1 - Math.exp(-2 * delta));
   }
   vehicleRunOver(car);
+}
+
+const CRASH_MIN = 1.5;        // m/s into a surface for it to count as a hit
+const CRASH_FULL = 15;        // ...and for the biggest crash there is
+const SCRAPE_NET_GAP = 0.2;   // s between scrape packets (a hit is always sent)
+const crashLight = lightPool.adopt(new THREE.PointLight(0xffb060, 0, 16, 1.6), 2);
+const crashFX = new CrashFX(scene, IS_TOUCH ? 0.5 : QUALITY.post === "off" ? 0.6 : 1);
+const _crashPaint = [0.3, 0.3, 0.32, 0.4];
+
+/** After car.drive(): the effects of what it just hit, here and on everyone else's screen. True on a new hit. */
+function vehicleHit(car, crash) {
+  const c = car.contact;
+  if (!c.on) return false;
+  const now = performance.now() / 1000;
+  const kind = solidKind;
+  const sp = Math.hypot(c.vx, c.vz);
+  if (c.scrape && sp > 2) {
+    vehicleScrapeFx(car, c.x, c.z, c.nx, c.nz, c.vx, c.vz, kind);
+    if (net.inRoom && now > (car.nextScrapeNet ?? 0)) {
+      car.nextScrapeNet = now + SCRAPE_NET_GAP;
+      net.send({ t: "vhit", i: car.index, x: +c.x.toFixed(1), z: +c.z.toFixed(1), n: [+c.nx.toFixed(2), +c.nz.toFixed(2)], v: [+c.vx.toFixed(1), +c.vz.toFixed(1)], k: kind, sc: 1 });
+    }
+  }
+  if (crash < CRASH_MIN || now < car.nextHit) return false;
+  car.nextHit = now + 0.22;
+  const s = THREE.MathUtils.clamp((crash - CRASH_MIN) / (CRASH_FULL - CRASH_MIN), 0.05, 1);
+  vehicleCrashFx(car, c.x, c.z, c.nx, c.nz, c.vx, c.vz, s, kind);
+  if (net.inRoom) net.send({ t: "vhit", i: car.index, x: +c.x.toFixed(1), z: +c.z.toFixed(1), n: [+c.nx.toFixed(2), +c.nz.toFixed(2)], v: [+c.vx.toFixed(1), +c.vz.toFixed(1)], k: kind, s: +s.toFixed(2) });
+  return true;
+}
+
+/** The burst of one hit. Runs for the driver and from a vhit packet alike. */
+function vehicleCrashFx(car, x, z, nx, nz, vx, vz, s, kind) {
+  const sy = Math.sin(car.yaw), cy = Math.cos(car.yaw);
+  // Which end took it, and which way the body rolls off it
+  const dir = sy * nx + cy * nz > 0 ? -1 : 1;
+  const side = THREE.MathUtils.clamp(nx * cy - nz * sy, -1, 1);
+  car.impact(s, side, dir);
+  const inVehicle = drive.car === car || ride.car === car;
+  const dist = car.distanceTo(camera.position.x, camera.position.z);
+  if (inVehicle) {
+    cameraTrauma = Math.min(1, cameraTrauma + 0.12 + s * 0.65);
+    if (s > 0.55) postFx.kick(s * 0.45, 0xffc890);
+  }
+  const ground = effects.groundAt(x, z);
+  const yHi = car.spec.bike ? 0.75 : 1.15;
+  const at = { x, y: ground + 0.7, z };
+  sfx.vehicleCrash(at, s, kind === CRASH_KIND.TREE);
+  if (dist > 130) return;
+  car.paintColor(_crashPaint);
+  crashFX.burst(x, z, ground, ground + 0.22, ground + yHi, nx, nz, vx, vz, s, _crashPaint, kind);
+  if (kind === CRASH_KIND.HARD && s > 0.2) {
+    crashLight.position.set(x + nx * 0.4, ground + 0.8, z + nz * 0.4);
+    crashLight.intensity = 3 + s * 9;
+  }
+  // Grit and dust knocked off it, drifting away from the surface
+  const puffs = 2 + Math.round(s * 9);
+  for (let i = 0; i < puffs; i++) {
+    const a = (Math.random() - 0.5) * 2.4, ca = Math.cos(a), sa = Math.sin(a), out = 0.8 + Math.random() * 3;
+    dustFX.emit(x + nx * 0.2, ground + 0.3 + Math.random() * yHi, z + nz * 0.2, (nx * ca - nz * sa) * out, 0.3 + Math.random(), (nz * ca + nx * sa) * out, 0.5 + s * 1.1 + Math.random() * 0.5, DUST.impact);
+  }
+}
+
+/** Metal dragging along a surface, one frame of it (or a packet's worth, from someone else's). */
+function vehicleScrapeFx(car, x, z, nx, nz, vx, vz, kind, rate = 2.2) {
+  if (car.distanceTo(camera.position.x, camera.position.z) > 130) return;
+  const sp = Math.hypot(vx, vz);
+  const ground = effects.groundAt(x, z);
+  const yHi = car.spec.bike ? 0.55 : 0.95;
+  if (kind === CRASH_KIND.HARD) crashFX.scrape(x, z, ground, ground + 0.2, ground + yHi, nx, nz, vx, vz, rate * Math.min(1.6, sp / 8));
+  const now = performance.now() / 1000;
+  if (now > (car.nextScrapeSound ?? 0)) {
+    car.nextScrapeSound = now + 0.05;
+    sfx.vehicleScrape({ x, y: ground + 0.5, z }, Math.min(1, sp / 14) * (kind === CRASH_KIND.HARD ? 1 : 0.4));
+  }
+  if ((drive.car === car || ride.car === car) && cameraTrauma < 0.16) cameraTrauma += 0.012;
+  if (Math.random() < 0.3) dustFX.emit(x, ground + 0.3, z, nx * 0.8, 0.4, nz * 0.8, 0.45, DUST.impact);
 }
 
 /** Driving into monsters (or other players, in the battle royale) hurts them. */
@@ -5538,9 +5618,13 @@ function surfaceAt(x, z) {
 
 function updateVehicles(delta) {
   let lit = null, litD = Infinity;
-  dustFX.update(delta, Math.min(1, 0.25 + sun.intensity * 0.3 + hemiLight.intensity * 0.3));
+  const sceneLight = Math.min(1, 0.25 + sun.intensity * 0.3 + hemiLight.intensity * 0.3);
+  dustFX.update(delta, sceneLight);
+  crashFX.update(delta, sceneLight);
+  if (crashLight.intensity > 0) { crashLight.intensity *= Math.exp(-22 * delta); if (crashLight.intensity < 0.02) crashLight.intensity = 0; }
   for (const v of vehicles) {
     v.update(delta, env.darkness);
+    if (v.damage > 0.08 && delta > 0 && v.distanceTo(camera.position.x, camera.position.z) < 90) v.emitDamageSmoke(dustFX, delta, DUST.wreck);
     if (v.driver !== null && v.distanceTo(camera.position.x, camera.position.z) < 90) v.emitDust(dustFX, delta, surfaceAt(v.x, v.z));
     if (v.lightLevel > 0) {
       const d = v.distanceTo(camera.position.x, camera.position.z);
@@ -5637,6 +5721,13 @@ remotePlayers.seatAt = (p, delta) => {
   if (p.soldier) p.soldier.ride = r;
   return !!r;
 };
+// Someone else's crash: the same mess at their end
+net.on("vhit", msg => {
+  const car = vehicles[msg.i];
+  if (!car || !msg.n || !msg.v) return;
+  if (msg.sc) { for (let k = 0; k < 6; k++) vehicleScrapeFx(car, msg.x, msg.z, msg.n[0], msg.n[1], msg.v[0], msg.v[1], msg.k); }
+  else vehicleCrashFx(car, msg.x, msg.z, msg.n[0], msg.n[1], msg.v[0], msg.v[1], msg.s ?? 0.3, msg.k);
+});
 net.on("vfuel", msg => {
   const car = vehicles[msg.i ?? 0];
   if (!car) return;
@@ -5764,6 +5855,7 @@ const bots = new Bots({
   surfaceAt: (x, z, y, ground) => (houses ? houses.surfaceAt(x, z, y, ground) : ground),
   navigate: (x, z, tx, tz, out, y, ty) => (zombieManager?.navigate ? zombieManager.navigate(x, z, tx, tz, out, false, y, ty) : 0),
   solidAt: (x, z, r, self) => solidAt(x, z, r, self),
+  vehicleHit: (car, crash) => vehicleHit(car, crash),
   // Smoke hides you, and so does standing deep in the sugarcane (unless they're right on top of you)
   concealed: (a, b) => smokeFX.blocks(a, b) || (!!farmland?.inCane(b.x, b.z) && Math.hypot(a.x - b.x, a.z - b.z) > 8),
   shielded: (pos, x, y, z) => blastShielded(pos, x, y, z),
@@ -7123,6 +7215,7 @@ async function warmUpGpu() {
   }
   for (const o of hidden) o.visible = false;
   fireFX.setWarmup(false);
+  crashFX.endWarmup();
 }
 
 /**

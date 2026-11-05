@@ -61,6 +61,8 @@ export const DUST = {
   sand:   [0.8, 0.72, 0.55, 0.6],
   smoke:  [0.62, 0.62, 0.62, 0.35],   // tyre smoke on asphalt
   splash: [0.75, 0.8, 0.8, 0.4],      // through shallow water
+  impact: [0.55, 0.52, 0.48, 0.65],   // grit and dust knocked off what you hit
+  wreck:  [0.09, 0.09, 0.1, 0.6],     // a smashed engine
 };
 
 export class DustFX {

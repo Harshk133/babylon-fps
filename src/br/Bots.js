@@ -967,6 +967,7 @@ export class Bots {
     const steer = THREE.MathUtils.clamp(diff * 2, -1, 1);
     const throttle = d < 12 ? 0.2 : Math.abs(diff) > 0.9 ? 0.45 : 1;
     const crash = car.drive(delta, { throttle: b.reverseT > 0 ? -0.8 : throttle, steer: b.reverseT > 0 ? -steer : steer, handbrake: false }, this.g.solidAt);
+    this.g.vehicleHit?.(car, crash);
     if (crash > 3) b.reverseT = 1.2;
     b.reverseT = Math.max(0, (b.reverseT ?? 0) - delta);
     car.seatWorld(_v);
