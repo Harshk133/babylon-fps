@@ -17,7 +17,7 @@ const emptyAtt = () => ({ optic: null, muzzle: null, mag: null, grip: null });
  *   attachments, limited by each kind's max and by weight vs capacity
  *   (BASE_CAPACITY + backpack + vest).
  * - Gear: helmet / vest / backpack slots, each { id, dur }.
- * - Cash: rupees in the wallet (weightless; spent at the shops).
+ * - Cash: Taara (game money) in the wallet (weightless; spent at the shops).
  *
  * Every change bumps `version` so the UI can skip work when nothing moved.
  * Methods that can fail return null / false or { error } and change nothing.

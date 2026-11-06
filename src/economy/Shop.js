@@ -1,9 +1,9 @@
 // The dukaan: what the town stalls sell and the buy screen. Pure catalog +
 // DOM; main.js decides whether a purchase fits (buy(id) → { ok, msg }).
 //
-// Prices are in rupees. A ₹2000 note bundle lies around the map; monsters pay
-// ₹100-₹500 a kill (bosses far more), so a couple of notes buy a medkit or a
-// grenade and a good gun takes a while.
+// Prices are in Taara (✦, the game's made-up money: economy/Currency.js). A ✦2,000
+// bundle lies around the map; monsters pay ✦100-✦500 a kill (bosses far more), so a
+// couple of bundles buy a medkit or a grenade and a good gun takes a while.
 
 /** give: "stack" (n of a backpack kind) | "ammo" (an ammo crate) | "gun" | "gear" | "attachment". */
 export const SHOP_ITEMS = [
@@ -25,7 +25,8 @@ export const SHOP_ITEMS = [
   { id: "sniper",   give: "gun",         price: 8000, label: "Sniper Rifle" },
 ];
 
-export const fmtRupees = n => `₹${Math.round(n).toLocaleString("en-IN")}`;
+import { fmtMoney } from "./Currency.js";
+export { fmtMoney };
 
 /**
  * The buy screen: a grid of item cards with prices. Opens over the game (the
@@ -46,7 +47,7 @@ export class ShopUI {
       <div class="shop-panel" role="dialog" aria-label="Shop">
         <header class="shop-head">
           <div><h2>DUKAAN</h2><span class="shop-sub">Everything you need to survive</span></div>
-          <div class="shop-wallet"><span class="shop-wallet-label">Wallet</span><b data-ref="cash">₹0</b></div>
+          <div class="shop-wallet"><span class="shop-wallet-label">Wallet</span><b data-ref="cash">${fmtMoney(0)}</b></div>
           <button class="shop-close" data-ref="close" aria-label="Close">✕</button>
         </header>
         <div class="shop-grid" data-ref="grid"></div>
@@ -63,7 +64,7 @@ export class ShopUI {
         <img src="${icons[item.id] ?? ""}" alt="">
         <span class="shop-name">${item.label}</span>
         ${item.note ? `<span class="shop-note">${item.note}</span>` : ""}
-        <span class="shop-price">${fmtRupees(item.price)}</span>
+        <span class="shop-price">${fmtMoney(item.price)}</span>
         <span class="shop-why"></span>`;
       card.addEventListener("click", () => {
         const r = this.buy(item.id);
@@ -97,7 +98,7 @@ export class ShopUI {
     for (const w of why) sig += `${w}|`;
     if (sig === this._sig) return;
     this._sig = sig;
-    this.el.cash.textContent = fmtRupees(cash);
+    this.el.cash.textContent = fmtMoney(cash);
     this.cards.forEach((c, i) => {
       c.card.classList.toggle("off", !!why[i]);
       c.why.textContent = why[i];

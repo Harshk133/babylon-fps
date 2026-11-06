@@ -1,5 +1,7 @@
 import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, FUEL_CAN, BISCUIT, GEAR } from "../combat/weapons.js";
 
+import { fmtMoney } from "../economy/Currency.js";
+
 const FEED_LIFE = 2600; // ms
 const PROMPT_STRIDE = 5; // setPrompts rows: key, action, detail, icon, progress
 const fmtReserve = r => (r === Infinity ? "∞" : `${r}`);
@@ -107,14 +109,15 @@ export class InventoryUI {
     itemsRow.append(fuel);
     this.fuelSlot = { slot: fuel, count: fuelCount, cache: {} };
 
-    const hints = el("div", "hb-hints");
-    hints.innerHTML = "<kbd>G</kbd> throw <kbd>Q</kbd> switch <kbd>Tab</kbd> inventory";
+    const hints = el("div", "hb-hints no-throw");
+    hints.innerHTML = `<span class="hb-hint-throw"><kbd>G</kbd> throw <kbd>Q</kbd> switch </span><kbd>Tab</kbd> inventory`;
+    this.hints = { el: hints, cache: {} };
 
-    // Wallet: rupees for the dukaan
-    const wallet = el("div", "hb-wallet");
-    wallet.innerHTML = `<img class="hb-ticon" alt="" src="${this.icons.cash}"><b>₹0</b>`;
+    // Wallet: Taara for the dukaan
+    const wallet = el("div", "hb-wallet empty");
+    wallet.innerHTML = `<img class="hb-ticon" alt="" src="${this.icons.cash}"><b>${fmtMoney(0)}</b>`;
     itemsRow.append(wallet);
-    this.wallet = { value: wallet.querySelector("b"), cache: {} };
+    this.wallet = { el: wallet, value: wallet.querySelector("b"), cache: {} };
 
     root.append(weaponsRow, itemsRow, hints);
   }
@@ -133,19 +136,23 @@ export class InventoryUI {
       setText(s.ammo, s.cache, "ammo", w ? `${w.ammo}/${fmtReserve(w.reserve)}` : "");
       setClass(s.slot, s.cache, "dry", "dry", !!w && w.ammo === 0 && w.reserve === 0);
     }
+    let anyThrowable = false;
     for (const kind of THROWABLE_ORDER) {
       const s = this.tslots[kind];
       const n = inv.throwables[kind];
+      anyThrowable ||= n > 0;
       setText(s.count, s.cache, "n", `${n}`);
       setClass(s.slot, s.cache, "sel", "selected", inv.selectedThrowable === kind);
       setClass(s.slot, s.cache, "empty", "empty", n === 0);
     }
+    setClass(this.hints.el, this.hints.cache, "nt", "no-throw", !anyThrowable);
     this._updateGear();
     setText(this.medSlot.count, this.medSlot.cache, "n", `${inv.medkits}`);
     setClass(this.medSlot.slot, this.medSlot.cache, "empty", "empty", inv.medkits === 0);
     setText(this.bisSlot.count, this.bisSlot.cache, "n", `${inv.biscuits}`);
     setClass(this.bisSlot.slot, this.bisSlot.cache, "empty", "empty", inv.biscuits === 0);
-    setText(this.wallet.value, this.wallet.cache, "v", `₹${inv.cash.toLocaleString("en-IN")}`);
+    setText(this.wallet.value, this.wallet.cache, "v", fmtMoney(inv.cash));
+    setClass(this.wallet.el, this.wallet.cache, "empty", "empty", inv.cash <= 0);
     setText(this.fuelSlot.count, this.fuelSlot.cache, "n", `${inv.fuelCans}`);
     setClass(this.fuelSlot.slot, this.fuelSlot.cache, "empty", "empty", inv.fuelCans === 0);
 

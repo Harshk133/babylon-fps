@@ -55,9 +55,9 @@ ITEMS.biscuit = {
   desc: `A quick snack: +${BISCUIT.heal} health. H eats one when you aren't hurt enough for a medkit.`,
 };
 ITEMS.cash = {
-  id: "cash", name: "₹2000 Notes", type: "cash", group: null, icon: "cash", maxStack: 1, weight: 0,
+  id: "cash", name: "Taara Notes", type: "cash", group: null, icon: "cash", maxStack: 1, weight: 0,
   rarity: "uncommon", equipmentSlot: null, compatibleSlots: [], stackable: false,
-  desc: "Money. Spend it at a dukaan (shop stall) in any town.",
+  desc: "Taara (✦), the island's money. Spend it at a dukaan (shop stall) in any town.",
 };
 ITEMS.fuel = {
   id: "fuel", name: FUEL_CAN.name, type: "utility", group: "Utility", icon: "fuel", maxStack: FUEL_CAN.max,

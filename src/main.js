@@ -85,7 +85,7 @@ import { Pickups } from "./pickups/Pickups.js";
 import { renderItemIcon, setItemModel, cloneItem } from "./items/ItemModels.js";
 import { applyStaticIcons, gameItemIcon } from "./ui/applyIcons.js";
 import { icon } from "./ui/gameIcons.js";
-import { SHOP_ITEMS, ShopUI, fmtRupees } from "./economy/Shop.js";
+import { SHOP_ITEMS, ShopUI, fmtMoney } from "./economy/Shop.js";
 import { shopSpots, buildShops, SHOP_RANGE } from "./world/Shops.js";
 import { Crates, CRATE_SIZE, CRATE_HP } from "./world/Crates.js";
 import { waterTowerSpots, buildWaterTowers } from "./world/WaterTowers.js";
@@ -2675,7 +2675,7 @@ function updatePickups(delta) {
     if (!drive.on) {
       for (const s of shops) if (Math.hypot(s.front.x - p.x, s.front.z - p.z) < SHOP_RANGE) { nearShop = s; break; }
     }
-    if (nearShop) addPrompt("B", "Open shop", `Dukaan · ${fmtRupees(inventory.cash)}`, "shop");
+    if (nearShop) addPrompt("B", "Open shop", `Dukaan · ${fmtMoney(inventory.cash)}`, "shop");
     const car = drive.car ?? ride.car ?? nearestVehicle();
     if (car) {
       const bike = !!car.spec.bike;
@@ -2917,7 +2917,7 @@ const DRAGON_STASH = ["medkit", "medkit", "ammo", "ammo", "ammo", "grenade", "ve
 
 function rollZombieDrop(zombie) {
   const p0 = zombie.body.position;
-  // Rupees: bosses always pay, the rest now and then
+  // Taara (game money): bosses always pay, the rest now and then
   const pay = CASH.monster[zombie.type] ?? CASH.monster.walker;
   if (zombie.def.boss || zombie.def.bossBar || Math.random() < CASH.monsterChance) {
     const a = Math.random() * Math.PI * 2;
@@ -3279,7 +3279,7 @@ function syncGearModel() {
 }
 let _gearCode = 0;
 
-// ─── Dukaan: buying with rupees ───────────────────────────────────────────────
+// ─── Dukaan: buying with Taara ────────────────────────────────────────────────
 // Stand at a town stall's counter and press B (or tap the prompt). The world
 // keeps running while you shop, like the map. Purchases go straight into your
 // pockets; gear you replace drops at your feet.
@@ -3289,7 +3289,7 @@ let shopHoldsPlay = false;       // the shop freed the mouse on desktop, but the
 
 /** "" if `item` can be bought right now, otherwise a short reason. */
 function whyNotBuy(item) {
-  if (inventory.cash < item.price) return "Need more ₹";
+  if (inventory.cash < item.price) return "Need more Taara";
   switch (item.give) {
     case "stack": {
       const n = item.n ?? 1;
@@ -3340,7 +3340,7 @@ function buyItem(id) {
   if (inventory.current !== prev) onWeaponChanged();
   else onWeaponChanged(false);
   sfx.pickup(item.give === "gun" || item.give === "gear");
-  inventoryUI.feed(`Bought ${item.label} · ${fmtRupees(item.price)}`, "cash", item.id);
+  inventoryUI.feed(`Bought ${item.label} · ${fmtMoney(item.price)}`, "cash", item.id);
   return { ok: true, msg: `Bought ${item.label}` };
 }
 
@@ -4087,9 +4087,8 @@ async function loadWorld() {
   loadMark("world downloaded");
   sfx.preload();
   indiaModels = india;
-  // The real Parle-G pack and ₹2000 notes replace the procedural ones (before any pickup is built)
+  // The real Parle-G pack replaces the procedural one (before any pickup is built); money stays the procedural Taara bundle
   if (india.biscuit) setItemModel("biscuit", india.biscuit, 0.22);
-  if (india.rupees) setItemModel("cash", india.rupees, 0.18);
 
 
   if (wrlScene) {
@@ -6726,7 +6725,7 @@ function brHandleElim({ v, k, w, hs }) {
 // MW_PING s everyone else gets their spot as a red pin + pillar (a last-known
 // position, so it's a hunt, not a wallhack); they hit MW_DAMAGE harder, and
 // whoever takes them down claims the bounty: full health, armour repaired and
-// ₹ per kill they had. The host picks (it sees every elim) and "br" carries it.
+// Taara per kill they had. The host picks (it sees every elim) and "br" carries it.
 // REVENGE RUN: the first time a person is knocked out, they skydive back in as
 // a revenant with a pistol and REVENGE_TIME s. One kill and they're reborn for
 // the rest of the match; otherwise they fade. The host grants it (brrev); a
@@ -6734,7 +6733,7 @@ function brHandleElim({ v, k, w, hs }) {
 const MW_MIN_KILLS = 2;
 const MW_PING = 10;
 const MW_DAMAGE = 1.15;
-const MW_BOUNTY = 1500;       // ₹ per kill on the wanted player's head
+const MW_BOUNTY = 1500;       // Taara per kill on the wanted player's head
 const MW_COLOR = "#ff3046";
 const REVENGE_TIME = 75;
 const REVENGE_WAIT = 4.5;     // s of the eliminated screen before the drop
@@ -6743,7 +6742,7 @@ const _mwFix = { x: 0, z: 0 };
 const _edgeWanted = { self: false, name: "", bounty: "", dist: null, next: 0 };
 const _edgeRev = { t: 0, urgent: false };
 
-const mwBounty = kills => fmtRupees(Math.max(MW_MIN_KILLS, kills) * MW_BOUNTY);
+const mwBounty = kills => fmtMoney(Math.max(MW_MIN_KILLS, kills) * MW_BOUNTY);
 
 /** Where a player is right now (you, a person or a bot), or null. */
 function brPlayerPos(id) {
@@ -6793,7 +6792,7 @@ function brClaimBounty(v) {
     if (piece) inventory.equipGear(piece.id); // fresh durability
   }
   inventory.addCash(cash);
-  gameHud.showBanner({ title: "BOUNTY CLAIMED", sub: `+${fmtRupees(cash)}`, text: "Full health · armour repaired", color: "#ffc23d", duration: 4 });
+  gameHud.showBanner({ title: "BOUNTY CLAIMED", sub: `+${fmtMoney(cash)}`, text: "Full health · armour repaired", color: "#ffc23d", duration: 4 });
   postFx.kick(0.5, 0xffd27a);
   postFx.shockwave(0.5, 0.5, 0.9, 0xffd27a, 1.4, 0.8);
   sfx.levelCleared();

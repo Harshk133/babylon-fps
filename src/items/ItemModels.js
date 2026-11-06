@@ -25,8 +25,10 @@ const MAT = {
   liquid:  new THREE.MeshStandardMaterial({ color: 0xb8620f, metalness: 0.0, roughness: 0.3, emissive: 0x2a1000 }),
   parle:   new THREE.MeshStandardMaterial({ color: 0xf4d34a, metalness: 0.0, roughness: 0.45 }),
   parleRed: new THREE.MeshStandardMaterial({ color: 0xd8262e, metalness: 0.0, roughness: 0.5 }),
-  note:    new THREE.MeshStandardMaterial({ color: 0xd65aa8, metalness: 0.0, roughness: 0.7 }),
-  noteDk:  new THREE.MeshStandardMaterial({ color: 0x8e2f6e, metalness: 0.0, roughness: 0.7 }),
+  // Taara notes (the game's made-up money): teal paper, a deeper teal border, gold band and star
+  note:    new THREE.MeshStandardMaterial({ color: 0x2fa391, metalness: 0.0, roughness: 0.7 }),
+  noteDk:  new THREE.MeshStandardMaterial({ color: 0x17594f, metalness: 0.0, roughness: 0.7 }),
+  noteGold: new THREE.MeshStandardMaterial({ color: 0xe8b64a, metalness: 0.0, roughness: 0.55 }),
   glass:   new THREE.MeshStandardMaterial({
     color: 0x6b8f3a, metalness: 0.1, roughness: 0.1, transparent: true, opacity: 0.55, depthWrite: false,
   }),
@@ -271,12 +273,17 @@ const BUILDERS = {
     return g;
   },
 
-  // A bundle of ₹2000 notes with a paper band
+  // A bundle of Taara notes (fictional: no real banknote's size, colours or design):
+  // a stack with a darker edge, a gold paper band and a little gold star on top
   cash: () => {
     const g = new THREE.Group();
-    box(g, 0.166, 0.03, 0.066,   MAT.note,   0, 0, 0);
-    box(g, 0.168, 0.004, 0.068,  MAT.noteDk, 0, 0.012, 0);
-    box(g, 0.03, 0.032, 0.068,   MAT.white,  0, 0, 0);
+    box(g, 0.15, 0.03, 0.075,   MAT.noteDk, 0, 0, 0);
+    box(g, 0.142, 0.004, 0.067, MAT.note,   0, 0.0155, 0);
+    box(g, 0.028, 0.034, 0.077, MAT.noteGold, -0.035, 0, 0);
+    const star = new THREE.Mesh(new THREE.OctahedronGeometry(0.014), MAT.noteGold);
+    star.scale.set(1, 0.35, 1);
+    star.position.set(0.035, 0.019, 0);
+    g.add(star);
     return g;
   },
 
@@ -329,8 +336,8 @@ function gearBuilders() {
 const _templates = new Map();
 
 /**
- * Swaps an item's procedural model for a loaded one (the Parle-G and ₹2000
- * models), scaled to `size` metres along its longest side and centred. Call
+ * Swaps an item's procedural model for a loaded one (the Parle-G
+ * model), scaled to `size` metres along its longest side and centred. Call
  * before the item is first used (pickups build their meshes on first spawn).
  */
 export function setItemModel(id, object3D, size) {

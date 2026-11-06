@@ -73,7 +73,7 @@ export const MEDKIT = { name: "Medkit", max: 3, start: 0, heal: 50 };
 export const BISCUIT = { name: "Parle-G Biscuits", max: 8, start: 0, heal: 20, medkitBelow: 60 };
 
 /**
- * Rupees: ₹2000 notes lying around, dropped by monsters and by eliminated
+ * Taara (✦, the game's made-up money): ✦2,000 bundles lying around, dropped by monsters and by eliminated
  * players. Spent at the dukaan stalls in the towns (src/economy/Shop.js).
  */
 export const CASH = {
@@ -213,7 +213,7 @@ export const PICKUP_KINDS = {
   medkit:  { category: "medkit",    label: "Medkit",         scale: 1.4 },
   biscuit: { category: "medkit",    label: "Parle-G Biscuits", scale: 2.4 },
   fuel:    { category: "fuel",      label: "Petrol Can",     scale: 1.6 },
-  cash:    { category: "cash",      label: "₹2000 Notes",    scale: 2.4 },
+  cash:    { category: "cash",      label: "Taara Notes",    scale: 2.4 },
 };
 for (const [id, g] of Object.entries(GEAR)) {
   PICKUP_KINDS[id] = { category: "gear", label: g.name, scale: g.slot === "helmet" ? 2.2 : 1.5, interact: true };

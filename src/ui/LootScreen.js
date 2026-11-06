@@ -10,6 +10,7 @@
 import { WEAPONS, WEAPON_ORDER, THROWABLE_ORDER, ATTACH_SLOT_NAMES, GEAR, GEAR_SLOTS, ATTACHMENTS } from "../combat/weapons.js";
 import { ITEMS, GROUPS, RARITY_COLOR, attachSlotsFor, weaponStats } from "../items/ItemDefs.js";
 import { CharacterPreview } from "./CharacterPreview.js";
+import { fmtMoney } from "../economy/Currency.js";
 import "./loot-screen.css";
 
 const DRAG_START = 6;          // px the pointer moves before a press becomes a drag
@@ -159,7 +160,7 @@ export class LootScreen {
       case "gear":
         return { sub: GEAR[e.kind].durability ? `Durability ${Math.round(d.dur ?? GEAR[e.kind].durability)} / ${GEAR[e.kind].durability}` : item.desc, qty: "" };
       case "ammo": return { sub: "Ammo for every gun", qty: "" };
-      case "cash": return { sub: "Walk over it to pocket it", qty: `₹${(d.count ?? 0).toLocaleString("en-IN")}` };
+      case "cash": return { sub: "Walk over it to pocket it", qty: fmtMoney(d.count ?? 0) };
       default: return { sub: item.type === "attachment" ? ATTACH_SLOT_NAMES[ATTACHMENTS[e.kind].slot] : "", qty: (d.count ?? 1) > 1 ? `×${d.count}` : "" };
     }
   }

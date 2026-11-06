@@ -980,7 +980,14 @@ kbd {
   box-shadow: 0 0 12px rgba(255, 90, 58, 0.25);
 }
 
-.hb-tslot.empty { opacity: 0.4; }
+/* Only what you carry: guns you don't own and stacks you've run out of leave the bar */
+.hb-slot:not(.owned),
+.hb-tslot.empty,
+.hb-wallet.empty,
+.hb-hints.no-throw .hb-hint-throw { display: none; }
+.hb-slot.owned, .hb-tslot:not(.empty), .hb-wallet:not(.empty) { animation: hb-pop 0.22s cubic-bezier(.2, .9, .3, 1.4); }
+@keyframes hb-pop { from { transform: scale(0.6); opacity: 0; } }
+.hb-slot.equipped { animation: none; }
 
 .hb-ticon {
   width: 26px;

@@ -1,5 +1,6 @@
 import { WEAPONS, THROWABLES, ATTACHMENTS, GEAR, ATTACH_SLOT_NAMES } from "../combat/weapons.js";
 import { ITEMS } from "../items/ItemDefs.js";
+import { fmtMoney } from "../economy/Currency.js";
 
 /** m: loot this close shows in the inventory screen's vicinity list. */
 export const VICINITY = 3.2;
@@ -261,7 +262,7 @@ export class LootActions {
       case "cash": {
         const amount = data.count ?? 0;
         inv.addCash(amount);
-        msg = `+₹${amount.toLocaleString("en-IN")}`;
+        msg = `+${fmtMoney(amount)}`;
         break;
       }
       case "attachment": {
