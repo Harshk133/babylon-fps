@@ -6,7 +6,7 @@ import { CREDIT_GROUPS, DISCLAIMER, LICENCES, LEGAL_CONTACT } from "../legal/cre
 // the start / pause screen; shown once on the first visit, until it's accepted.
 
 // Bump the version when the disclaimer changes, so everyone reads and accepts it again
-const ACK_KEY = "babylon-fps:legal-ack-v3";
+const ACK_KEY = "babylon-fps:legal-ack-v4";
 
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const SHIELD = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5 4 5.6v6.1c0 4.7 3.3 8.8 8 9.8 4.7-1 8-5.1 8-9.8V5.6z"/><path d="m8.6 12 2.4 2.4 4.6-4.8"/></svg>`;

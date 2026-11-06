@@ -43,13 +43,16 @@ export class WorldChunks {
     this._t = EVERY;
     let shown = 0;
     for (const it of this.items) {
-      const dx = it.x - x, dz = it.z - z, reach = RANGE + it.r;
+      const dx = it.x - x, dz = it.z - z, reach = (this.range ?? RANGE) + it.r;
       const v = dx * dx + dz * dz < reach * reach;
       if (it.obj.visible !== v) it.obj.visible = v;
       if (v) shown++;
     }
     this.shown = shown;
   }
+
+  /** Draw distance in m (the opening cinematic widens it for its aerial shots; null = RANGE). */
+  range = null;
 
   /** Everything visible (the loading-screen shader warm-up). */
   showAll() { for (const it of this.items) it.obj.visible = true; }

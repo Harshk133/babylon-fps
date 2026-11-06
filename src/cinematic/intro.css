@@ -1,0 +1,56 @@
+/* The opening cinematic's UI (cinematic/CinematicIntro.js) */
+#cinematic { position: fixed; inset: 0; z-index: 3000; display: none; pointer-events: auto; cursor: none; }
+#cinematic.on { display: block; }
+#cinematic * { overflow: visible; }
+/* While it plays, the game's own UI stays out of the way (the canvas keeps drawing) */
+body.cinematic-on > :not(#app):not(canvas):not(#cinematic),
+body.cinematic-on #app > :not(#webgl) { visibility: hidden !important; }
+
+.cn-fade { position: absolute; inset: 0; background: #000; opacity: 1; pointer-events: none; }
+.cn-vignette {
+  position: absolute; inset: 0; opacity: 0; pointer-events: none;
+  background: radial-gradient(ellipse at 50% 42%, rgba(0,0,0,0) 30%, rgba(4,3,8,0.55) 75%, rgba(2,1,4,0.85) 100%);
+}
+/* Letterbox: 2.39:1 bars eased in and out */
+.cn-bar { position: absolute; left: 0; right: 0; height: 0; background: #000; transition: height 1.4s cubic-bezier(.4, 0, .2, 1); pointer-events: none; }
+.cn-top { top: 0; }
+.cn-bottom { bottom: 0; }
+#cinematic.bars .cn-bar { height: max(0px, calc((100vh - 100vw / 2.39) / 2)); }
+
+/* "Click to begin" */
+.cn-begin { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px; cursor: pointer; }
+.cn-begin.on { display: flex; }
+.cn-begin-glow {
+  width: 120px; height: 120px; border-radius: 50%; margin-bottom: 8px;
+  background: radial-gradient(circle, rgba(255,214,140,0.9) 0%, rgba(255,170,70,0.35) 35%, rgba(60,90,220,0.15) 60%, transparent 72%);
+  animation: cn-breathe 3.2s ease-in-out infinite;
+}
+@keyframes cn-breathe { 0%, 100% { transform: scale(0.9); opacity: 0.7; } 50% { transform: scale(1.08); opacity: 1; } }
+.cn-begin-main { margin: 0; font: 400 34px/1 "Teko", "Bahnschrift", sans-serif; letter-spacing: 0.42em; text-transform: uppercase; color: #f6dfa5; text-indent: 0.42em; }
+.cn-begin-sub { margin: 0; font: 500 12px "Segoe UI", system-ui, sans-serif; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(246, 223, 165, 0.55); }
+
+/* Skip + mute, always there */
+.cn-controls { position: absolute; right: 18px; bottom: 18px; display: flex; gap: 8px; z-index: 2; cursor: auto; }
+.cn-controls button {
+  font: 600 12px "Segoe UI", system-ui, sans-serif; letter-spacing: 0.12em; text-transform: uppercase;
+  color: rgba(255, 244, 220, 0.85); background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 220, 150, 0.35);
+  border-radius: 3px; padding: 7px 12px; cursor: pointer; backdrop-filter: blur(3px);
+}
+.cn-controls button:hover { background: rgba(255, 210, 120, 0.18); color: #fff; }
+.cn-controls kbd { margin-left: 6px; padding: 1px 5px; font: 600 10px "Segoe UI", sans-serif; border: 1px solid rgba(255,255,255,0.35); border-radius: 2px; }
+.cn-mute { padding: 6px 9px !important; font-size: 14px !important; letter-spacing: 0 !important; }
+
+/* Under the title */
+.cn-title-ui { position: absolute; left: 0; right: 0; top: 63%; display: flex; flex-direction: column; align-items: center; gap: 22px; opacity: 0; transition: opacity 1.6s ease; pointer-events: none; }
+.cn-title-ui.on { opacity: 1; }
+.cn-tagline { margin: 0; font: 400 15px "Special Elite", "Segoe UI", serif; letter-spacing: 0.32em; text-transform: uppercase; color: rgba(255, 238, 205, 0.86); text-shadow: 0 2px 12px rgba(0,0,0,0.8); text-align: center; padding: 0 16px; }
+.cn-press { margin: 0; font: 500 20px "Teko", sans-serif; letter-spacing: 0.4em; text-transform: uppercase; color: #f6dfa5; opacity: 0; text-shadow: 0 0 18px rgba(255, 200, 110, 0.6); }
+.cn-title-ui.press .cn-press { animation: cn-press 2.2s ease-in-out infinite; }
+@keyframes cn-press { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+#cinematic:has(.cn-title-ui.press) { cursor: pointer; }
+
+@media (max-width: 640px) {
+  .cn-begin-main { font-size: 26px; letter-spacing: 0.3em; }
+  .cn-tagline { font-size: 12px; letter-spacing: 0.2em; }
+  .cn-title-ui { top: 60%; }
+}

@@ -70,6 +70,13 @@ export const CREDIT_GROUPS = [
     ],
   },
   {
+    title: "Opening cinematic · planet textures",
+    note: "Used in the intro's space shots. Resized and re-encoded as WebP for the game (scripts/build-cinematic-assets.mjs).",
+    items: [
+      { what: "Earth (day, night lights, clouds), Sun, Jupiter, Saturn and its rings, Mars, Moon", who: "Solar System Scope (based on NASA imagery)", licence: "CC BY 4.0", url: "https://www.solarsystemscope.com/textures/", changes: "Resized, re-encoded as WebP." },
+    ],
+  },
+  {
     title: "Ground textures · Poly Haven",
     note: "Public domain (CC0) PBR textures from Poly Haven. Resized, re-encoded as WebP and their normal maps packed two to a texture for the game.",
     items: [
@@ -123,7 +130,7 @@ export const CREDIT_GROUPS = [
   },
   {
     title: "Made for this game",
-    note: "Built for the game and owned by its developer: the CSE building, the college workshop, the college gate, the water towers, the chaiwala, the city, villages, caves, terrain, roads, fields and procedural props, the wooden crates and their texture, the made-up Taara money and Krunchu Biscuits, the toolkit, spanner and supply-drop crate, the stand-in vehicles, every shader and effect (crash sparks, smoke, fire, blood, post-processing), the kick, punch, rider, mount and vehicle animation, and the game's own rules: Most Wanted bounties, Revenge Run, supply drops, Nemesis rivals and vehicle repairs.",
+    note: "Built for the game and owned by its developer: the CSE building, the college workshop, the college gate, the water towers, the chaiwala, the city, villages, caves, terrain, roads, fields and procedural props, the wooden crates and their texture, the made-up Taara money and Krunchu Biscuits, the toolkit, spanner and supply-drop crate, the stand-in vehicles, every shader and effect (crash sparks, smoke, fire, blood, post-processing), the kick, punch, rider, mount and vehicle animation, the opening cinematic (the divine artifact and devotional image, the cosmos, the score: all original, drawn and synthesized in code), and the game's own rules: Most Wanted bounties, Revenge Run, supply drops, Nemesis rivals and vehicle repairs.",
     items: [],
   },
 ];
@@ -136,6 +143,7 @@ export const DISCLAIMER = [
   { heading: "No real-money play", text: "There is no real-money purchase, betting or gambling in the game. Shops, bounties, crates and loot use in-game money and items only." },
   { heading: "Third-party content", text: "The game uses models, sounds, icons, fonts and software made by other people under the licences listed in Credits. Their authors keep all rights in their work. Changes made for the game are noted there. Listing an author does not mean they endorse this game." },
   { heading: "Content", text: "Contains fantasy violence against monsters and, in Battle Royale, other players, including unarmed kicks and punches, bounties on players and players returning as revenants. It's a game: nothing in it is meant to promote violence in real life." },
+  { heading: "Devotional imagery", text: "The opening cinematic is an original artistic homage inspired by the story of Lord Krishna showing the universe to Mother Yashoda (Brahmanda Darshan). It is made with respect for the tradition and its devotees; it is not a religious text or an official depiction, and no offence is intended. Its music is original and contains no chants." },
   { heading: "Photosensitivity warning", text: "A small number of people may have seizures when exposed to flashing lights or patterns. This game has flashes (gunfire, explosions, lightning, electric sparks, screen effects) and fast motion. If you or anyone in your family has epilepsy, talk to a doctor before playing, and stop at once if you feel dizzy, see altered vision, twitch or feel disoriented." },
   { heading: "Play responsibly", text: "Take breaks. Keep the volume at a safe level, especially with headphones. Don't play while driving or when you need to be aware of your surroundings." },
   { heading: "Privacy", text: "The game has no accounts and asks for no personal information. Your settings, progress, look and keys stay in your own browser (local storage). In multiplayer, the callsign you choose, your position and actions in the game, and your chat messages are relayed to the other players in your room and are not stored by the game after you leave. Don't share personal information in your callsign or the chat. The web host and relay server may keep standard technical logs (such as IP addresses) as all websites do." },
