@@ -42,7 +42,6 @@ import { CrashFX, CRASH_KIND } from "./vehicles/CrashFX.js";
 import { SkidMarks } from "./vehicles/SkidMarks.js";
 import { PowerLines } from "./world/PowerLines.js";
 import { HorrorScore } from "./audio/HorrorScore.js";
-import { CinematicIntro, AUTO_PLAY_INTRO } from "./cinematic/CinematicIntro.js";
 import { City } from "./world/City.js";
 import { Plots } from "./world/Plots.js";
 import { WorldChunks, splitInstanced } from "./world/Chunks.js";
@@ -3438,8 +3437,6 @@ function updatePostFx(realDt) {
     ...brPostFx(),
     // Flat out on the road: the freefall's zoom blur and wind streaks, gentler
     ...(driveThrill > 0.02 ? { fallSpeed: Math.max(_brFx.fallSpeed, driveThrill * 0.42) } : null),
-    // The cinematic's speed: streaks in space, the dive through the clouds
-    ...(cinematic?.active && cinematic.postFall > 0.01 ? { fallSpeed: cinematic.postFall } : null),
     // Faster as health drops
     heartbeat: low ? 0.5 + 0.5 * Math.sin(performance.now() / 1000 * (6 + 6 * (1 - playerHealth / (MAX_HEALTH * 0.4)))) : 0,
   });
@@ -6453,54 +6450,6 @@ net.on("grap", msg => {
   r.t = 0;
 });
 
-// ─── Opening cinematic (src/cinematic/) ───────────────────────────────────────
-// Plays once the world is loaded and before the lobby: from a divine artifact,
-// through the universe, onto India and down onto this very map, ending on the
-// title. It only moves the camera (and draws its own cosmos); the game keeps
-// its state, and no room is joined until it hands back. Settings: play at
-// start, reduced graphics, replay.
-let cinematic = null;
-/** The drone's path over the real island: high over the south, down onto Shivpur, along the Highway, up the North Road to the college. */
-function introFlightPath() {
-  return [
-    { p: [120, 430, -380], look: [60, 0, -20] },
-    { p: [270, 250, -270], look: [CITY.x - 20, 0, CITY.z] },
-    { p: [CITY.x + 70, 120, CITY.z - 120], look: [CITY.x, 6, CITY.z] },
-    { p: [CITY.x + 10, 62, CITY.z + 80], look: [CITY.x - 110, 8, CITY.z + 70] },
-    { p: [200, 50, 40], look: [80, 6, 30] },
-    { p: [70, 40, 12], look: [COLLEGE_GATE.x, 6, COLLEGE_GATE.z] },
-    { p: [COLLEGE_GATE.x + 26, 32, COLLEGE_GATE.z + 10], look: [CSE_BUILDING.x, 10, CSE_BUILDING.z] },
-    { p: [COLLEGE_GATE.x + 40, 26, COLLEGE_GATE.z + 74], look: [CSE_BUILDING.x, 12, CSE_BUILDING.z] },
-  ];
-}
-function introWanted() {
-  // Desktops and laptops only: phones and tablets go straight to the lobby
-  if (!AUTO_PLAY_INTRO || IS_TOUCH || settings.get("introAuto") === false) return false;
-  return !new URLSearchParams(location.search).get("room");
-}
-function playIntro(onDone) {
-  if (cinematic?.active) return;
-  cinematic = new CinematicIntro({
-    renderer, postFx, sfx,
-    world: { scene, camera, groundHeight, chunks, env },
-    flightPath: introFlightPath(),
-    title: "SURVIVE THE HORDE",
-    tagline: "Every universe · one island · one survivor",
-    lite: QUALITY_NAME === "low" || IS_TOUCH || !!settings.get("introLite"),
-  });
-  cinematic.play(() => { cinematic = null; onDone?.(); });
-}
-/** Settings → Replay intro: from the lobby or a solo game (never mid-match in a room). */
-function replayIntro() {
-  if (cinematic?.active) return;
-  if (net.inRoom) { inventoryUI.feed("Replay the intro from the lobby, outside a room", "info"); return; }
-  const wasLobby = lobby.open;
-  settingsPanel.close();
-  releaseLock();
-  if (wasLobby) lobby.hide?.();
-  playIntro(() => { if (wasLobby) lobby.show(); });
-}
-
 /** The spanner in your hand while you repair. */
 const _wrenchMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a8, metalness: 0.85, roughness: 0.35 });
 const _wrenchGrip = new THREE.MeshStandardMaterial({ color: 0xc4161c, roughness: 0.6 });
@@ -8345,7 +8294,7 @@ if (scopeSensEl) {
 
 // Graphics quality: applied at startup, so a change reloads the page
 // ── Settings: gameplay switches + key bindings (ui/SettingsPanel.js) ──────────
-const settingsPanel = new SettingsPanel({ settings, bindings, touch: IS_TOUCH, onAction: id => { if (id === "replayIntro") replayIntro(); } });
+const settingsPanel = new SettingsPanel({ settings, bindings, touch: IS_TOUCH });
 // Sound settings: everything on / off, the master volume, the horror score
 const horrorScore = new HorrorScore(sfx);
 function applySoundSettings() {
@@ -8392,7 +8341,6 @@ if (import.meta.env.DEV) {
     get powerLines() { return powerLines; }, get shops() { return shops; }, get crates() { return crates; },
     fireGrapple, knockPole, smashStall, toggleVehicle, startRepair, damageVehicle,
     rope: () => ({ on: rope.on, phase: rope.phase }), health: () => playerHealth,
-    get cinematic() { return cinematic; },
   };
 }
 refreshKeyLabels();
@@ -8641,13 +8589,7 @@ function animate() {
   updateSunShadow();
   if (QUALITY.shadowEvery > 1 && ++shadowFrame % QUALITY.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
   perfOverlay?.markRender(performance.now());
-  // The opening cinematic either draws its own cosmos, or flies this camera over the world
-  const cine = cinematic?.active ? cinematic.frame(realDelta) : null;
-  if (cine === "cosmos") cinematic.renderCosmos();
-  else {
-    renderFrame();
-    if (cine === "world") cinematic.renderOverlay();
-  }
+  renderFrame();
   updateDynamicResolution(frameMs, performance.now() - frameStart);
   if (perfOverlay) perfOverlay.endFrame(performance.now(), perfCounts());
 }
@@ -9021,8 +8963,6 @@ async function boot() {
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     if (BENCH_ENABLED) startBenchmark();
-    // An invite link (or a reload inside a room) joins straight in; otherwise the opening cinematic plays first
-    else if (introWanted()) playIntro(() => { lobby.show(); lobby.autoJoin(); });
     else { lobby.show(); lobby.autoJoin(); }
     // The inventory screen's 3D character loads in the background
     lootScreen.initPreview(gltfLoader);

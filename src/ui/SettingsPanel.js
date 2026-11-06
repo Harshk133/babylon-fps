@@ -13,8 +13,6 @@ export const SETTING_DEFAULTS = {
   sound: true,          // every sound in the game
   volume: 0.9,          // master volume 0..1
   music: false,         // the horror score in zombie mode
-  introAuto: true,      // the opening cinematic plays when the game starts
-  introLite: false,     // reduced graphics for the cinematic (phones and Low quality get it anyway)
 };
 
 export class Settings {
@@ -38,16 +36,12 @@ const TOGGLES = [
   { id: "volume", title: "Volume", text: "Master volume.", range: true },
   { id: "music", title: "Horror music (zombie modes)", text: "A live, ever-changing horror score in Solo and Co-op that tightens when monsters hunt you." },
   { id: "autoDoors", title: "Auto-open doors", text: "Doors swing open as you walk up to them and shut behind you. Off: press the use key." },
-  { id: "introAuto", title: "Opening cinematic", text: "Play the intro when the game starts. You can always skip it (Esc)." },
-  { id: "introLite", title: "Cinematic: reduced graphics", text: "Fewer particles and lighter effects in the intro, for older computers." },
-  { id: "replayIntro", title: "Replay the intro", text: "Watch the opening cinematic again now.", action: "Play" },
   { id: "bots", title: "Bots in Battle Royale", text: "AI players fill your room. If anyone in the room turns this on, everyone in it plays with bots. Takes effect in the warm-up." },
 ];
 
 export class SettingsPanel {
   /** opts: { settings, bindings, touch, onClose } */
-  constructor({ settings, bindings, touch = false, onClose = null, onAction = null }) {
-    this.onAction = onAction;
+  constructor({ settings, bindings, touch = false, onClose = null }) {
     this.settings = settings;
     this.bindings = bindings;
     this.touch = touch;
@@ -84,8 +78,6 @@ export class SettingsPanel {
     this.el.addEventListener("click", e => {
       const tab = e.target.closest("[data-tab]");
       if (tab) { this.tab(tab.dataset.tab); return; }
-      const act = e.target.closest("[data-action]");
-      if (act) { this.onAction?.(act.dataset.action); return; }
       const tog = e.target.closest("[data-toggle]");
       if (tog) { const id = tog.dataset.toggle; this.settings.set(id, !this.settings.get(id)); this._render(); return; }
       const bind = e.target.closest("[data-bind]");
@@ -147,10 +139,6 @@ export class SettingsPanel {
     }
     let html = "";
     for (const t of TOGGLES) {
-      if (t.action) {
-        html += `<div class="st-toggle st-range"><span class="st-ttext"><b>${t.title}</b><small>${t.text}</small></span><button class="st-act" data-action="${t.id}">${t.action}</button></div>`;
-        continue;
-      }
       if (t.range) {
         const v = Math.round((this.settings.get(t.id) ?? 1) * 100);
         html += `<label class="st-toggle st-range"><span class="st-ttext"><b>${t.title}</b><small>${t.text}</small></span>

@@ -77,6 +77,3 @@ public/models/gear/*.glb
 
 # Poly Haven originals (the optimized .webp next to them are committed): node scripts/build-ground-textures.mjs
 public/texture/ground/src/
-
-# Cinematic texture originals (the .webp next to them are committed): node scripts/build-cinematic-assets.mjs
-public/cinematic/src/
