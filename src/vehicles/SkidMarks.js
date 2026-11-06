@@ -51,6 +51,7 @@ export class SkidMarks {
     this._up = new THREE.Vector3(0, 1, 0);
     this._dirty = false;
     this._lastMark = -1e6;
+    this._lo = MAX; this._hi = -1;   // slots written since the last upload
   }
 
   /** A vehicle skidding this frame with strength 0..1: strips under its rear wheels if it's moved on far enough. */
@@ -78,6 +79,8 @@ export class SkidMarks {
       this.mesh.setMatrixAt(i, this._m);
       this.born[i] = this.time.value;
       this.dark[i] = 0.35 + strength * 0.5;
+      this._lo = Math.min(this._lo, i);
+      this._hi = Math.max(this._hi, i);
     }
     this._dirty = true;
     this._lastMark = this.time.value;
@@ -90,10 +93,14 @@ export class SkidMarks {
   update(t) {
     this.time.value = t;
     if (this._dirty) {
+      // Upload only the slots written this frame (not the whole ring buffer)
       this._dirty = false;
-      this.mesh.instanceMatrix.needsUpdate = true;
-      this.mesh.geometry.attributes.aBorn.needsUpdate = true;
-      this.mesh.geometry.attributes.aDark.needsUpdate = true;
+      const lo = this._lo, n = this._hi - lo + 1;
+      const im = this.mesh.instanceMatrix, ab = this.mesh.geometry.attributes.aBorn, ad = this.mesh.geometry.attributes.aDark;
+      im.clearUpdateRanges(); ab.clearUpdateRanges(); ad.clearUpdateRanges();
+      im.addUpdateRange(lo * 16, n * 16); ab.addUpdateRange(lo, n); ad.addUpdateRange(lo, n);
+      im.needsUpdate = ab.needsUpdate = ad.needsUpdate = true;
+      this._lo = MAX; this._hi = -1;
     }
     // Nothing laid for a whole lifetime: nothing to draw
     if (this.mesh.visible && t - this._lastMark > LIFE) this.mesh.visible = false;

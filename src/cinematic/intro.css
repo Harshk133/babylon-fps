@@ -17,17 +17,10 @@ body.cinematic-on #app > :not(#webgl) { visibility: hidden !important; }
 .cn-bottom { bottom: 0; }
 #cinematic.bars .cn-bar { height: max(0px, calc((100vh - 100vw / 2.39) / 2)); }
 
-/* "Click to begin" */
-.cn-begin { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px; cursor: pointer; }
-.cn-begin.on { display: flex; }
-.cn-begin-glow {
-  width: 120px; height: 120px; border-radius: 50%; margin-bottom: 8px;
-  background: radial-gradient(circle, rgba(255,214,140,0.9) 0%, rgba(255,170,70,0.35) 35%, rgba(60,90,220,0.15) 60%, transparent 72%);
-  animation: cn-breathe 3.2s ease-in-out infinite;
-}
-@keyframes cn-breathe { 0%, 100% { transform: scale(0.9); opacity: 0.7; } 50% { transform: scale(1.08); opacity: 1; } }
-.cn-begin-main { margin: 0; font: 400 34px/1 "Teko", "Bahnschrift", sans-serif; letter-spacing: 0.42em; text-transform: uppercase; color: #f6dfa5; text-indent: 0.42em; }
-.cn-begin-sub { margin: 0; font: 500 12px "Segoe UI", system-ui, sans-serif; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(246, 223, 165, 0.55); }
+/* Sound waits for the page's first click (the browser's rule): a quiet hint until then */
+.cn-sound { display: none; }
+.cn-sound.on { display: inline-block; animation: cn-hint 2.4s ease-in-out infinite; }
+@keyframes cn-hint { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
 
 /* Skip + mute, always there */
 .cn-controls { position: absolute; right: 18px; bottom: 18px; display: flex; gap: 8px; z-index: 2; cursor: auto; }
@@ -44,13 +37,8 @@ body.cinematic-on #app > :not(#webgl) { visibility: hidden !important; }
 .cn-title-ui { position: absolute; left: 0; right: 0; top: 63%; display: flex; flex-direction: column; align-items: center; gap: 22px; opacity: 0; transition: opacity 1.6s ease; pointer-events: none; }
 .cn-title-ui.on { opacity: 1; }
 .cn-tagline { margin: 0; font: 400 15px "Special Elite", "Segoe UI", serif; letter-spacing: 0.32em; text-transform: uppercase; color: rgba(255, 238, 205, 0.86); text-shadow: 0 2px 12px rgba(0,0,0,0.8); text-align: center; padding: 0 16px; }
-.cn-press { margin: 0; font: 500 20px "Teko", sans-serif; letter-spacing: 0.4em; text-transform: uppercase; color: #f6dfa5; opacity: 0; text-shadow: 0 0 18px rgba(255, 200, 110, 0.6); }
-.cn-title-ui.press .cn-press { animation: cn-press 2.2s ease-in-out infinite; }
-@keyframes cn-press { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
-#cinematic:has(.cn-title-ui.press) { cursor: pointer; }
 
 @media (max-width: 640px) {
-  .cn-begin-main { font-size: 26px; letter-spacing: 0.3em; }
   .cn-tagline { font-size: 12px; letter-spacing: 0.2em; }
   .cn-title-ui { top: 60%; }
 }

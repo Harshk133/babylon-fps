@@ -154,11 +154,24 @@ const GradeShader = {
       vec2 off = (uv - 0.5) * ch / uRes.y * 2.0 + vec2(uGlitch * 0.012 + uFeed * 0.0015, 0.0);
       vec3 col;
       if (uRadial > 0.001) {
-        // Skydive: eight taps toward the centre, a zoom blur that grows with speed
+        // Speed (skydive, flat out on the road): a zoom blur toward the centre. Adaptive:
+        // as many taps as the streak is long in pixels (1 at the centre, where it's under a
+        // pixel, up to 6 at the edges), their positions jittered per pixel by interleaved
+        // gradient noise (Jimenez 2014) so a few taps look as smooth as many, without banding
         vec2 dir = (uv - 0.5) * uRadial * 0.075;
-        col = vec3(0.0);
-        for (int i = 0; i < 8; i++) col += samp(uv - dir * (float(i) / 7.0));
-        col *= 0.125;
+        float px = length(dir * uRes);
+        if (px < 1.5) {
+          col = samp(uv);
+        } else {
+          float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+          float n = clamp(floor(px * 0.25) + 2.0, 2.0, 6.0);
+          col = vec3(0.0);
+          for (int i = 0; i < 6; i++) {
+            if (float(i) >= n) break;
+            col += samp(uv - dir * ((float(i) + jit) / n));
+          }
+          col /= n;
+        }
       } else if (ch > 0.01 || uGlitch > 0.001 || uFeed > 0.001) {
         col = vec3(samp(uv + off).r, samp(uv).g, samp(uv - off).b);
       } else {

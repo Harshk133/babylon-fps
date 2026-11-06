@@ -22,11 +22,16 @@ export class IntroAudio {
     this.nodes = [];
   }
 
-  /** Schedules the whole score; cues: { name: seconds from the start }. start: the ctx time the intro's 0 maps to. */
-  play(cues) {
+  /**
+   * Schedules the whole score; cues: { name: seconds from the start }. offset: how far
+   * into the intro we already are (sound allowed late, after the player's first click):
+   * long beds join where they'd be, moments that have passed are left out.
+   */
+  play(cues, offset = 0) {
     const ctx = this.ctx = this.sfx.ctx;
     if (!ctx || !this.sfx.master) return false;
-    const t0 = ctx.currentTime + 0.05;
+    const now = this._now = ctx.currentTime;
+    const t0 = now + 0.05 - offset;
     this.t0 = t0;
     this.out = ctx.createGain();
     this.out.gain.value = 0.9;
@@ -39,23 +44,25 @@ export class IntroAudio {
     this.out.connect(this.verb).connect(wet).connect(this.sfx.master);
     this.noise = this.sfx.noise;
     const T = n => t0 + (cues[n] ?? 0);
+    const fresh = n => T(n) >= now - 0.05;      // a moment that hasn't happened yet
+    const until = end => end > now + 0.5;        // a bed still running
 
-    this._drone(T("start"), T("drone_end"));
-    this._dust(T("start"), 8);
-    this._bells(T("artifact"));
-    this._flute(T("flute"));
-    this._choir(T("vision"), T("galaxy") + 6);
-    this._whoosh(T("vision_through"), 1.6, 0.5);
-    this._swell(T("multiverse"), 10, 55, 0.22);
-    this._whoosh(T("multiverse_through"), 1.8, 0.7);
-    this._bass(T("galaxy"), 9);
-    this._whoosh(T("galaxy_through"), 2.0, 0.8);
-    this._strings(T("solar"), T("india") + 2);
-    this._whoosh(T("earth_dive"), 2.6, 0.6);
-    this._santoor(T("india"));
-    this._wind(T("world"), T("end") + 4);
-    this._riser(T("title") - 2.2, 2.2);
-    this._hit(T("title"));
+    if (until(T("drone_end"))) this._drone(T("start"), T("drone_end"));
+    if (fresh("start")) this._dust(T("start"), 8);
+    if (fresh("artifact")) this._bells(T("artifact"));
+    if (fresh("flute")) this._flute(T("flute"));
+    if (until(T("galaxy") + 6)) this._choir(T("vision"), T("galaxy") + 6);
+    if (fresh("vision_through")) this._whoosh(T("vision_through"), 1.6, 0.5);
+    if (until(T("multiverse") + 10)) this._swell(T("multiverse"), 10, 55, 0.22);
+    if (fresh("multiverse_through")) this._whoosh(T("multiverse_through"), 1.8, 0.7);
+    if (until(T("galaxy") + 9)) this._bass(T("galaxy"), 9);
+    if (fresh("galaxy_through")) this._whoosh(T("galaxy_through"), 2.0, 0.8);
+    if (until(T("india") + 2)) this._strings(T("solar"), T("india") + 2);
+    if (fresh("earth_dive")) this._whoosh(T("earth_dive"), 2.6, 0.6);
+    if (fresh("india")) this._santoor(T("india"));
+    if (until(T("end"))) this._wind(T("world"), T("end") + 4);
+    if (T("title") - 2.2 >= now) this._riser(T("title") - 2.2, 2.2);
+    if (fresh("title")) this._hit(T("title"));
     return true;
   }
 
@@ -122,7 +129,7 @@ export class IntroAudio {
     for (let c = t; c < end; c += cycle) {
       strings.forEach((fr, i) => {
         const at = c + i * (cycle / 4) + Math.random() * 0.03;
-        if (at > end - 1) return;
+        if (at > end - 1 || at < this._now) return;   // (joined late: not the plucks already gone)
         const o = this._osc("sawtooth", fr, at, at + 5);
         // The buzzing "jawari" bridge: a resonant band that sweeps down as the string decays
         const bp = ctx.createBiquadFilter();

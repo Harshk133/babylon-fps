@@ -89,22 +89,17 @@ export class CinematicIntro {
       <div class="cn-fade"></div>
       <div class="cn-bar cn-top"></div><div class="cn-bar cn-bottom"></div>
       <div class="cn-vignette"></div>
-      <div class="cn-begin">
-        <div class="cn-begin-glow"></div>
-        <p class="cn-begin-main">Click to begin</p>
-        <p class="cn-begin-sub">An original cinematic · best with sound on</p>
-      </div>
       <div class="cn-title-ui">
         <p class="cn-tagline"></p>
-        <p class="cn-press">Press any key to play</p>
       </div>
       <div class="cn-controls">
+        <button class="cn-sound" type="button">🔊 Click for sound</button>
         <button class="cn-mute" type="button" aria-label="Mute">🔊</button>
         <button class="cn-skip" type="button">Skip intro <kbd>Esc</kbd></button>
       </div>`;
     document.body.append(ui);
     this.fadeEl = ui.querySelector(".cn-fade");
-    this.beginEl = ui.querySelector(".cn-begin");
+    this.soundEl = ui.querySelector(".cn-sound");
     this.titleUi = ui.querySelector(".cn-title-ui");
     ui.querySelector(".cn-tagline").textContent = this.tagline;
     this.vignette = ui.querySelector(".cn-vignette");
@@ -116,11 +111,11 @@ export class CinematicIntro {
       mute.textContent = this.muted ? "🔇" : "🔊";
       this.audio?.setMuted(this.muted);
     });
+    // The browser holds sound back until the page is clicked: any click (or key) turns it on
     ui.addEventListener("pointerdown", e => {
       e.stopPropagation();
-      if (e.target.closest(".cn-controls")) return;
-      if (this.mode === "begin") this._start();
-      else if (this.t >= CUES.title + 1.5) this.finish();
+      if (e.target.closest(".cn-skip") || e.target.closest(".cn-mute")) return;
+      this._enableSound();
     });
     for (const t of ["mousedown", "click", "wheel", "touchstart"]) ui.addEventListener(t, e => e.stopPropagation(), { passive: true });
   }
@@ -131,22 +126,21 @@ export class CinematicIntro {
   }
 
   // ── Flow ────────────────────────────────────────────────────────────────────
-  /** Shows the "click to begin" card (audio needs a gesture), then plays. onDone runs once it's over or skipped. */
+  /** Plays straight away. onDone runs once it's over or skipped. */
   play(onDone) {
     if (this.active) return;
     this.onDone = onDone;
     this.active = true;
-    this.mode = "begin";
     this.t = 0;
     document.body.classList.add("cinematic-on");
     this.ui.classList.add("on");
-    this.beginEl.classList.add("on");
     this.titleUi.classList.remove("on");
     this._fade(1);
     window.addEventListener("keydown", this._onKey, true);
     window.addEventListener("resize", this._onResize);
-    // Start building straight away (the planet textures load while the first shots play)
+    // Build now (the planet textures load while the first shots play), and roll
     this._build();
+    this._start();
   }
 
   _build() {
@@ -167,13 +161,35 @@ export class CinematicIntro {
   }
 
   _start() {
-    this.sfx.unlock();
-    this.beginEl.classList.remove("on");
     this.mode = "cosmos";
     this.t = 0;
     this.audio = new IntroAudio(this.sfx);
-    // The context may still be resuming: give it a moment before scheduling the score
-    setTimeout(() => { if (this.active && this.audio) { this.audio.play(CUES); this.audio.setMuted(this.muted); } }, 60);
+    this.scored = false;
+    // Sound starts now if the page already has the user's go-ahead (a click while it
+    // loaded); otherwise on the first click or key, joining the score where it would be
+    this.sfx.unlock();
+    const ctx = this.sfx.ctx;
+    if (ctx?.state === "running") this._score();
+    else {
+      ctx?.resume?.().then(() => { if (ctx.state === "running") this._score(); }).catch(() => {});
+      this.soundEl.classList.add("on");
+    }
+  }
+
+  _enableSound() {
+    if (this.scored || !this.active || this.mode === "finish") return;
+    this.sfx.unlock();
+    const ctx = this.sfx.ctx;
+    if (!ctx) return;
+    (ctx.state === "running" ? Promise.resolve() : ctx.resume()).then(() => this._score()).catch(() => {});
+  }
+
+  _score() {
+    if (this.scored || !this.active || !this.audio || this.mode === "finish") return;
+    this.scored = true;
+    this.soundEl.classList.remove("on");
+    this.audio.play(CUES, this.t);
+    this.audio.setMuted(this.muted);
   }
 
   _key(e) {
@@ -181,8 +197,7 @@ export class CinematicIntro {
     e.stopImmediatePropagation();
     e.preventDefault();
     if (e.code === "Escape") { this.skip(); return; }
-    if (this.mode === "begin" && (e.code === "Enter" || e.code === "Space")) { this._start(); return; }
-    if (this.mode !== "begin" && this.t >= CUES.title + 1.5) this.finish();
+    this._enableSound();
   }
 
   skip() {
@@ -231,12 +246,6 @@ export class CinematicIntro {
       if (left <= 0) { this._end(); return null; }
       return this.t < CUES.world ? (this.t > 0 ? "cosmos" : null) : "world";
     }
-    if (this.mode === "begin") {
-      this._fade(1);
-      // A faint glimmer of the artifact behind the card
-      this._cosmosShot(0.0001, dt);
-      return "cosmos";
-    }
     this.t += dt * this.speed;
     const t = this.t;
     if (t < CUES.world) {
@@ -249,7 +258,7 @@ export class CinematicIntro {
       this.flight.begin();
     }
     this._worldShot(t, dt);
-    if (t > CUES.title + 16) this.finish();
+    if (t > CUES.title + 7.5) this.finish(1.4);
     return "world";
   }
 
@@ -397,7 +406,6 @@ export class CinematicIntro {
     this.titleFx.update(tt);
     this.vignette.style.opacity = (ss(tt, -1.5, 1.5) * 0.85).toFixed(3);
     this.titleUi.classList.toggle("on", tt > 1.2);
-    this.titleUi.classList.toggle("press", tt > 2.8);
     this.ui.classList.toggle("bars", tt < 0);
   }
 }

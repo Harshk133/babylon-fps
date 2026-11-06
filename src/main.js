@@ -700,6 +700,9 @@ function updateDynamicResolution(frameMs, cpuMs) {
     next = Math.min(MAX_PIXEL_RATIO, perf.ratio + 0.05);
     if (next !== perf.ratio) perf.raisedAt = now;
   }
+  // A resize (no grade-pass scaling) reallocates the canvas and targets: a visible hitch.
+  // Not while you are flat out on the road, where it would land mid-corner, again and again
+  if (next !== perf.ratio && !postFx.canScale && driveThrill > 0.1) { perf.slow = perf.fast = 0; return; }
   if (next !== perf.ratio) {
     perf.ratio = next;
     perf.slow = 0;
@@ -3434,7 +3437,7 @@ function updatePostFx(realDt) {
     freefall: isBR() && br.flight === PHASE_FALL ? 1 : isBR() && br.flight === PHASE_CHUTE ? 0.25 : 0,
     ...brPostFx(),
     // Flat out on the road: the freefall's zoom blur and wind streaks, gentler
-    ...(driveThrill > 0.02 ? { fallSpeed: Math.max(brPostFx().fallSpeed, driveThrill * 0.75) } : null),
+    ...(driveThrill > 0.02 ? { fallSpeed: Math.max(_brFx.fallSpeed, driveThrill * 0.42) } : null),
     // The cinematic's speed: streaks in space, the dive through the clouds
     ...(cinematic?.active && cinematic.postFall > 0.01 ? { fallSpeed: cinematic.postFall } : null),
     // Faster as health drops
@@ -6140,17 +6143,29 @@ function updateMapPrebuild(dt) {
 
 // ─── Rope gun (a grappling hook) ──────────────────────────────────────────────
 // U (rebindable) fires a hook along the crosshair to the first thing within
-// GRAPPLE.range m; it flies out, bites, and reels you in at GRAPPLE.speed m/s,
-// hand over hand (Soldier "grapple" pose), body clear of walls on the way.
-// Onto a roof / the ground: you land on it. Onto a wall: if there's a ledge
-// above (a roof edge, a water tower's rim), you climb over it (the climb clip);
-// if not, you hang a moment and drop. U again, jumping or a vehicle lets go.
-// Teammates see the rope: grap { a: [x, y, z] } / { c: 1 }.
+// GRAPPLE.range m. It flies out and bites; then, like a person on a rope:
+//   swing   the rope swings you in to the foot of the wall (both hands high)
+//   climb   up the wall hand over hand: each pull lifts you in a surge and
+//           eases, the feet walk up the wall on the opposite beat, a foot
+//           plants each half cycle (Soldier "grapple" pose, ropeMode/ropePhase)
+//   mantle  over the top with the climb clip (a roof, a water tower's rim, a ledge)
+//   rappel  hooked below you: down the rope leaning back, one hand guiding, one braking
+//   zip     hooked on open ground: a quick pull straight along the rope
+// Hooked onto a roof, it finds the wall between you and the hook and climbs
+// that. A bare wall with no ledge: you hang a moment and drop. U again,
+// jumping or a vehicle lets go. Teammates see the rope: grap { a } / { c: 1 }.
 const rope = {
-  on: false, phase: "", t: 0, cd: 0, hangT: 0,
+  on: false, phase: "", t: 0, cd: 0, hangT: 0, k: 0, cycle: 0, stepHalf: 0, climbTop: 0, overTop: false,
   hook: new THREE.Vector3(), anchor: new THREE.Vector3(), normal: new THREE.Vector3(),
+  wallN: new THREE.Vector3(), wallP: new THREE.Vector3(), base: new THREE.Vector3(),
   pos: new THREE.Vector3(), from: new THREE.Vector3(), mid: new THREE.Vector3(), to: new THREE.Vector3(), mantleT: 0,
 };
+const ROPE_SWING = 11;      // m/s swinging in to the wall
+const ROPE_CLIMB = 3.4;     // m/s average up the rope
+const ROPE_RATE = 1.7;      // hand-over-hand cycles a second
+const ROPE_RAPPEL = 6.5;    // m/s down
+const ROPE_ZIP = 15;        // m/s along it
+const ROPE_OFF = 0.42;      // m the body hangs off the wall
 const ROPE_MANTLE = 0.85;
 const ropeRayOpts = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
 const _rFrom = new CANNON.Vec3(), _rTo = new CANNON.Vec3(), _rRes = new CANNON.RaycastResult();
@@ -6166,12 +6181,13 @@ function makeRopeLine() {
   return l;
 }
 const ropeLine = makeRopeLine();
+const ropeTail = makeRopeLine();   // the slack hanging below you while you climb
 const hookMesh = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.16, 6), new THREE.MeshStandardMaterial({ color: 0x7a7f86, metalness: 0.8, roughness: 0.35 }));
 hookMesh.visible = false;
 scene.add(hookMesh);
 const remoteRopes = new Map();   // player id → { line, anchor, t }
 
-function ropeMoving() { return rope.on && (rope.phase === "pull" || rope.phase === "mantle" || rope.phase === "hang"); }
+function ropeMoving() { return rope.on && rope.phase !== "fly" && rope.phase !== ""; }
 
 function setRopeLine(line, a, b) {
   const arr = line.geometry.attributes.position.array;
@@ -6222,7 +6238,9 @@ function releaseRope() {
   characterBody.collisionResponse = true;
   soldier.stopGesture("grapple");
   ropeLine.visible = false;
+  ropeTail.visible = false;
   hookMesh.visible = false;
+  soldier.ropeMode = null;
   net.send({ t: "grap", c: 1 });
   if (soldier.gesture?.name === "grapple") soldier.stopGesture();
 }
@@ -6244,42 +6262,128 @@ function updateRope(delta) {
     const d = rope.hook.distanceTo(rope.anchor), step = GRAPPLE.hookSpeed * delta;
     if (d <= step) {
       rope.hook.copy(rope.anchor);
-      rope.phase = "pull";
-      characterBody.collisionResponse = false;
-      moveVelocity.set(0, 0, 0);
-      knockbackVel.set(0, 0, 0);
-      if (stance !== "stand") setStance("stand", true);
-      rope.pos.set(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
-      sfx.play("bounce", { at: rope.anchor, vol: 0.8, rate: 1.4 });
-      effects.impact(rope.anchor, rope.normal.x, rope.normal.y, rope.normal.z, "dust", 6);
+      ropeBite();
     } else {
       rope.hook.addScaledVector(_ropeDir.subVectors(rope.anchor, rope.hook).normalize(), step);
     }
   }
-  if (rope.phase === "mantle") { ropeLine.visible = false; hookMesh.visible = false; return; }
+  if (rope.phase === "mantle") { ropeLine.visible = false; ropeTail.visible = false; hookMesh.visible = false; return; }
   setRopeLine(ropeLine, _ropeHand, rope.hook);
+  // The slack below the hands while climbing
+  if (rope.phase === "climb" || rope.phase === "hang") {
+    _ropeT.set(_ropeHand.x + rope.wallN.x * 0.1, Math.max(groundHeight(_ropeHand.x, _ropeHand.z) + 0.05, _ropeHand.y - 3.2), _ropeHand.z + rope.wallN.z * 0.1);
+    setRopeLine(ropeTail, _ropeHand, _ropeT);
+  } else ropeTail.visible = false;
   hookMesh.position.copy(rope.hook);
   hookMesh.visible = true;
 }
 
-/** Reeling in (instead of walking): before the physics step; ropeAfterStep pins the body after it. */
+/** The hook has bitten: which way up (or down) this rope goes. */
+function ropeBite() {
+  characterBody.collisionResponse = false;
+  moveVelocity.set(0, 0, 0);
+  knockbackVel.set(0, 0, 0);
+  if (stance !== "stand") setStance("stand", true);
+  const p = rope.pos.set(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
+  const a = rope.anchor, n = rope.normal;
+  sfx.play("bounce", { at: a, vol: 0.8, rate: 1.4 });
+  effects.impact(a, n.x, n.y, n.z, "dust", 6);
+  rope.k = 0; rope.cycle = 0; rope.stepHalf = 0; rope.t = 0;
+  rope.from.copy(p);
+  // Below you: rappel down to it
+  if (a.y < p.y - 1.2) {
+    rope.phase = "rappel";
+    rope.to.copy(a).addScaledVector(n, n.y > 0.55 ? 0.05 : ROPE_OFF);
+    if (n.y <= 0.55) rope.to.y = Math.max(groundHeight(rope.to.x, rope.to.z), a.y - 1.9);
+    soldier.ropeMode = "rappel";
+    return;
+  }
+  // The wall to climb: the face it hooked, or (hooked on top of something) the face between you and it
+  let wall = false;
+  rope.overTop = false;
+  if (Math.abs(n.y) < 0.55) {
+    rope.wallN.set(n.x, 0, n.z).normalize();
+    rope.wallP.copy(a);
+    wall = true;
+  } else if (a.y > p.y + 1.6) {
+    const dx = a.x - p.x, dz = a.z - p.z, l = Math.hypot(dx, dz) || 1;
+    _rFrom.set(p.x, p.y + 1.2, p.z);
+    _rTo.set(p.x + dx / l * (l + 1), p.y + 1.2, p.z + dz / l * (l + 1));
+    _rRes.reset();
+    if (world.raycastClosest(_rFrom, _rTo, ropeRayOpts, _rRes) && Math.abs(_rRes.hitNormalWorld.y) < 0.55) {
+      rope.wallN.set(_rRes.hitNormalWorld.x, 0, _rRes.hitNormalWorld.z).normalize();
+      rope.wallP.set(_rRes.hitPointWorld.x, a.y, _rRes.hitPointWorld.z);
+      rope.overTop = true;
+      wall = true;
+    }
+  }
+  if (!wall) {
+    // Open ground, a hillside: straight along the rope
+    rope.phase = "zip";
+    rope.to.copy(a).addScaledVector(n, 0.05);
+    soldier.ropeMode = "swing";
+    return;
+  }
+  // Feet height at the top of the climb: hands at the hook (a face), or at the edge (over the top)
+  rope.climbTop = rope.overTop ? a.y - 1.25 : a.y - 1.95;
+  const bx = rope.wallP.x + rope.wallN.x * ROPE_OFF, bz = rope.wallP.z + rope.wallN.z * ROPE_OFF;
+  rope.base.set(bx, Math.min(rope.climbTop, Math.max(p.y, groundHeight(bx, bz))), bz);
+  const far = Math.hypot(bx - p.x, bz - p.z) > 1.1 || Math.abs(rope.base.y - p.y) > 0.6;
+  rope.phase = far ? "swing" : "climb";
+  soldier.ropeMode = far ? "swing" : "climb";
+}
+
+/** On the rope (instead of walking): before the physics step; ropeAfterStep pins the body after it. */
 function updateRopeMove(delta) {
   fall.speed = 0;
   if (jumpQueued) { jumpQueued = false; releaseRope(); return; }
-  const top = rope.normal.y > 0.55;
-  if (rope.phase === "pull") {
-    // Where the feet go: on it (a roof, the ground), or hanging under the hands (a wall)
-    _ropeT.copy(rope.anchor).addScaledVector(rope.normal, top ? 0.05 : 0.45);
-    if (!top) _ropeT.y -= 1.95;
-    const d = rope.pos.distanceTo(_ropeT), step = GRAPPLE.speed * delta * Math.min(1, 0.35 + rope.t * 1.6);
-    rope.t += delta;
-    if (d > 0.01) rope.pos.addScaledVector(_ropeDir.subVectors(_ropeT, rope.pos).normalize(), Math.min(step, d));
-    const hx = rope.anchor.x - rope.pos.x, hz = rope.anchor.z - rope.pos.z;
-    if (hx * hx + hz * hz > 0.04) bodyYaw = Math.atan2(hx, hz);
-    characterRoot.rotation.y = bodyYaw;
-    if (d <= step + 0.02) ropeArrive(top);
+  rope.t += delta;
+  const n = rope.wallN;
+  if (rope.phase === "swing") {
+    // An arc in to the foot of the wall: dipping like a pendulum, easing in at the end
+    const dist = rope.from.distanceTo(rope.base);
+    rope.k = Math.min(1, rope.k + delta * ROPE_SWING / Math.max(1.5, dist));
+    const e = 1 - Math.pow(1 - rope.k, 2);
+    rope.pos.lerpVectors(rope.from, rope.base, e);
+    rope.pos.y -= Math.sin(rope.k * Math.PI) * Math.min(1.6, dist * 0.08);
+    rope.pos.y = Math.max(rope.pos.y, groundHeight(rope.pos.x, rope.pos.z));
+    bodyYaw = Math.atan2(-n.x, -n.z);
+    soldier.ropePhase = rope.t * 0.6;
+    if (rope.k >= 1) {
+      rope.phase = "climb";
+      soldier.ropeMode = "climb";
+      sfx.footstep(footSurface(rope.pos.x, rope.pos.y, rope.pos.z), 0.7);   // feet meet the wall
+    }
+  } else if (rope.phase === "climb") {
+    // Hand over hand: each pull lifts you in a surge that eases off as the other hand reaches
+    rope.cycle += delta * ROPE_RATE;
+    const pull = Math.max(0, Math.sin(rope.cycle * Math.PI * 2 * 2));   // two pulls a cycle (one per hand)
+    const v = ROPE_CLIMB * (0.25 + 2.2 * pull * pull);
+    rope.pos.set(rope.base.x, Math.min(rope.climbTop, rope.pos.y + v * delta), rope.base.z);
+    bodyYaw = Math.atan2(-n.x, -n.z);
+    soldier.ropePhase = rope.cycle;
+    // A foot plants on the wall every half cycle
+    const half = Math.floor(rope.cycle * 2);
+    if (half !== rope.stepHalf) {
+      rope.stepHalf = half;
+      sfx.footstep(footSurface(rope.pos.x, rope.pos.y, rope.pos.z), 0.45, null, 1.15);
+    }
+    if (rope.pos.y >= rope.climbTop - 0.01) ropeArrive();
+  } else if (rope.phase === "rappel" || rope.phase === "zip") {
+    const speed = rope.phase === "rappel" ? ROPE_RAPPEL : ROPE_ZIP;
+    const d = rope.pos.distanceTo(rope.to), step = speed * delta * Math.min(1, 0.4 + rope.t * 2);
+    if (d > 0.01) rope.pos.addScaledVector(_ropeDir.subVectors(rope.to, rope.pos).normalize(), Math.min(step, d));
+    // Rappelling, you bounce off the wall in little hops
+    if (rope.phase === "rappel") soldier.ropePhase = rope.t * 1.4;
+    const hx = rope.to.x - rope.pos.x, hz = rope.to.z - rope.pos.z;
+    if (hx * hx + hz * hz > 0.04) bodyYaw = rope.phase === "rappel" ? Math.atan2(-hx, -hz) : Math.atan2(hx, hz);
+    if (d <= step + 0.02) {
+      releaseRope();
+      sfx.footstep(footSurface(rope.pos.x, rope.pos.y, rope.pos.z), 0.9);
+    }
   } else if (rope.phase === "hang") {
     rope.hangT -= delta;
+    soldier.ropePhase = 0.25;   // both hands on the rope, still
     if (rope.hangT <= 0) releaseRope();
   } else if (rope.phase === "mantle") {
     rope.mantleT += delta;
@@ -6294,40 +6398,41 @@ function updateRopeMove(delta) {
     }
     if (k >= 1) {
       releaseRope();
-      moveVelocity.set(-rope.normal.x * 1.2, 0, -rope.normal.z * 1.2);
+      moveVelocity.set(-n.x * 1.2, 0, -n.z * 1.2);
       jumpGrace = 0.4;
     }
   }
+  characterRoot.rotation.y = bodyYaw;
 }
 
-/** At the hook: up on top, over the ledge, or hanging off a bare wall. */
-function ropeArrive(top) {
-  if (top) {
-    releaseRope();
-    sfx.footstep(footSurface(rope.pos.x, rope.pos.y, rope.pos.z), 0.8);
-    return;
-  }
-  // A ledge above the hook? Look down from a little over it, just past the wall's face
-  const n = rope.normal;
-  for (const up of [2.4, 1.2]) {
-    _rFrom.set(rope.anchor.x - n.x * 0.55, rope.anchor.y + up, rope.anchor.z - n.z * 0.55);
-    _rTo.set(_rFrom.x, rope.anchor.y - 0.6, _rFrom.z);
-    _rRes.reset();
-    if (world.raycastClosest(_rFrom, _rTo, ropeRayOpts, _rRes) && _rRes.hitNormalWorld.y > 0.6) {
-      const y = _rRes.hitPointWorld.y;
-      rope.phase = "mantle";
-      rope.mantleT = 0;
-      rope.from.copy(rope.pos);
-      rope.mid.set(rope.anchor.x + n.x * 0.25, y + 0.25, rope.anchor.z + n.z * 0.25);
-      rope.to.set(_rFrom.x - n.x * 0.35, y + 0.05, _rFrom.z - n.z * 0.35);
-      soldier.stopGesture("grapple");
-      playerAnim.gesture("climb", ROPE_MANTLE);
-      sfx.footstep(footSurface(rope.to.x, y, rope.to.z), 0.7);
-      return;
+/** At the top of the climb: over the edge (a roof, a rim, a ledge), or hanging off a bare wall. */
+function ropeArrive() {
+  const n = rope.wallN, a = rope.anchor;
+  let topY = null, tx = 0, tz = 0;
+  if (rope.overTop) {
+    topY = a.y; tx = rope.wallP.x - n.x * 0.6; tz = rope.wallP.z - n.z * 0.6;
+  } else {
+    // A ledge above the hook? Look down from a little over it, just past the wall's face
+    for (const up of [2.4, 1.2]) {
+      _rFrom.set(a.x - n.x * 0.55, a.y + up, a.z - n.z * 0.55);
+      _rTo.set(_rFrom.x, a.y - 0.6, _rFrom.z);
+      _rRes.reset();
+      if (world.raycastClosest(_rFrom, _rTo, ropeRayOpts, _rRes) && _rRes.hitNormalWorld.y > 0.6) {
+        topY = _rRes.hitPointWorld.y; tx = _rFrom.x - n.x * 0.35; tz = _rFrom.z - n.z * 0.35;
+        break;
+      }
     }
   }
-  rope.phase = "hang";
-  rope.hangT = 0.7;
+  if (topY === null) { rope.phase = "hang"; rope.hangT = 0.8; return; }
+  rope.phase = "mantle";
+  rope.mantleT = 0;
+  rope.from.copy(rope.pos);
+  rope.mid.set(rope.wallP.x + n.x * 0.2, topY + 0.25, rope.wallP.z + n.z * 0.2);
+  rope.to.set(tx, topY + 0.05, tz);
+  soldier.ropeMode = null;
+  soldier.stopGesture("grapple");
+  playerAnim.gesture("climb", ROPE_MANTLE);
+  sfx.footstep(footSurface(tx, topY, tz), 0.7);
 }
 
 function ropeAfterStep() {
@@ -6369,7 +6474,8 @@ function introFlightPath() {
   ];
 }
 function introWanted() {
-  if (!AUTO_PLAY_INTRO || settings.get("introAuto") === false) return false;
+  // Desktops and laptops only: phones and tablets go straight to the lobby
+  if (!AUTO_PLAY_INTRO || IS_TOUCH || settings.get("introAuto") === false) return false;
   return !new URLSearchParams(location.search).get("room");
 }
 function playIntro(onDone) {

@@ -1645,27 +1645,63 @@ const REPAIR_POSE = {
 };
 
 /**
- * Hauling yourself up a rope (the rope gun): both arms up over the head on the
- * rope, hand over hand, knees drawn up and the legs swinging under you.
+ * On a rope (the rope gun). ropeMode (main.js; teammates default to "climb"):
+ *   climb   facing the wall, hand over hand: the reaching hand goes straight up,
+ *           the pulling hand draws down to the chest with the elbow bent, the chest
+ *           turns with each reach, and the feet walk up the wall on the opposite beat
+ *           (right hand with left foot), soles flat to it
+ *   swing   both hands high on the rope, legs together and a little forward, swaying
+ *   rappel  leaning back off the wall, the guide hand high, the brake hand at the hip,
+ *           legs braced against the wall, flexing as you hop down
+ * ropePhase: cycles through the hand-over-hand (main.js drives it with the climb).
  */
 Soldier.prototype._ropePose = function (g, side, fwd) {
   const b = this.b;
   const w = Math.max(0, Math.min(1, g.t / 0.2, (g.dur - g.t) / 0.2));
   if (w <= 0) return;
-  const t = g.t * 7.5, hand = Math.sin(t), leg = Math.sin(g.t * 2.2);
-  // Arms high, reaching alternately
-  turnBone(b.rArm, side, -(2.55 + 0.25 * hand) * w);
-  turnBone(b.rFore, side, -(0.35 + 0.35 * Math.max(0, -hand)) * w);
-  turnBone(b.lArm, side, -(2.55 - 0.25 * hand) * w);
-  turnBone(b.lFore, side, -(0.35 + 0.35 * Math.max(0, hand)) * w);
-  // Leaning back a touch from the rope, head up to where it goes
-  turnBone(b.spine, side, -0.12 * w);
-  turnBone(b.neck, side, -0.35 * w);
-  // Knees up, legs swinging
-  turnBone(b.lUpLeg, side, -(0.55 + 0.15 * leg) * w);
-  turnBone(b.rUpLeg, side, -(0.4 - 0.15 * leg) * w);
-  turnBone(b.lLeg, side, (0.8 + 0.1 * leg) * w);
-  turnBone(b.rLeg, side, (0.65 - 0.1 * leg) * w);
+  const mode = this.ropeMode ?? "climb";
+  const ph = (this.ropePhase ?? g.t * 1.7) * Math.PI * 2;
+  if (mode === "climb") {
+    const s = Math.sin(ph), r = 0.5 + 0.5 * s, l = 1 - r;          // r: the right hand's reach (1 = high)
+    turnBone(b.rArm, side, -(1.6 + 1.3 * r) * w);
+    turnBone(b.rFore, side, -(1.15 - 0.95 * r) * w);
+    turnBone(b.lArm, side, -(1.6 + 1.3 * l) * w);
+    turnBone(b.lFore, side, -(1.15 - 0.95 * l) * w);
+    turnBone(b.spine, side, -0.16 * w);                               // hanging back off the rope
+    turnBone(b.spine1, _up, 0.14 * s * w);                            // the chest follows the reach
+    turnBone(b.neck, side, -0.42 * w);                                // looking up the rope
+    const fr = 0.5 + 0.5 * Math.sin(ph + Math.PI), fl = 1 - fr;      // feet on the opposite beat
+    turnBone(b.rUpLeg, side, -(0.5 + 0.8 * fr) * w);
+    turnBone(b.rLeg, side, (0.3 + 1.1 * fr) * w);
+    turnBone(b.lUpLeg, side, -(0.5 + 0.8 * fl) * w);
+    turnBone(b.lLeg, side, (0.3 + 1.1 * fl) * w);
+    if (b.rFoot) turnBone(b.rFoot, side, -0.35 * w);
+    if (b.lFoot) turnBone(b.lFoot, side, -0.35 * w);
+  } else if (mode === "swing") {
+    const sway = Math.sin(ph) * 0.12;
+    turnBone(b.rArm, side, -2.75 * w);
+    turnBone(b.rFore, side, -0.25 * w);
+    turnBone(b.lArm, side, -2.6 * w);
+    turnBone(b.lFore, side, -0.3 * w);
+    turnBone(b.spine, side, (-0.08 + sway) * w);
+    turnBone(b.neck, side, -0.3 * w);
+    turnBone(b.rUpLeg, side, -(0.35 + sway) * w);
+    turnBone(b.lUpLeg, side, -(0.3 + sway) * w);
+    turnBone(b.rLeg, side, 0.3 * w);
+    turnBone(b.lLeg, side, 0.35 * w);
+  } else {
+    const hop = Math.max(0, Math.sin(ph));
+    turnBone(b.rArm, side, -2.4 * w);
+    turnBone(b.rFore, side, -0.35 * w);
+    turnBone(b.lArm, side, -0.45 * w);
+    turnBone(b.lFore, side, -1.25 * w);
+    turnBone(b.spine, side, -0.42 * w);
+    turnBone(b.neck, side, 0.25 * w);                                 // looking down past the feet
+    turnBone(b.rUpLeg, side, -(1.0 + 0.3 * hop) * w);
+    turnBone(b.lUpLeg, side, -(0.9 + 0.3 * hop) * w);
+    turnBone(b.rLeg, side, (0.7 + 0.5 * hop) * w);
+    turnBone(b.lLeg, side, (0.8 + 0.5 * hop) * w);
+  }
 };
 
 Soldier.prototype._repairPose = function (g, side, fwd) {
