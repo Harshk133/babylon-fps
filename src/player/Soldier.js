@@ -1002,7 +1002,7 @@ export class Soldier {
     this._showGuns();
   }
 
-  /** Something held in the right hand while a gesture plays (a Parle-G packet while eating). */
+  /** Something held in the right hand while a gesture plays (a biscuit packet while eating). */
   setHandProp(gesture, obj) {
     obj.userData.baseScale ??= obj.scale.clone();
     obj.scale.copy(obj.userData.baseScale);

@@ -69,8 +69,8 @@ export const THROWABLES = {
 export const THROWABLE_ORDER = ["grenade", "molotov", "smoke"];
 
 export const MEDKIT = { name: "Medkit", max: 3, start: 0, heal: 50 };
-/** Parle-G: a quick snack heal. H eats one unless you're hurt enough for a medkit. */
-export const BISCUIT = { name: "Parle-G Biscuits", max: 8, start: 0, heal: 20, medkitBelow: 60 };
+/** Krunchu Biscuits (a made-up brand): a quick snack heal. H eats one unless you're hurt enough for a medkit. */
+export const BISCUIT = { name: "Krunchu Biscuits", max: 8, start: 0, heal: 20, medkitBelow: 60 };
 
 /**
  * Taara (✦, the game's made-up money): ✦2,000 bundles lying around, dropped by monsters and by eliminated
@@ -211,7 +211,7 @@ export const PICKUP_KINDS = {
   molotov: { category: "throwable", label: "Molotov",        scale: 1.8 },
   smoke:   { category: "throwable", label: "Smoke Grenade",  scale: 2.0 },
   medkit:  { category: "medkit",    label: "Medkit",         scale: 1.4 },
-  biscuit: { category: "medkit",    label: "Parle-G Biscuits", scale: 2.4 },
+  biscuit: { category: "medkit",    label: "Krunchu Biscuits", scale: 2.4 },
   fuel:    { category: "fuel",      label: "Petrol Can",     scale: 1.6 },
   cash:    { category: "cash",      label: "Taara Notes",    scale: 2.4 },
 };

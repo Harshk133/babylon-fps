@@ -23,8 +23,9 @@ const MAT = {
   violet:  new THREE.MeshStandardMaterial({ color: 0x9b5cff, metalness: 0.0, roughness: 0.6 }),
   cloth:   new THREE.MeshStandardMaterial({ color: 0xcfc3a3, metalness: 0.0, roughness: 1.0 }),
   liquid:  new THREE.MeshStandardMaterial({ color: 0xb8620f, metalness: 0.0, roughness: 0.3, emissive: 0x2a1000 }),
-  parle:   new THREE.MeshStandardMaterial({ color: 0xf4d34a, metalness: 0.0, roughness: 0.45 }),
-  parleRed: new THREE.MeshStandardMaterial({ color: 0xd8262e, metalness: 0.0, roughness: 0.5 }),
+  // Krunchu Biscuits (a made-up brand): green packet, orange band
+  snack:   new THREE.MeshStandardMaterial({ color: 0x3fae5a, metalness: 0.0, roughness: 0.45 }),
+  snackBand: new THREE.MeshStandardMaterial({ color: 0xf28a1e, metalness: 0.0, roughness: 0.5 }),
   // Taara notes (the game's made-up money): teal paper, a deeper teal border, gold band and star
   note:    new THREE.MeshStandardMaterial({ color: 0x2fa391, metalness: 0.0, roughness: 0.7 }),
   noteDk:  new THREE.MeshStandardMaterial({ color: 0x17594f, metalness: 0.0, roughness: 0.7 }),
@@ -264,11 +265,11 @@ const BUILDERS = {
     return g;
   },
 
-  // Parle-G: the yellow wrapper with the red band
+  // Krunchu Biscuits: a green packet with an orange band and a white label
   biscuit: () => {
     const g = new THREE.Group();
-    box(g, 0.2, 0.055, 0.085,   MAT.parle,    0, 0, 0);
-    box(g, 0.06, 0.057, 0.087,  MAT.parleRed, -0.045, 0, 0);
+    box(g, 0.2, 0.055, 0.085,   MAT.snack,    0, 0, 0);
+    box(g, 0.06, 0.057, 0.087,  MAT.snackBand, -0.045, 0, 0);
     box(g, 0.035, 0.006, 0.04,  MAT.white,    0.04, 0.03, 0);
     return g;
   },
@@ -336,8 +337,7 @@ function gearBuilders() {
 const _templates = new Map();
 
 /**
- * Swaps an item's procedural model for a loaded one (the Parle-G
- * model), scaled to `size` metres along its longest side and centred. Call
+ * Swaps an item's procedural model for a loaded one, scaled to `size` metres along its longest side and centred. Call
  * before the item is first used (pickups build their meshes on first spawn).
  */
 export function setItemModel(id, object3D, size) {

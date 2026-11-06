@@ -2560,7 +2560,7 @@ function onFireTick(x, z, r, dt, owner = null, hostile = false) {
   if (!hostile && isBR() && net.isHost) bots.burn(x, z, r, MOLOTOV.playerDps, dt, by);
 }
 
-// ─── Healing: medkits and Parle-G ─────────────────────────────────────────────
+// ─── Healing: medkits and biscuits ────────────────────────────────────────────
 /**
  * kind: "medkit" | "biscuit", or nothing for H: a medkit when you're badly
  * hurt (below BISCUIT.medkitBelow), otherwise a biscuit, whichever you have.
@@ -2573,10 +2573,10 @@ function useHeal(kind = null) {
     kind = wantKit ? (inventory.medkits ? "medkit" : "biscuit") : (inventory.biscuits ? "biscuit" : "medkit");
   }
   const ok = kind === "medkit" ? inventory.takeMedkit() : inventory.takeBiscuit();
-  if (!ok) { inventoryUI.feed(kind === "medkit" ? "No medkits" : "No Parle-G left", "info", kind); return; }
+  if (!ok) { inventoryUI.feed(kind === "medkit" ? "No medkits" : "No biscuits left", "info", kind); return; }
   const heal = kind === "medkit" ? MEDKIT.heal : BISCUIT.heal;
   playerHealth = Math.min(MAX_HEALTH, playerHealth + heal);
-  // A Parle-G goes in the mouth; a medkit's tonic gets drunk
+  // A biscuit goes in the mouth; a medkit's tonic gets drunk
   if (kind === "biscuit") {
     if (!soldier.handProps.eat) soldier.setHandProp("eat", cloneItem("biscuit"));
     playerAnim.gesture("eat", 1.5);
@@ -2585,7 +2585,7 @@ function useHeal(kind = null) {
     playerAnim.gesture("heal", 1.8);
   }
   sfx.heal();
-  inventoryUI.feed(`+${heal} health${kind === "biscuit" ? " · Parle-G" : ""}`, "medkit", kind);
+  inventoryUI.feed(`+${heal} health${kind === "biscuit" ? " · Krunchu" : ""}`, "medkit", kind);
 }
 
 /** A little green tonic bottle for the healing animation (the medkit's contents). */
@@ -4087,8 +4087,7 @@ async function loadWorld() {
   loadMark("world downloaded");
   sfx.preload();
   indiaModels = india;
-  // The real Parle-G pack replaces the procedural one (before any pickup is built); money stays the procedural Taara bundle
-  if (india.biscuit) setItemModel("biscuit", india.biscuit, 0.22);
+  // The biscuits (Krunchu) and the money (Taara) are procedural, made-up brands: no real packet or note
 
 
   if (wrlScene) {

@@ -60,7 +60,6 @@ const MODELS = [
   { src: "public/models/india/truck.glb",         ratio: 0.07, error: 0.01,  tex: 256, prune: true }, // 208k triangles, 55 textures: a parked prop, seen from the road
   { src: "public/models/india/panchayat.glb",     ratio: 1,    error: 0,     tex: 512 },  // a textured box: 512 is plenty
   { src: "public/models/india/town_building.glb", ratio: 1,    error: 0,     tex: 512 },
-  { src: "public/models/india/parle_g.glb",       ratio: 0.03, error: 0.02,  tex: 512 },  // a 20 cm pickup: 77k triangles → ~2k
   // Made for the game (public/models/indian things/, originals stay local): already low-poly with
   // their own LODs. The water tower keeps its near mesh and collision mesh, and the
   // board on the tank at full width (it's seen from the ground, 15 m up);

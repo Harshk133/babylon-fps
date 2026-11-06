@@ -7,7 +7,7 @@
 
 /** give: "stack" (n of a backpack kind) | "ammo" (an ammo crate) | "gun" | "gear" | "attachment". */
 export const SHOP_ITEMS = [
-  { id: "biscuit",  give: "stack", n: 2, price: 200,  label: "Parle-G ×2",      note: "+20 health each" },
+  { id: "biscuit",  give: "stack", n: 2, price: 200,  label: "Krunchu ×2",      note: "+20 health each" },
   { id: "medkit",   give: "stack", n: 1, price: 1000, label: "Medkit",          note: "+50 health" },
   { id: "ammo",     give: "ammo",        price: 600,  label: "Ammo Crate",      note: "Refills every gun" },
   { id: "grenade",  give: "stack", n: 1, price: 800,  label: "Frag Grenade" },

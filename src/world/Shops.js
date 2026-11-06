@@ -86,7 +86,7 @@ function buildStall(mats) {
     for (let i = 0; i < 9; i++) {
       const x = -W / 2 + 0.3 + i * 0.3;
       if ((i + (y > 1.4 ? 1 : 0)) % 3 === 0) add(new THREE.CylinderGeometry(0.05, 0.05, 0.24, 8), mats.bottle, x, y + 0.14, -D / 2 + 0.25);
-      else add(new THREE.BoxGeometry(0.22, 0.07, 0.1), i % 2 ? mats.parle : mats.red, x, y + 0.06, -D / 2 + 0.25);
+      else add(new THREE.BoxGeometry(0.22, 0.07, 0.1), i % 2 ? mats.snack : mats.red, x, y + 0.06, -D / 2 + 0.25);
     }
   }
   // Corner posts, tarp roof sloping toward the road, and the board
@@ -108,7 +108,7 @@ export function buildShops({ scene, world, material, spots, groundAt, mapObstacl
     woodDk: new THREE.MeshStandardMaterial({ color: 0x5a3a20, roughness: 0.9 }),
     tarp: new THREE.MeshStandardMaterial({ map: tarpTexture(), roughness: 0.9 }),
     board: new THREE.MeshStandardMaterial({ map: boardTexture(), roughness: 0.6 }),
-    parle: new THREE.MeshStandardMaterial({ color: 0xf4d34a, roughness: 0.5 }),
+    snack: new THREE.MeshStandardMaterial({ color: 0x3fae5a, roughness: 0.5 }), // Krunchu packets (made up)
     red: new THREE.MeshStandardMaterial({ color: 0xd8262e, roughness: 0.5 }),
     bottle: new THREE.MeshStandardMaterial({ color: 0x3a8a3a, roughness: 0.3, metalness: 0.1 }),
   };

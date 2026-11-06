@@ -2,7 +2,7 @@
 // Each one is optional: the files live in public/models/india/ under these
 // names (the heavy originals stay local, `npm run optimize-assets` writes the
 // committed *.opt.glb), and whatever is missing falls back (the old rickshaw,
-// a stand-in jeep, procedural biscuits) or is left out (trucks,
+// a stand-in jeep) or is left out (trucks,
 // buildings).
 
 export const INDIA_MODELS = {
@@ -11,7 +11,6 @@ export const INDIA_MODELS = {
   truck:        "/models/india/truck.glb",
   panchayat:    "/models/india/panchayat.glb",
   townBuilding: "/models/india/town_building.glb",
-  biscuit:      "/models/india/parle_g.glb",
   // Made for the game (sources in public/models/indian things/, no credit line needed)
   waterTower:   "/models/india/water_tower.glb",
   chaiwala:     "/models/india/chaiwala.glb",
@@ -24,7 +23,6 @@ export const CREDITS = [
   ["Indian Truck", "AFJAL ANSARI"],
   ["Mahindra Thar Roxx", "ansari_studios"],
   ["Town Building", "nayan pachori"],
-  ["Indian cookie", "seirogan"],
 ];
 
 /**

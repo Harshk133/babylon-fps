@@ -39,7 +39,6 @@ export const CREDIT_GROUPS = [
       { what: "Indian Truck", who: "AFJAL ANSARI", licence: "CC BY 4.0", url: SF("indian-truck-8c7650b96d6846de8cc54391ab16cf20"), changes: "Simplified from 208k triangles, textures at 256 px. " + OPT },
       { what: "Panchayat building game asset", who: "nayan pachori", licence: "CC BY 4.0", url: SF("panchayat-building-game-asset-dbe13724c0c5446084313dce5a98a1d8"), changes: "A doorway cut in and a furnished room built inside. " + OPT },
       { what: "Town Building", who: "nayan pachori", licence: "CC BY 4.0", url: SF("town-building-b441ed4dac864c089435f76ba055d7ab"), changes: "A doorway cut in and a furnished room built inside. " + OPT },
-      { what: "Indian cookie (インドのクッキー)", who: "seirogan", licence: "CC BY 4.0", url: SF("1e19b60d29994ff08e5b37e4c0592604"), changes: "Simplified from 77k to ~2k triangles. " + OPT },
       { what: "Dragon Gold", who: "Prof.v7x", licence: "CC BY 4.0", url: SF("dragon-gold-22d93739c43d44c9804402b689c402d2"), changes: "Rescaled, re-posed and simplified. " + OPT },
       { what: "Zombie Dog animation", who: "hino", licence: "CC BY 4.0", url: SF("zombie-dog-animation-cfe2c0015d284edd9d826a4e266080e2"), changes: "Rescaled and re-posed. " + OPT },
       { what: "Old Tree With Vine 3d model free", who: "iGauravRajput", licence: "CC BY 4.0", url: SF("old-tree-with-vine-3d-model-free-7d883d233be94b1f8569d489baa4c9bf"), changes: "Simplified, with a lighter distance LOD. " + OPT },
@@ -114,7 +113,7 @@ export const CREDIT_GROUPS = [
   },
   {
     title: "Made for this game",
-    note: "Built for the game and owned by its developer: the CSE building, the college workshop, the college gate, the water towers, the chaiwala, the city, villages, caves, terrain, roads, fields and procedural props, the wooden crates and their texture, the stand-in vehicles, every shader and effect (crash sparks, smoke, fire, blood, post-processing), the kick, punch, rider, mount and vehicle animation, and the game's own rules: Most Wanted bounties and Revenge Run.",
+    note: "Built for the game and owned by its developer: the CSE building, the college workshop, the college gate, the water towers, the chaiwala, the city, villages, caves, terrain, roads, fields and procedural props, the wooden crates and their texture, the made-up Taara money and Krunchu Biscuits, the stand-in vehicles, every shader and effect (crash sparks, smoke, fire, blood, post-processing), the kick, punch, rider, mount and vehicle animation, and the game's own rules: Most Wanted bounties and Revenge Run.",
     items: [],
   },
 ];
