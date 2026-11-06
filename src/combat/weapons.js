@@ -84,6 +84,8 @@ export const CASH = {
 
 // Petrol for the auto-rickshaw: carried, poured in with T next to it (or while driving)
 export const FUEL_CAN = { name: "Petrol Can", max: 2 };
+/** Toolkit: repairs a damaged or wrecked vehicle (K next to it; the repair takes `time` s). */
+export const TOOLKIT = { name: "Toolkit", max: 2, time: 4.5 };
 
 // Grenade / molotov tuning
 export const GRENADE = {
@@ -189,7 +191,7 @@ export const ATTACH_SLOT_NAMES = { optic: "Optic", muzzle: "Muzzle", mag: "Magaz
 // ── Carrying ─────────────────────────────────────────────────────────────────
 /** Weight of one of each carried item. Guns, their ammo and worn gear weigh nothing. */
 export const ITEM_WEIGHT = {
-  grenade: 18, molotov: 18, smoke: 14, medkit: 20, fuel: 30, biscuit: 5,
+  grenade: 18, molotov: 18, smoke: 14, medkit: 20, fuel: 30, toolkit: 25, biscuit: 5,
   reddot: 10, scope4x: 15, compensator: 10, suppressor: 12, extmag: 15, grip: 10,
   holo: 10, scope2x: 12, scope6x: 18, scope8x: 20,
 };
@@ -213,6 +215,7 @@ export const PICKUP_KINDS = {
   medkit:  { category: "medkit",    label: "Medkit",         scale: 1.4 },
   biscuit: { category: "medkit",    label: "Krunchu Biscuits", scale: 2.4 },
   fuel:    { category: "fuel",      label: "Petrol Can",     scale: 1.6 },
+  toolkit: { category: "fuel",      label: "Toolkit",        scale: 1.7 },
   cash:    { category: "cash",      label: "Taara Notes",    scale: 2.4 },
 };
 for (const [id, g] of Object.entries(GEAR)) {

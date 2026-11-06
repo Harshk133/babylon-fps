@@ -253,6 +253,18 @@ const BUILDERS = {
     return g;
   },
 
+  // Toolkit: a red steel toolbox with a lid seam, latches and a handle, a spanner strapped on top
+  toolkit: () => {
+    const g = new THREE.Group();
+    box(g, 0.34, 0.15, 0.16,   MAT.red,   0, 0, 0);
+    box(g, 0.345, 0.015, 0.165, MAT.metal, 0, 0.035, 0);
+    for (const x of [-0.11, 0.11]) box(g, 0.03, 0.04, 0.012, MAT.metal, x, 0.03, 0.085);
+    for (const x of [-0.07, 0.07]) box(g, 0.015, 0.05, 0.02, MAT.metal, x, 0.1, 0);
+    box(g, 0.16, 0.015, 0.025, MAT.metal, 0, 0.125, 0);
+    box(g, 0.2, 0.012, 0.022, MAT.white, 0, 0.082, -0.04);
+    return g;
+  },
+
   // Jerrycan: red body, three-bar handle, angled spout
   fuel: () => {
     const g = new THREE.Group();

@@ -565,14 +565,15 @@ export class TouchControls {
     const prompt = document.getElementById("pickup-prompt");
     prompt?.addEventListener("pointerdown", e => {
       const row = e.target.closest(".prompt-row");
-      const key = row?.querySelector("kbd")?.textContent?.trim();
+      const kbd = row?.querySelector("kbd");
+      const key = kbd?.textContent?.trim();
       if (!key || !this._ctx?.playing) return;
       e.preventDefault();
       e.stopPropagation();
       this._firstTouch();
       row.classList.add("down");
       setTimeout(() => row.classList.remove("down"), 150);
-      const code = key.length === 1 ? `Key${key.toUpperCase()}` : key;
+      const code = kbd.dataset.code || (key.length === 1 ? `Key${key.toUpperCase()}` : key);
       this.cb.key(code, true);
       this.cb.key(code, false);
     });

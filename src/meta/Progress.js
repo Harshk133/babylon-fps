@@ -262,6 +262,11 @@ export class Progress {
     if (this.enabled && metres > 0) this._add("drive", metres);
   }
 
+  /** A one-off XP reward (a slain nemesis, a supply drop…). */
+  bonus(amount, reason) {
+    if (this.enabled) this._gain(amount, reason);
+  }
+
   _gain(amount, reason) {
     if (amount <= 0) return;
     const before = this.level;

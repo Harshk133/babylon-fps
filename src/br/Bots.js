@@ -623,7 +623,7 @@ export class Bots {
     }
     // A free car when the zone is far away
     if (zoneGoal && zoneGoal.far > 90 && b.weapon && !b.car) {
-      const car = g.vehicles.find(v => !v.driver && v.fuel > 8 && Math.hypot(v.x - b.x, v.z - b.z) < CAR_LOOK);
+      const car = g.vehicles.find(v => !v.driver && v.fuel > 8 && !v.wrecked && Math.hypot(v.x - b.x, v.z - b.z) < CAR_LOOK);
       if (car) { b.mode = "car"; b.wantCar = car; b.goal = { x: car.x, z: car.z }; b.pick = null; b.driveTo = zoneGoal; return; }
     }
     // Loot worth having nearby (more eager while it's poorly equipped)
@@ -975,7 +975,7 @@ export class Bots {
     b.yaw = car.yaw; b.aimYaw = car.yaw; b.aimPitch = 0;
     b.vx = Math.sin(car.yaw) * car.speed; b.vz = Math.cos(car.yaw) * car.speed;
     // Out at the destination, when it's dry, after a long time, or when someone's shooting at it
-    if (d < 18 || car.fuel <= 0 || b.carT > 60 || this.g.now() - b.hitAt < 0.5) this._leaveCar(b);
+    if (d < 18 || car.fuel <= 0 || car.wrecked || b.carT > 60 || this.g.now() - b.hitAt < 0.5) this._leaveCar(b);
   }
 
   // ── Getting hurt ────────────────────────────────────────────────────────

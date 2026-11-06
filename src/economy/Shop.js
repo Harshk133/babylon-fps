@@ -14,6 +14,7 @@ export const SHOP_ITEMS = [
   { id: "molotov",  give: "stack", n: 1, price: 700,  label: "Molotov" },
   { id: "smoke",    give: "stack", n: 1, price: 500,  label: "Smoke Grenade" },
   { id: "fuel",     give: "stack", n: 1, price: 600,  label: "Petrol Can",      note: "For the rickshaw / Thar" },
+  { id: "toolkit",  give: "stack", n: 1, price: 900,  label: "Toolkit",         note: "Repairs a vehicle (K)" },
   { id: "helmet2",  give: "gear",        price: 2500, label: "Helmet Lv. 2" },
   { id: "vest2",    give: "gear",        price: 3000, label: "Vest Lv. 2" },
   { id: "backpack2", give: "gear",       price: 2000, label: "Backpack Lv. 2" },

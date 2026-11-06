@@ -18,7 +18,8 @@ import { Throwables } from "./combat/Throwables.js";
 import { FireFX } from "./combat/FireFX.js";
 import { SmokeFX } from "./combat/SmokeFX.js";
 import { Minimap } from "./ui/Minimap.js";
-import { WorldMap } from "./ui/WorldMap.js";
+import { WorldMap, bearingDeg, headingName } from "./ui/WorldMap.js";
+import { SupplyDrops, DROP_FALL } from "./br/SupplyDrop.js";
 import { Chat } from "./ui/Chat.js";
 import "./ui/chat.css";
 import { Waypoints } from "./ui/Waypoints.js";
@@ -65,6 +66,8 @@ import { MonsterSync } from "./net/MonsterSync.js";
 import { MonsterAudio } from "./audio/MonsterAudio.js";
 import { BrHud } from "./br/BrHud.js";
 import { BrEdgeHud } from "./ui/BrEdgeHud.js";
+import { Bindings, ACTIONS as KEY_ACTIONS, keyName } from "./input/Bindings.js";
+import { Settings, SettingsPanel } from "./ui/SettingsPanel.js";
 import { ZoneWall, createPlane, updatePlane, createParachute, setSkydivePose } from "./br/BrVisuals.js";
 import {
   PLANE, FREEFALL, CHUTE, BR_AUTO_START, BR_END_HOLD, BR_WARMUP_RESPAWN, BR_MAX_PLAYERS, BR_JOIN_CLOSE_AT,
@@ -74,7 +77,7 @@ import {
 import { ENEMY_GUNS, getLevel } from "./zombies/MonsterTypes.js";
 import {
   WEAPONS, WEAPON_ORDER, HEAD_HEIGHT, GRENADE, MOLOTOV, MEDKIT, BISCUIT, CASH, THROWABLES, THROWABLE_ORDER,
-  SMOKE, SMOKE_COLORS, GEAR, ATTACHMENTS, HELMET_MONSTER_SHARE, VEST_BLAST_SHARE,
+  SMOKE, SMOKE_COLORS, GEAR, ATTACHMENTS, HELMET_MONSTER_SHARE, VEST_BLAST_SHARE, TOOLKIT,
 } from "./combat/weapons.js";
 import { weaponStats } from "./items/ItemDefs.js";
 import { LootActions } from "./inventory/LootActions.js";
@@ -1156,34 +1159,42 @@ let mapHoldsPlay = false;
 const isLocked = () => touchPlaying || mapHoldsPlay || shopHoldsPlay || bench.on || document.pointerLockElement === canvas;
 
 const SLOT_KEYS = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4, Digit5: 5 };
+// Keyboard layout (input/Bindings.js, Settings → Controls) and the gameplay switches (ui/SettingsPanel.js)
+const bindings = new Bindings();
+const settings = new Settings();
+/** Fixed keys on top of the bindings: the arrows move, the right Shift sprints. */
+const FIXED_KEYS = { ArrowUp: "forward", ArrowDown: "back", ArrowLeft: "left", ArrowRight: "right", ShiftRight: "sprint" };
+/** The key an action is on, for messages ("press K"). */
+const K = id => bindings.label(id);
 
 function setKey(code, pressed, repeat) {
-  switch (code) {
-    case "KeyW": case "ArrowUp":    keys.forward   = pressed; break;
-    case "KeyS": case "ArrowDown":  keys.backward  = pressed; break;
-    case "KeyA": case "ArrowLeft":  keys.left      = pressed; break;
-    case "KeyD": case "ArrowRight": keys.right     = pressed; break;
-    case "Space":
+  const act = bindings.actionOf(code) ?? FIXED_KEYS[code] ?? null;
+  switch (act) {
+    case "forward": keys.forward  = pressed; break;
+    case "back":    keys.backward = pressed; break;
+    case "left":    keys.left     = pressed; break;
+    case "right":   keys.right    = pressed; break;
+    case "jump":
       keys.jump = pressed;
       if (pressed) jumpQueued = true;
       break;
-    case "ShiftLeft": case "ShiftRight": keys.run = pressed; break;
+    case "sprint": keys.run = pressed; break;
   }
   if (repeat) return;
 
   // One-shot actions
   const playing = isLocked() && playerHealth > 0;
   if (pressed) {
-    if (code === "Tab" || code === "KeyI") { setInventoryOpen(!inventoryOpen); return; }
+    if (act === "inventory" || (code === "KeyI" && !bindings.actionOf("KeyI"))) { setInventoryOpen(!inventoryOpen); return; }
     if (code === "Escape" && inventoryOpen) { if (!lootScreen.escape()) setInventoryOpen(false); return; }
-    if (code === "KeyM" && !lobby.open && (isLocked() || brWatching() || worldMap.open)) { setMapOpen(!worldMap.open); return; }
+    if (act === "map" && !lobby.open && (isLocked() || brWatching() || worldMap.open)) { setMapOpen(!worldMap.open); return; }
     if (code === "Escape" && worldMap.open) { setMapOpen(false); return; }
     if (code === "Escape" && shopUI.open) { setShopOpen(false); return; }
     if (isBR() && !lobby.open) {
       if (code === "Enter" && brHostCanStart()) { brHostStart(); return; }
       if (brWatching()) {
-        if (code === "KeyA" || code === "ArrowLeft") brPickSpectate(-1);
-        if (code === "KeyD" || code === "ArrowRight") brPickSpectate(1);
+        if (act === "left") brPickSpectate(-1);
+        if (act === "right") brPickSpectate(1);
         return;
       }
     }
@@ -1194,31 +1205,37 @@ function setKey(code, pressed, repeat) {
       if (inventory.has(id)) equipWeapon(id);
       else inventoryUI.feed(`${WEAPONS[id].name} not found yet`, "info");
     }
-    switch (code) {
-      case "KeyR": startReload(); break;
-      case "KeyE": interact(); break;
-      case "KeyG": beginThrow(); break;
-      case "KeyQ": cycleThrowable(); break;
-      case "KeyH": useHeal(); break;
-      case "KeyB": if (nearShop) setShopOpen(!shopUI.open); break;
-      case "KeyF": if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); else if (nearCseDoor) useCseDoor(); else if (nearCrate) meleeCrate(); break;
-      case "KeyC": toggleStance("crouch"); break;
-      case "KeyZ": toggleStance("prone"); break;
-      case "KeyL": useLightSwitch(); break;
-      case "KeyN": toggleTorch(); break;
-      case "KeyV": toggleVehicle(); break;
-      case "KeyX": pillionKey(1); break;
-      case "KeyY": pillionKey(-1); break;
-      case "KeyT": refuelVehicle(); break;
+    switch (act) {
+      case "reload": startReload(); break;
+      case "interact": interact(); break;
+      case "throw": beginThrow(); break;
+      case "cycleThrow": cycleThrowable(); break;
+      case "heal": useHeal(); break;
+      case "shop": if (nearShop) setShopOpen(!shopUI.open); break;
+      case "use": if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); else if (nearCseDoor) useCseDoor(); else if (nearCrate) meleeCrate(); break;
+      case "crouch": toggleStance("crouch"); break;
+      case "prone": toggleStance("prone"); break;
+      case "light": useLightSwitch(); break;
+      case "torch": toggleTorch(); break;
+      case "vehicle": toggleVehicle(); break;
+      case "pillionFront": pillionKey(1); break;
+      case "pillionBack": pillionKey(-1); break;
+      case "refuel": refuelVehicle(); break;
+      case "repair": if (repair.on) stopRepair("Repair cancelled"); else startRepair(); break;
     }
-  } else if (code === "KeyG") {
+  } else if (act === "throw") {
     releaseThrow();
   }
+}
+/** Touch buttons and prompt taps send an action's original key: play it as whatever key that action is on now. */
+function touchKey(code, pressed) {
+  const id = bindings.fromDefault(code);
+  setKey(id ? bindings.code(id) : code, pressed, false);
 }
 window.addEventListener("keydown", e => {
   if (e.code === "Tab") e.preventDefault(); // keep focus from jumping around the page
   // Enter / Y / "/" opens the room chat (the BR host's Enter still starts the match)
-  if (!e.repeat && CHAT_KEYS.has(e.code) && !(e.code === "Enter" && brHostCanStart()) && openChat()) {
+  if (!e.repeat && (CHAT_KEYS.has(e.code) || e.code === bindings.code("chat")) && !(e.code === "Enter" && brHostCanStart()) && openChat()) {
     e.preventDefault(); // or the key's character lands in the chat box
     return;
   }
@@ -1301,7 +1318,7 @@ function turnBy(yaw, pitch) {
 
 // ─── Touch controls (phones, tablets, the Android app) ────────────────────────
 const touch = IS_TOUCH ? new TouchControls({
-  key: (code, pressed) => setKey(code, pressed, false),
+  key: (code, pressed) => touchKey(code, pressed),
   look: (dx, dy) => { if (isLocked()) lookBy(dx, dy); },
   turn: (yaw, pitch) => { if (isLocked()) turnBy(yaw, pitch); },
   fire(down) {
@@ -1319,6 +1336,7 @@ const touch = IS_TOUCH ? new TouchControls({
     } else if (hb === "medkit") useHeal("medkit");
     else if (hb === "biscuit") useHeal("biscuit");
     else if (hb === "fuel") refuelVehicle();
+    else if (hb === "toolkit") startRepair();
   },
   pause: () => releaseLock(),
   unlock: () => sfx.unlock(),
@@ -2641,24 +2659,24 @@ function updatePickups(delta) {
     if (e) {
       const act = e.def.category === "gear" ? (inventory.gear[GEAR[e.kind].slot] ? "Swap" : "Wear")
         : e.def.category === "weapon" && inventory.has(e.kind) ? "Take ammo" : "Pick up";
-      addPrompt("E", act, e.def.label, e.kind);
+      addPrompt("interact", act, e.def.label, e.kind);
     }
     const p = characterBody.position, feetY = p.y - FEET_OFFSET;
-    if (climb.offer && !drive.on && !ride.on) addPrompt("Space", climb.offer === "wall" ? "Climb over" : "Vault", climb.offer === "wall" ? "Wall" : "Window", "jump");
+    if (climb.offer && !drive.on && !ride.on) addPrompt("jump", climb.offer === "wall" ? "Climb over" : "Vault", climb.offer === "wall" ? "Wall" : "Window", "jump");
     const near = houses?.interaction(p.x, p.z, feetY);
     nearDoor = near?.door ?? null;
     nearSwitch = near?.sw ?? null;
-    if (nearDoor) addPrompt("F", nearDoor.doorOpen ? "Close" : "Open", "Door", "door");
+    if (nearDoor) addPrompt("use", nearDoor.doorOpen ? "Close" : "Open", "Door", "door");
     const gateHere = !nearDoor && !drive.on ? collegeGate?.interaction(p.x, p.z) : null;
     nearGatePart = gateHere?.part ?? null;
     if (gateHere) {
       // "Open the college gate" → OPEN · College gate
       const [act, ...rest] = gateHere.label.replace(" the ", " ").split(" ");
       const what = rest.join(" ");
-      addPrompt("F", act, what.charAt(0).toUpperCase() + what.slice(1), gateHere.part === "gate" ? "gate" : "door");
+      addPrompt("use", act, what.charAt(0).toUpperCase() + what.slice(1), gateHere.part === "gate" ? "gate" : "door");
     }
     nearCseDoor = !nearDoor && !gateHere && !drive.on ? cseBuilding?.doorAt(p.x, p.z, feetY) ?? null : null;
-    if (nearCseDoor) addPrompt("F", nearCseDoor.open ? "Close" : "Open", "Door", "door");
+    if (nearCseDoor) addPrompt("use", nearCseDoor.open ? "Close" : "Open", "Door", "door");
     // A crate in front of you: kick it standing, punch it crouched or prone
     nearCrate = null;
     if (crates && !nearDoor && !gateHere && !nearCseDoor && !drive.on && !ride.on) {
@@ -2667,31 +2685,35 @@ function updatePickups(delta) {
       nearCrate = crates.nearest(p.x, feetY, p.z, _crateFwd.x / fl, _crateFwd.z / fl);
       if (nearCrate) {
         const kick = stance === "stand";
-        addPrompt("F", kick ? "Kick" : "Punch", "Wooden crate", kick ? "kick" : "punch", Math.max(0, nearCrate.hp) / CRATE_HP);
+        addPrompt("use", kick ? "Kick" : "Punch", "Wooden crate", kick ? "kick" : "punch", Math.max(0, nearCrate.hp) / CRATE_HP);
       }
     }
-    if (nearSwitch) addPrompt("L", nearSwitch.lightOn ? "Lights off" : "Lights on", "Switch", "bulb");
+    if (nearSwitch) addPrompt("light", nearSwitch.lightOn ? "Lights off" : "Lights on", "Switch", "bulb");
     nearShop = null;
     if (!drive.on) {
       for (const s of shops) if (Math.hypot(s.front.x - p.x, s.front.z - p.z) < SHOP_RANGE) { nearShop = s; break; }
     }
-    if (nearShop) addPrompt("B", "Open shop", `Dukaan · ${fmtMoney(inventory.cash)}`, "shop");
+    if (nearShop) addPrompt("shop", "Open shop", `Dukaan · ${fmtMoney(inventory.cash)}`, "shop");
     const car = drive.car ?? ride.car ?? nearestVehicle();
     if (car) {
       const bike = !!car.spec.bike;
       const fuel = car.fuel / car.spec.fuelMax;
       if (drive.on || ride.on) {
-        addPrompt("V", bike ? "Get off" : "Get out", car.spec.label, "steering");
-        if (ride.on) addPrompt(ride.facing > 0 ? "Y" : "X", "Turn round", ride.facing > 0 ? "Face back" : "Face front", "swap");
+        addPrompt("vehicle", bike ? "Get off" : "Get out", car.spec.label, "steering");
+        if (ride.on) addPrompt(ride.facing > 0 ? "pillionBack" : "pillionFront", "Turn round", ride.facing > 0 ? "Face back" : "Face front", "swap");
       } else {
-        if (car.driver === null) addPrompt("V", bike ? "Ride" : "Drive", car.empty ? `${car.spec.label} · No petrol` : car.spec.label, "steering", fuel);
-        if (bike && car.pillion === null) {
-          addPrompt("X", "Sit behind", "Facing front", "jump");
-          addPrompt("Y", "Sit behind", "Facing back", "jump");
+        if (car.driver === null && !car.wrecked) addPrompt("vehicle", bike ? "Ride" : "Drive", car.empty ? `${car.spec.label} · No petrol` : car.spec.label, "steering", fuel);
+        if (repair.on && repair.car === car) addPrompt("repair", "Repairing…", `${car.spec.label} · ${K("repair")} to stop`, "repair", repair.t / repair.dur);
+        else if (car.driver === null && car.health < car.maxHealth - 0.5) {
+          addPrompt("repair", car.wrecked ? "Repair wreck" : "Repair", inventory.toolkits ? `${car.spec.label} · ${inventory.toolkits} toolkit${inventory.toolkits > 1 ? "s" : ""}` : `${car.spec.label} · Need a toolkit`, "repair", car.healthFrac);
+        }
+        if (bike && car.pillion === null && !car.wrecked) {
+          addPrompt("pillionFront", "Sit behind", "Facing front", "jump");
+          addPrompt("pillionBack", "Sit behind", "Facing back", "jump");
         }
       }
       if (inventory.fuelCans > 0 && car.fuel < car.spec.fuelMax - 1) {
-        addPrompt("T", "Refuel", `${inventory.fuelCans} petrol can${inventory.fuelCans > 1 ? "s" : ""}`, "fuel", fuel);
+        addPrompt("refuel", "Refuel", `${inventory.fuelCans} petrol can${inventory.fuelCans > 1 ? "s" : ""}`, "fuel", fuel);
       }
     }
   } else {
@@ -2703,15 +2725,20 @@ function updatePickups(delta) {
   inventoryUI.setPrompts(promptRows, promptN);
 }
 
-/** One context prompt row; promptRows is reused (stride 5), so nothing is allocated per frame. */
+/**
+ * One context prompt row; promptRows is reused (stride 6), so nothing is allocated per frame.
+ * id: the action (input/Bindings.js): the row shows its current key, a tap sends its original one.
+ */
 let promptN = 0;
-function addPrompt(key, action, detail = "", iconName = "", progress = -1) {
-  promptRows[promptN++] = key;
+function addPrompt(id, action, detail = "", iconName = "", progress = -1) {
+  promptRows[promptN++] = bindings.label(id);
   promptRows[promptN++] = action;
   promptRows[promptN++] = detail;
   promptRows[promptN++] = iconName;
   promptRows[promptN++] = progress;
+  promptRows[promptN++] = KEY_DEFAULT[id] ?? "";
 }
+const KEY_DEFAULT = Object.fromEntries(KEY_ACTIONS.map(a => [a.id, a.key]));
 const _crateFwd = new THREE.Vector3();
 
 // ─── Wooden crates: kick (standing) or punch (crouched / prone) ───────────────
@@ -2731,7 +2758,7 @@ const _crateP = new THREE.Vector3();
 
 // Two or three things per crate: mostly supplies, now and then gear or a gun
 const CRATE_LOOT = [
-  ["ammo", 26], ["medkit", 8], ["biscuit", 12], ["grenade", 7], ["molotov", 5], ["cash", 10], ["fuel", 3],
+  ["ammo", 26], ["medkit", 8], ["biscuit", 12], ["grenade", 7], ["molotov", 5], ["cash", 10], ["fuel", 3], ["toolkit", 4],
   ["helmet1", 4], ["vest1", 4], ["backpack1", 3], ["helmet2", 1.5], ["vest2", 1.5], ["backpack2", 1],
   ["reddot", 3], ["holo", 2], ["scope2x", 3], ["scope4x", 1.5], ["extmag", 3], ["grip", 2], ["compensator", 2], ["suppressor", 1],
   ["smg", 2.5], ["shotgun", 2.5], ["rifle", 1.5], ["sniper", 0.6],
@@ -2850,20 +2877,53 @@ let nearGatePart = null;   // "gate" | "booth": the college gate's lanes or its 
 let nearSwitch = null;
 let nearCseDoor = null;    // world/CseBuilding.js: a staff cabin or lab door
 
-function useCseDoor() {
-  const d = nearCseDoor, open = !d.open;
+function useCseDoor(d = nearCseDoor, open = !d.open, anim = true) {
   cseBuilding.setDoor(d.index, open);
-  playerAnim.clip("interact", 0.8);
+  if (anim) playerAnim.clip("interact", 0.8);
   sfx.doorBang({ x: d.x, y: d.y + 1.2, z: d.z });
   makeNoise(d.x, d.z, open ? 9 : 12, "door");
   net.send({ t: "csedoor", i: d.index, o: open });
 }
 
-function useDoor(open) {
-  if (nearDoor && houses.setDoor(nearDoor, open)) {
-    playerAnim.clip("interact", 0.8);
-    makeNoise(nearDoor.doorWorld.x, nearDoor.doorWorld.z, open ? 9 : 12, "door");
-    net.send({ t: "door", h: houses.houses.indexOf(nearDoor), o: open });
+function useDoor(open, h = nearDoor, anim = true) {
+  if (h && houses.setDoor(h, open)) {
+    if (anim) playerAnim.clip("interact", 0.8);
+    makeNoise(h.doorWorld.x, h.doorWorld.z, open ? 9 : 12, "door");
+    net.send({ t: "door", h: houses.houses.indexOf(h), o: open });
+  }
+}
+
+// ── Auto-open doors (Settings → Gameplay) ────────────────────────────────────
+// Walking up to a closed house or classroom door opens it; once you're
+// AUTO_DOOR_AWAY m off (and nobody else stands in it) it swings shut again.
+// Only doors it opened itself are closed: one you opened by hand stays open.
+const AUTO_DOOR_AWAY = 3.6;
+const autoDoors = [];   // { kind: "house" | "cse", ref, x, z, t }
+function updateAutoDoors(delta) {
+  if (!settings.get("autoDoors")) { autoDoors.length = 0; return; }
+  if (playerHealth <= 0 || drive.on || ride.on) return;
+  const p = characterBody.position;
+  const moving = keys.forward || keys.backward || keys.left || keys.right || (touch && Math.hypot(touch.moveX, touch.moveY) > 0.2);
+  if (moving) {
+    if (nearDoor && !nearDoor.doorOpen && !autoDoors.some(d => d.ref === nearDoor)) {
+      useDoor(true, nearDoor, false);
+      autoDoors.push({ kind: "house", ref: nearDoor, x: nearDoor.doorWorld.x, z: nearDoor.doorWorld.z, t: 0 });
+    } else if (nearCseDoor && !nearCseDoor.open && !autoDoors.some(d => d.ref === nearCseDoor)) {
+      useCseDoor(nearCseDoor, true, false);
+      autoDoors.push({ kind: "cse", ref: nearCseDoor, x: nearCseDoor.x, z: nearCseDoor.z, t: 0 });
+    }
+  }
+  for (let i = autoDoors.length - 1; i >= 0; i--) {
+    const d = autoDoors[i];
+    d.t += delta;
+    const open = d.kind === "house" ? d.ref.doorOpen : d.ref.open;
+    if (!open) { autoDoors.splice(i, 1); continue; }
+    if (d.t < 1.2 || Math.hypot(p.x - d.x, p.z - d.z) < AUTO_DOOR_AWAY) continue;
+    let busy = false;
+    for (const t of remotePlayers.targets()) if (t.alive && Math.hypot(t.pos.x - d.x, t.pos.z - d.z) < 2.2) { busy = true; break; }
+    if (busy) continue;
+    if (d.kind === "house") useDoor(false, d.ref, false); else useCseDoor(d.ref, false, false);
+    autoDoors.splice(i, 1);
   }
 }
 
@@ -2954,10 +3014,11 @@ const STARTER_LOOT = [
   ["grenade", -1.5, 10], ["molotov", 1.5, 10], ["ammo", 0, 12],
   ["helmet1", -3.5, 12], ["vest1", 3.5, 12], ["backpack1", 0, 14.5], ["reddot", -1.8, 14], ["grip", 1.8, 14],
   ["fuel", -12, -12], // next to the auto-rickshaw
+  ["toolkit", -10.4, -12.6],
 ];
 const WORLD_LOOT = {
   pistol: 1, smg: 2, shotgun: 3, rifle: 3, sniper: 3,
-  ammo: 14, grenade: 10, molotov: 10, medkit: 8, fuel: 6, biscuit: 12, cash: 14,
+  ammo: 14, grenade: 10, molotov: 10, medkit: 8, fuel: 6, toolkit: 5, biscuit: 12, cash: 14,
   helmet1: 4, helmet2: 2, vest1: 4, vest2: 2, backpack1: 4, backpack2: 2,
   reddot: 3, scope4x: 2, compensator: 2, suppressor: 2, extmag: 3, grip: 2,
   holo: 2, scope2x: 3, scope6x: 1,
@@ -2981,7 +3042,7 @@ function isOpenGround(x, z) {
   return true;
 }
 
-const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag", "biscuit", "cash", "biscuit"];
+const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag", "biscuit", "cash", "biscuit", "toolkit"];
 // The water towers' roofs are a sniper's perch: optics and long guns up there
 const TOWER_LOOT = ["sniper", "scope4x", "ammo", "rifle", "scope6x", "medkit", "ammo", "scope8x", "grenade", "helmet2", "ammo", "biscuit"];
 const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov", "helmet3", "vest3", "backpack3", "scope4x", "scope6x", "scope8x", "suppressor"];
@@ -3066,6 +3127,7 @@ itemIcons.molotov = itemIcon("molotov", { width: 64, height: 64, yaw: 0.4 });
 itemIcons.smoke   = itemIcon("smoke",   { width: 64, height: 64, yaw: 0.4 });
 itemIcons.ammo    = itemIcon("ammo",    { width: 64, height: 64, yaw: 0.6, pitch: 0.35 });
 itemIcons.fuel    = itemIcon("fuel",    { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
+itemIcons.toolkit = itemIcon("toolkit", { width: 64, height: 64, yaw: 0.5, pitch: 0.3 });
 itemIcons.medkit  = itemIcon("medkit",  { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
 itemIcons.biscuit = itemIcon("biscuit", { width: 64, height: 64, yaw: 0.5, pitch: 0.35 });
 itemIcons.cash    = itemIcon("cash",    { width: 64, height: 64, yaw: 0.5, pitch: 0.45 });
@@ -3081,7 +3143,7 @@ legal.showFirstTime();
 // Prompt rows show what the key does as an icon too (and that's all a phone shows)
 // A prompt names its icon (an item kind like "helmet2" or "scope4x" falls back to its
 // family, then to the bag); a bare key still gets its old one
-const PROMPT_ICONS = { O: "door", E: "bag", V: "steering", B: "shop", Space: "jump", L: "bulb", T: "fuel", H: "medkit", F: "hand" };
+const PROMPT_ICONS = { O: "door", E: "bag", V: "steering", B: "shop", Space: "jump", L: "bulb", T: "fuel", H: "medkit", F: "hand", K: "repair" };
 const promptIcon = name => icon(name, "prompt-icon") || icon(name.replace(/\d+x?$/, ""), "prompt-icon")
   || (name.startsWith("scope") || name === "holo" ? icon("scope", "prompt-icon") : "")
   || icon(PROMPT_ICONS[name] ?? "bag", "prompt-icon");
@@ -3264,7 +3326,7 @@ const lootScreen = new LootScreen({
   actions: lootActions,
   icons: itemIcons,
   cb: {
-    onUse: kind => { if (kind === "medkit" || kind === "biscuit") useHeal(kind); else if (kind === "fuel") refuelVehicle(); },
+    onUse: kind => { if (kind === "medkit" || kind === "biscuit") useHeal(kind); else if (kind === "fuel") refuelVehicle(); else if (kind === "toolkit") startRepair(); },
     onSelectThrowable: kind => { inventory.selectThrowable(kind); sfx.click(); },
   },
 });
@@ -3723,6 +3785,7 @@ const worldMap = new WorldMap({
   obstacles: () => mapObstacles,
   fires: () => atmosphere.sources,
   vehicles: () => vehicles,
+  hideDriven: () => isBR(),
   br: () => (isBR() ? _mapState : null),
   height: (x, z) => (caves ? caves.mapHeight(x, z) : groundHeight(x, z)),
   surface: (x, z) => mapSurface(x, z),
@@ -3732,6 +3795,7 @@ const worldMap = new WorldMap({
   fights: () => fightZones,
 }, {
   touch: IS_TOUCH,
+  reliefPx: IS_TOUCH ? 1024 : 1536,
   onPin: (x, z) => setPin("me", x, z, true),
   onClear: () => setPin("me", null, null, true),
   onClose: () => setMapOpen(false),
@@ -4823,6 +4887,8 @@ function onConnected(welcome) {
     inventoryUI.feed(`Hosting room "${net.room}". Friends join with the same code.`, "info");
   }
   updateSquadPlayerCount();
+  const back = takeRestore(false);
+  if (back) applyRestore(back);
 }
 
 function becomeHost() {
@@ -4845,6 +4911,7 @@ function becomeHost() {
 /** A player arrived (a "joined", or found in the roster after we were away). */
 function playerJoined(p) {
   remotePlayers.add(p);
+  sendBotPref(p.id); // so whoever hosts later knows what everyone wants
   inventoryUI.feed(`${p.name} joined the fight`, "weapon");
   chat.system(`${p.name} joined`);
   updateSquadPlayerCount();
@@ -4872,6 +4939,8 @@ function playerJoined(p) {
 
 /** A player left the room (or wasn't in the roster any more when we got back). */
 function playerLeft(id) {
+  botPrefs.delete(id);
+  if (typeof id === "number") brSyncBots();
   const name = remotePlayers.players.get(id)?.name ?? "A player";
   remotePlayers.remove(id);
   if (worldMap.pins.has(id)) setPin(id, null);
@@ -4915,7 +4984,52 @@ function stepDownAsHost() {
 // we missed held for us) for 45 s, so a blip changes nothing: the game keeps
 // running here, everyone stays, and the banner says what's happening. Away
 // longer (or the server restarted) and we come back as a new player.
+// Where you were when the connection (or the page) went: you come back there, with your health and kit
+const LASTPOS_KEY = "babylon-fps:lastpos";
+const LASTPOS_MAX_AGE = 15 * 60 * 1000;
+let lastPos = null;          // the latest save
+let restorePos = null;       // to put back on the next join (a rejoin, or a reload)
+try { restorePos = JSON.parse(sessionStorage.getItem(LASTPOS_KEY) ?? "null"); } catch { /* storage blocked */ }
+let lastPosT = 0;
+function saveLastPos() {
+  if (!net.inRoom || !net.connected || playerHealth <= 0 || brAirborne() || climb.active) return;
+  if (isBR() && (br.state !== "match" || !br.inMatch || br.rev)) return;
+  const p = characterBody.position;
+  lastPos = {
+    room: net.room, br: isBR(), seed: isBR() ? br.seed : 0,
+    x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2), yaw: +aimYaw.toFixed(3),
+    hp: Math.round(playerHealth), inv: inventory.snapshot(), at: Date.now(),
+  };
+  try { sessionStorage.setItem(LASTPOS_KEY, JSON.stringify(lastPos)); } catch { /* storage full */ }
+}
+function updateLastPos(delta) {
+  if ((lastPosT -= delta) > 0) return;
+  lastPosT = 1;
+  saveLastPos();
+}
+/** The saved spot for this room and match, once (null if there's none, it's stale, or it's another match). */
+function takeRestore(brMatch, seed = 0) {
+  const r = restorePos;
+  if (!r || r.room !== net.room || r.br !== brMatch || Date.now() - r.at > LASTPOS_MAX_AGE) return null;
+  if (brMatch && r.seed !== seed) return null;
+  restorePos = null;
+  return r;
+}
+/** Puts you back where you were (body, camera, facing, health, kit). */
+function applyRestore(r) {
+  const y = Math.max(r.y, surfaceHeight(r.x, r.z) + FEET_OFFSET + 0.05);
+  characterBody.position.set(r.x, y, r.z);
+  characterBody.velocity.set(0, 0, 0);
+  moveVelocity.set(0, 0, 0);
+  camPivot.set(r.x, y - FEET_OFFSET + cameraRig.pivotHeight, r.z);
+  aimYaw = bodyYaw = r.yaw ?? aimYaw;
+  if (r.inv) { inventory.restore(r.inv); onWeaponChanged(false); }
+  playerHealth = healthTrail = Math.max(1, Math.min(MAX_HEALTH, r.hp ?? MAX_HEALTH));
+  inventoryUI.feed("Reconnected · back where you were", "info");
+}
+
 net.on("reconnecting", info => {
+  if (net.inRoom && !restorePos) saveLastPos();
   if (info.closed) setNetStatus(`${info.reason} · you'll be back in when it ends`);
   else if (info.reason === "No internet") setNetStatus("No internet · waiting for it to come back…");
   else setNetStatus(info.retryIn ? `Can't reach the server · trying again in ${Math.ceil(info.retryIn / 1000)} s` : "Connection lost · reconnecting…");
@@ -4936,8 +5050,9 @@ net.on("resumed", welcome => {
 });
 
 net.on("rejoined", welcome => {
-  // Our slot was gone: back as a new player (the room sees a fresh join)
+  // Our slot was gone: back as a new player (the room sees a fresh join), but in the same spot
   setNetStatus(null);
+  restorePos = lastPos ?? restorePos;
   if (isBR()) bots.clear();
   forgetRemotePlayers();
   if (isBR()) {
@@ -5059,7 +5174,7 @@ net.on("st", msg => remotePlayers.applyState(msg.from, msg));
 // ─── Room chat ────────────────────────────────────────────────────────────────
 // Everyone in the room (co-op squad or battle royale lobby) sees it. Names and
 // colours come from the relay's player list, keyed by the relay-stamped `from`.
-const CHAT_KEYS = new Set(["Enter", "NumpadEnter", "KeyY", "Slash"]);
+const CHAT_KEYS = new Set(["Enter", "NumpadEnter", "Slash"]); // plus the bound chat key (Y by default)
 const chat = new Chat({
   send(text) {
     net.send({ t: "chat", m: text });
@@ -5105,6 +5220,10 @@ net.on("shot", msg => {
 net.on("anim", msg => {
   const s = remotePlayers.players.get(msg.b ?? msg.from)?.soldier;
   if (!s) return;
+  if (msg.g === "repair") {
+    s.repairStyle = msg.s ?? "car";
+    if (!s.handProps.repair) s.setHandProp("repair", makeWrench());
+  }
   if (msg.g) s.playGesture(msg.g, msg.d);
   else if (msg.c) s.playClip(msg.c, msg.d, msg.w ?? 1);
 });
@@ -5146,6 +5265,7 @@ net.on("world", msg => {
     const v = vehicles[i];
     if (!v || v.driver !== null || !p) return;
     [v.x, v.z, v.yaw, v.fuel] = p;
+    if (p[4] !== undefined && p[4] !== null) v.setHealth(p[4]);
     v.place();
   });
 });
@@ -5402,7 +5522,9 @@ const vehicleHudEl = document.getElementById("vehicle-hud");
 const vehSpeedEl = document.getElementById("veh-speed");
 const vehFuelEl = document.getElementById("veh-fuel-fill");
 const vehFuelValEl = document.getElementById("veh-fuel-val");
-const vehHud = { shown: null, speed: -1, fuel: -1 };
+const vehHpEl = document.getElementById("veh-hp-fill");
+const vehHpValEl = document.getElementById("veh-hp-val");
+const vehHud = { shown: null, speed: -1, fuel: -1, hp: -1 };
 
 /** Resolves the road-relative spawns into { kind, x, z, yaw } (needs the roads). */
 function vehicleSpawns(roads) {
@@ -5467,8 +5589,12 @@ function toggleVehicle() {
   if (ride.on) { exitPillion(); return; }
   const car = nearestVehicle();
   if (!car || playerHealth <= 0 || brAirborne() || climb.active) return;
+  if (car.wrecked) {
+    inventoryUI.feed(`The ${car.spec.label} is wrecked: ${inventory.toolkits ? `press ${IS_TOUCH ? "Repair" : K("repair")} to fix it` : "find a toolkit to repair it"}`, "info", "toolkit");
+    return;
+  }
   if (car.driver !== null) {
-    inventoryUI.feed(car.spec.bike && car.pillion === null ? `Someone's riding it: ${IS_TOUCH ? "tap" : "press X / Y"} to sit behind them` : "Someone is already driving it", "info");
+    inventoryUI.feed(car.spec.bike && car.pillion === null ? `Someone's riding it: ${IS_TOUCH ? "tap" : `press ${K("pillionFront")} / ${K("pillionBack")}`} to sit behind them` : "Someone is already driving it", "info");
     return;
   }
   drive.on = true;
@@ -5486,10 +5612,10 @@ function toggleVehicle() {
   sfx.equip();
   if (car.spec.bike) startMount(car, "drive");
   inventoryUI.feed(car.empty
-    ? `Out of petrol: find a petrol can, then ${IS_TOUCH ? "tap it in the hotbar" : "press T"}`
+    ? `Out of petrol: find a petrol can, then ${IS_TOUCH ? "tap it in the hotbar" : `press ${K("refuel")}`}`
     : car.spec.bike
-      ? IS_TOUCH ? "Joystick: ride & lean · BRAKE · tap Get off" : "W/S ride · A/D lean into the turn · Space brake · V get off"
-      : IS_TOUCH ? "Joystick: drive & steer · BRAKE · tap Get out" : "W/S drive · A/D steer · Space brake · V get out",
+      ? IS_TOUCH ? "Joystick: ride & lean · BRAKE · tap Get off" : `${K("forward")}/${K("back")} ride · ${K("left")}/${K("right")} lean into the turn · ${K("jump")} brake · ${K("vehicle")} get off`
+      : IS_TOUCH ? "Joystick: drive & steer · BRAKE · tap Get out" : `${K("forward")}/${K("back")} drive · ${K("left")}/${K("right")} steer · ${K("jump")} brake · ${K("vehicle")} get out`,
     car.empty ? "info" : "fuel", "fuel");
 }
 
@@ -5541,8 +5667,8 @@ function pillionKey(facing) {
   sfx.equip();
   startMount(car, facing > 0 ? "front" : "back");
   inventoryUI.feed(facing > 0
-    ? `Riding pillion${car.driver === null ? ": wait for a driver" : ""} · ${IS_TOUCH ? "tap" : "Y"} to turn round · V get off`
-    : `Riding pillion facing back: cover the road behind · ${IS_TOUCH ? "tap" : "X"} to face forward · V get off`, "info");
+    ? `Riding pillion${car.driver === null ? ": wait for a driver" : ""} · ${IS_TOUCH ? "tap" : K("pillionBack")} to turn round · ${K("vehicle")} get off`
+    : `Riding pillion facing back: cover the road behind · ${IS_TOUCH ? "tap" : K("pillionFront")} to face forward · ${K("vehicle")} get off`, "info");
 }
 
 function exitPillion() {
@@ -5660,6 +5786,140 @@ function refuelVehicle() {
   net.send({ t: "vfuel", f: +car.fuel.toFixed(1), i: car.index });
 }
 
+// ─── Vehicle health & repairs ─────────────────────────────────────────────────
+// Crashes wear a vehicle down (vehicleHit → damageVehicle); at 0 it's wrecked:
+// it won't start, it smokes, and nobody can drive it until it's repaired. A
+// toolkit (K next to it, TOOLKIT.time s, gun away) repairs it fully. The pose
+// depends on what you're fixing (Soldier "repair" gesture + repairStyle): bent
+// over a car's bonnet, crouched at a bike's wheel or under a rickshaw, reaching
+// up into a tractor's engine. Health rides on vhp { i, h } and world.veh.
+const VEH_CRASH_DAMAGE = 60;     // health a full-speed crash takes
+const REPAIR_REACH = 3.4;        // m from the vehicle's centre (plus its size)
+const REPAIR_STYLE = { thar: "car", rickshaw: "rickshaw", tractor: "tractor", sportbike: "bike", motorbike: "bike" };
+const repair = { on: false, car: null, t: 0, dur: 0, style: "car", crouched: false, clank: 0 };
+const _vehAt = { x: 0, y: 0, z: 0 };
+
+function damageVehicle(car, amount) {
+  if (car.hurt(amount)) onVehicleWrecked(car);
+  if (net.inRoom) net.send({ t: "vhp", i: car.index, h: Math.round(car.health) });
+}
+
+/** Everyone: a vehicle just died. */
+function onVehicleWrecked(car) {
+  _vehAt.x = car.x; _vehAt.y = groundHeight(car.x, car.z) + 1; _vehAt.z = car.z;
+  sfx.thud(_vehAt, true);
+  for (let k = 0; k < 4; k++) effects.impact(_vecA.set(car.x, _vehAt.y, car.z), Math.random() - 0.5, 1, Math.random() - 0.5, "dust", 10);
+  if (drive.car === car) {
+    cameraTrauma = 1;
+    inventoryUI.feed(`The ${car.spec.label} is wrecked! ${inventory.toolkits ? `Get out and press ${K("repair")} to repair it` : "Find a toolkit to repair it"}`, "info", "toolkit");
+  }
+}
+
+/** A vehicle next to you that needs fixing (and nobody's in), or null. */
+function repairable() {
+  const car = nearestVehicle();
+  return car && car.driver === null && car.health < car.maxHealth - 0.5 ? car : null;
+}
+
+function startRepair() {
+  if (repair.on || playerHealth <= 0 || brAirborne() || climb.active) return;
+  if (drive.on || ride.on) { inventoryUI.feed("Get off first to repair it", "info", "toolkit"); return; }
+  const car = nearestVehicle();
+  if (!car) { inventoryUI.feed("Stand next to a vehicle to repair it", "info", "toolkit"); return; }
+  if (car.driver !== null) { inventoryUI.feed("Someone is in it", "info", "toolkit"); return; }
+  if (car.health >= car.maxHealth - 0.5) { inventoryUI.feed(`The ${car.spec.label} doesn't need repairs`, "info", "toolkit"); return; }
+  if (!inventory.toolkits) { inventoryUI.feed("No toolkit: find one in houses and crates, or buy one at a dukaan", "info", "toolkit"); return; }
+  repair.on = true;
+  repair.car = car;
+  repair.t = 0;
+  repair.dur = TOOLKIT.time;
+  repair.style = REPAIR_STYLE[car.kind] ?? "car";
+  repair.clank = 0.3;
+  // Down to a bike's wheel or under a rickshaw; standing for a car's bonnet or a tractor's engine
+  repair.crouched = (repair.style === "bike" || repair.style === "rickshaw") && stance === "stand";
+  if (repair.crouched) setStance("crouch");
+  // Face the work
+  const p = characterBody.position;
+  aimYaw = Math.atan2(car.x - p.x, car.z - p.z);
+  bodyYaw = aimYaw;
+  moveVelocity.set(0, 0, 0);
+  cancelThrow();
+  input.fire = false;
+  input.aim = false;
+  weapon.reloading = false;
+  if (!soldier.handProps.repair) soldier.setHandProp("repair", makeWrench());
+  soldier.repairStyle = repair.style;
+  soldier.playGesture("repair", repair.dur);
+  net.send({ t: "anim", g: "repair", d: repair.dur, s: repair.style });
+  inventoryUI.feed(`Repairing the ${car.spec.label}…`, "fuel", "toolkit");
+}
+
+function stopRepair(msg = null) {
+  if (!repair.on) return;
+  repair.on = false;
+  soldier.stopGesture("repair");
+  net.send({ t: "anim", g: "repair", d: 0.2, s: repair.style }); // (cuts it short on everyone else's screen)
+  if (repair.crouched && stance === "crouch") setStance("stand");
+  repair.car = null;
+  if (msg) inventoryUI.feed(msg, "info", "toolkit");
+}
+
+function updateRepair(delta) {
+  if (!repair.on) return;
+  const car = repair.car, p = characterBody.position;
+  const moving = keys.forward || keys.backward || keys.left || keys.right || (touch && Math.hypot(touch.moveX, touch.moveY) > 0.35);
+  const far = car.distanceTo(p.x, p.z) > car.spec.enterRange + 1.5;
+  if (playerHealth <= 0 || car.driver !== null || far) { stopRepair("Repair stopped"); return; }
+  if (moving || input.fire || jumpQueued) { stopRepair("Repair cancelled"); return; }
+  repair.t += delta;
+  // Clanks and ratchets while you work
+  if ((repair.clank -= delta) <= 0) {
+    repair.clank = 0.35 + Math.random() * 0.35;
+    _vehAt.x = car.x; _vehAt.y = groundHeight(car.x, car.z) + 0.6; _vehAt.z = car.z;
+    sfx.play(Math.random() < 0.5 ? "can_cap" : "equip", { at: _vehAt, vol: 0.7, rate: 0.75 + Math.random() * 0.5, ref: 3 });
+  }
+  if (repair.t < repair.dur) return;
+  // Done
+  if (!inventory.takeToolkit()) { stopRepair("No toolkit left"); return; }
+  const wasWrecked = car.wrecked;
+  car.setHealth(car.maxHealth);
+  car.damage = wasWrecked ? 0.45 : 0.15;   // the last of the smoke clears off
+  if (net.inRoom) net.send({ t: "vhp", i: car.index, h: Math.round(car.health) });
+  repair.on = false;
+  repair.car = null;
+  if (repair.crouched && stance === "crouch") setStance("stand");
+  sfx.equip();
+  postFx.kick(0.15, 0x7ee05a);
+  inventoryUI.feed(`${car.spec.label} repaired${wasWrecked ? ": it runs again" : ""}`, "fuel", "toolkit");
+}
+
+// The big map's relief picture is built in the background, a sliver per frame, so the
+// first time you open the map mid-fight it's already there (it used to stall ~0.5 s)
+let mapPrebuildT = 8;   // s of play before it starts
+function updateMapPrebuild(dt) {
+  if (worldMap.open || (mapPrebuildT -= dt) > 0) return;
+  if (worldMap.prebuild(IS_TOUCH ? 1 : 1.5)) mapPrebuildT = Infinity;
+}
+
+/** The spanner in your hand while you repair. */
+const _wrenchMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a8, metalness: 0.85, roughness: 0.35 });
+const _wrenchGrip = new THREE.MeshStandardMaterial({ color: 0xc4161c, roughness: 0.6 });
+function makeWrench() {
+  const g = new THREE.Group();
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.2, 0.012), _wrenchMat);
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.09, 0.018), _wrenchGrip);
+  grip.position.y = -0.06;
+  const head = new THREE.Mesh(new THREE.TorusGeometry(0.03, 0.01, 6, 12, Math.PI * 1.5), _wrenchMat);
+  head.position.y = 0.12;
+  head.rotation.z = Math.PI * 0.25;
+  g.add(handle, grip, head);
+  g.rotation.x = Math.PI / 2;
+  return g;
+}
+// One hidden copy in the scene so its shaders compile with the loading screen's warm-up
+// (the first repair would otherwise stall the frame building them)
+{ const w = makeWrench(); w.visible = false; scene.add(w); }
+
 /** Replaces the on-foot controller while you drive. */
 function updateDriving(delta) {
   const car = drive.car;
@@ -5676,7 +5936,7 @@ function updateDriving(delta) {
   if (throttle !== 0 && car.empty && now > drive.emptyNotice) {
     drive.emptyNotice = now + 4;
     sfx.sputter();
-    inventoryUI.feed(`Out of petrol! ${IS_TOUCH ? "Tap the petrol can in the hotbar" : "Press T with a petrol can"}`, "info", "fuel");
+    inventoryUI.feed(`Out of petrol! ${IS_TOUCH ? "Tap the petrol can in the hotbar" : `Press ${K("refuel")} with a petrol can`}`, "info", "fuel");
   }
   const surf = surfaceAt(car.x, car.z);
   const crash = car.drive(delta, { throttle, steer, handbrake: keys.jump, grip: surf.grip }, solidAt);
@@ -5720,6 +5980,7 @@ function vehicleHit(car, crash) {
   car.nextHit = now + 0.22;
   const s = THREE.MathUtils.clamp((crash - CRASH_MIN) / (CRASH_FULL - CRASH_MIN), 0.05, 1);
   vehicleCrashFx(car, c.x, c.z, c.nx, c.nz, c.vx, c.vz, s, kind);
+  damageVehicle(car, s * VEH_CRASH_DAMAGE * (kind === CRASH_KIND.EDGE ? 0.4 : 1));
   if (net.inRoom) net.send({ t: "vhit", i: car.index, x: +c.x.toFixed(1), z: +c.z.toFixed(1), n: [+c.nx.toFixed(2), +c.nz.toFixed(2)], v: [+c.vx.toFixed(1), +c.vz.toFixed(1)], k: kind, s: +s.toFixed(2) });
   return true;
 }
@@ -5894,6 +6155,13 @@ function updateVehicleFx() {
     vehHud.speed = kmh;
     if (vehSpeedEl) vehSpeedEl.textContent = `${kmh}`;
   }
+  const hp = Math.ceil(drive.car.healthFrac * 100);
+  if (hp !== vehHud.hp) {
+    vehHud.hp = hp;
+    if (vehHpEl) vehHpEl.style.transform = `scaleX(${hp / 100})`;
+    if (vehHpValEl) vehHpValEl.textContent = hp > 0 ? `${hp}%` : "WRECKED";
+    vehicleHudEl?.classList.toggle("hurt", hp <= 25);
+  }
   const fuel = Math.ceil(drive.car.fuel);
   if (fuel !== vehHud.fuel) {
     vehHud.fuel = fuel;
@@ -5965,9 +6233,19 @@ net.on("vfuel", msg => {
   car.fuel = msg.f;
 });
 
-/** [[x, z, yaw, fuel], …] of every vehicle, for late joiners. */
+// A vehicle's health from whoever drove (or repaired) it
+net.on("vhp", msg => {
+  const car = vehicles[msg.i];
+  if (!car) return;
+  const was = car.wrecked;
+  car.setHealth(msg.h);
+  if (!was && car.wrecked) onVehicleWrecked(car);
+  else if (was && !car.wrecked) car.damage = 0.4;
+});
+
+/** [[x, z, yaw, fuel, health], …] of every vehicle, for late joiners. */
 function vehiclesState() {
-  return vehicles.map(v => [+v.x.toFixed(2), +v.z.toFixed(2), +v.yaw.toFixed(3), +v.fuel.toFixed(1)]);
+  return vehicles.map(v => [+v.x.toFixed(2), +v.z.toFixed(2), +v.yaw.toFixed(3), +v.fuel.toFixed(1), Math.round(v.health)]);
 }
 
 /** Parks every vehicle back where it started (a new battle royale round). */
@@ -6023,6 +6301,7 @@ function keepInBounds() {
 // shooters send `pvp` damage to the victim, and the victim announces `elim`.
 const brHud = new BrHud();
 const brEdgeHud = new BrEdgeHud();
+const supplyDrops = new SupplyDrops(scene, (x, z) => surfaceHeight(x, z), d => onSupplyLanded(d));
 const zoneWall = new ZoneWall(scene);
 const dropPlane = createPlane();
 scene.add(dropPlane);
@@ -6079,6 +6358,13 @@ const br = {
   revenants: new Set(),  // ids out on a Revenge Run right now
   rev: null,             // yours: { wait, t, dropped }
   fading: false,         // your revenge clock ran out: this death is "faded"
+  // Supply drops
+  sdNext: null,          // host: match time of the next drop (null until the plane's route is known)
+  sdCount: 0,
+  sdLabel: 0,            // s to the next refresh of the drops' map labels
+  // Nemesis
+  nemesisId: null,       // your nemesis's id in this match, if they're in it
+  nemesisScan: 0,
 };
 const _planePos = { x: 0, y: 0, z: 0 };
 const _spawn = { x: 0, z: 0 };
@@ -6241,7 +6527,8 @@ function enterBattleRoyale(welcome) {
   zombieManager.clearAll();
   enemyFire.clear();
   brHud.setVisible(true);
-  if (net.isHost) bots.spawnAll();
+  sendBotPref();
+  if (net.isHost && botsWanted()) bots.spawnAll();
   brEnterWarmup();
   inventoryUI.feed(net.isHost
     ? `You're the host. The match starts by itself, or ${IS_TOUCH ? "tap START MATCH" : "press ENTER"} to drop now`
@@ -6305,8 +6592,46 @@ function brEnterWarmup() {
   killsThisLife = 0;
   progress.resetRun();
   brResetTwists();
-  if (net.isHost) bots.onWarmup();
+  if (net.isHost) {
+    if (!botsWanted()) brSyncBots();
+    else if (bots.hosting) bots.onWarmup();
+    else bots.spawnAll();
+  }
 }
+
+// ── Bots on / off (Settings → Gameplay) ──────────────────────────────────────
+// Every player tells the room whether they want bots (pref { b }); the host
+// brings them in if anyone does, and sends them away (an empty "bots" packet)
+// when nobody does any more. It only changes in the warm-up, never mid-match.
+const botPrefs = new Map();   // player id → wants bots
+function botsWanted() {
+  if (settings.get("bots")) return true;
+  for (const [id, on] of botPrefs) if (on && net.players.has(id)) return true;
+  return false;
+}
+function sendBotPref(to) {
+  if (net.inRoom) net.send(to === undefined ? { t: "pref", b: settings.get("bots") ? 1 : 0 } : { t: "pref", to, b: settings.get("bots") ? 1 : 0 });
+}
+function brSyncBots() {
+  if (!isBR() || !net.isHost || (br.state !== "warm" && br.state !== "count")) return;
+  const want = botsWanted();
+  if (want && !bots.hosting) bots.spawnAll();
+  else if (!want && bots.hosting) {
+    bots.clear();
+    net.send({ t: "bots", l: [] });   // everyone else drops them too
+    if (br.state === "count" && remotePlayers.count === 0) br.state = "warm";
+  }
+}
+net.on("pref", msg => {
+  botPrefs.set(msg.from, !!msg.b);
+  brSyncBots();
+});
+settings.onChange(name => {
+  if (name !== "bots") return;
+  sendBotPref();
+  brSyncBots();
+  if (isBR() && br.state === "match") inventoryUI.feed(`Bots ${settings.get("bots") ? "on" : "off"}: from the next warm-up`, "info");
+});
 
 function brHostStart() {
   if (!net.isHost || (br.state !== "warm" && br.state !== "count")) return;
@@ -6354,7 +6679,14 @@ function brStartMatch(seed, ids, t) {
   aimYaw = Math.atan2(br.route.dx, br.route.dz);
   aimPitch = -0.35;
   if (net.isHost && t === 0) bots.onMatch();
-  if (br.inMatch && t > 0) {
+  const back = br.inMatch && t > 0 ? takeRestore(true, seed) : null;
+  if (back) {
+    // Back from a dropped connection (or a reload) in the same match: right where we were
+    br.flight = PHASE_GROUND;
+    characterRoot.visible = true;
+    applyRestore(back);
+    gameHud.showBanner({ title: "RECONNECTED", sub: "Back where you were", color: "#4da3ff", duration: 3 });
+  } else if (br.inMatch && t > 0) {
     // Joined a match that's already on: aboard if the plane's still over the island, else straight out of the sky
     const sky = brPlaneGone();
     if (sky) brSkyDrop();
@@ -6440,6 +6772,7 @@ function brDropLoot() {
   if (inventory.biscuits) items.push(["biscuit", { count: inventory.biscuits }]);
   if (inventory.cash) items.push(["cash", { count: inventory.cash }]);
   if (inventory.fuelCans) items.push(["fuel", { count: inventory.fuelCans }]);
+  if (inventory.toolkits) items.push(["toolkit", { count: inventory.toolkits }]);
   for (const [k, n] of Object.entries(inventory.bag)) if (n > 0) items.push([k, { count: n }]);
   for (const piece of Object.values(inventory.gear)) if (piece) items.push([piece.id, { dur: piece.dur }]);
   spillLoot(items, p.x, p.y - FEET_OFFSET, p.z);
@@ -6680,6 +7013,7 @@ function brHandleElim({ v, k, w, hs }) {
     // A revenant's kill: back for good
     if (br.rev?.dropped && br.state === "match") brReborn();
   }
+  if (br.state === "match" && br.alive.has(v)) brNemesisElim(v, k);
   if (br.state !== "match" || !br.alive.has(v)) return;
   // Most Wanted: count the kill; the wanted one going down pays their killer the bounty
   if (k !== null && k !== undefined && k !== v) br.kills.set(k, (br.kills.get(k) ?? 0) + 1);
@@ -6889,7 +7223,8 @@ function brUpdateTwists(delta) {
     }
     if (r && r.dropped && br.rev) { _edgeRev.t = r.t; _edgeRev.urgent = r.t < 15; rev = _edgeRev; }
   }
-  brEdgeHud.update(w, rev);
+  brUpdateSupply(delta);
+  brEdgeHud.update(w, rev, brNemesisHud(delta));
 }
 
 /** A match starting or ending: no wanted player, no revenants. */
@@ -6904,6 +7239,175 @@ function brResetTwists() {
   br.mwPos = null;
   setPin("wanted", null);
   brEdgeHud.hide();
+  for (const d of supplyDrops.drops) if (d.id >= 0) setPin(`drop${d.id}`, null);
+  supplyDrops.clear();
+  br.sdNext = null;
+  br.sdCount = 0;
+  br.nemesisId = null;
+  br.nemesisScan = 0;
+}
+
+// ── Supply drops ─────────────────────────────────────────────────────────────
+// From a minute after the plane is gone, the host calls a drop every
+// SUPPLY_GAP s (up to SUPPLY_MAX a match) onto open ground inside the NEXT
+// circle, so players have to move toward it, and fight over it. It falls for
+// DROP_FALL s with a gold map pin counting down, lands in red smoke and spills
+// top-tier loot: one level 3 piece, a long gun or a big optic, heals, ammo,
+// a throwable and a toolkit.
+const SUPPLY_FIRST = 55;      // s after the plane's route ends
+const SUPPLY_GAP = [80, 110];
+const SUPPLY_MAX = 4;
+const SUPPLY_COLOR = "#ffc23d";
+const SUPPLY_LOOT = [
+  ["helmet3", "vest3", "backpack3"],
+  ["sniper", "rifle", "scope8x", "scope6x", "suppressor"],
+  ["medkit", "medkit", "biscuit"],
+  ["ammo"],
+  ["grenade", "smoke", "molotov"],
+  ["toolkit", "medkit"],
+];
+
+/** "F6": the map grid square of (x, z) (WorldMap's letters west → east, numbers north → south). */
+function gridRef(x, z) {
+  const c = Math.max(0, Math.min(9, Math.floor((500 - x) / 100)));
+  const r = Math.max(0, Math.min(9, Math.floor((500 - z) / 100)));
+  return `${"ABCDEFGHIJ"[c]}${r + 1}`;
+}
+
+/** Host: is it time for a drop? Then where. */
+function brHostSupply() {
+  if (br.sdNext === null) { if (br.route) br.sdNext = br.route.duration + SUPPLY_FIRST; return; }
+  if (br.t < br.sdNext || br.sdCount >= SUPPLY_MAX || br.zone.final) return;
+  br.sdNext = br.t + SUPPLY_GAP[0] + Math.random() * (SUPPLY_GAP[1] - SUPPLY_GAP[0]);
+  const z0 = br.zone;
+  const cx = z0.nr > 0 ? z0.nx : z0.x, cz = z0.nr > 0 ? z0.nz : z0.z, cr = (z0.nr > 0 ? z0.nr : z0.r) * 0.7;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * cr;
+    const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
+    if (!isOpenGround(x, z) || waterDepthAt(x, z) > 0.05 || caveBlocks(x, z, 3)) continue;
+    const i = br.sdCount++;
+    const t0 = +br.t.toFixed(1);
+    net.send({ t: "brsd", i, x: +x.toFixed(1), z: +z.toFixed(1), t0 });
+    brOnSupply(i, x, z, t0);
+    return;
+  }
+}
+
+/** Everyone: drop i is coming down at (x, z), called at match time t0. */
+function brOnSupply(i, x, z, t0) {
+  if (!supplyDrops.add(i, x, z, t0)) return;
+  if (br.t - t0 > DROP_FALL + 30) return; // long gone: just the empty crate
+  const p = characterBody.position;
+  const dist = Math.round(Math.hypot(x - p.x, z - p.z));
+  setPin(`drop${i}`, x, z, false, { color: SUPPLY_COLOR, label: "SUPPLY DROP" });
+  if (br.t - t0 < 3) {
+    gameHud.showBanner({ title: "SUPPLY DROP", sub: `${gridRef(x, z)} · ${dist} m ${headingName(bearingDeg(p.x, p.z, x, z))}`, text: "Level 3 gear and top guns inside. Everyone's heading there.", color: SUPPLY_COLOR, duration: 4 });
+    sfx.levelStart();
+  }
+}
+
+/** Everyone: it touched down. Red smoke on the spot; the host spills the loot. */
+function onSupplyLanded(d) {
+  smokeFX.spawn(d.x, d.y0, d.z, 0);
+  _vehAt.x = d.x; _vehAt.y = d.y0 + 0.5; _vehAt.z = d.z;
+  sfx.thud(_vehAt, true);
+  for (let k = 0; k < 4; k++) effects.impact(_vecA.set(d.x, d.y0 + 0.2, d.z), Math.random() - 0.5, 1, Math.random() - 0.5, "dust", 10);
+  if (!net.isHost || br.t - d.t0 > DROP_FALL + 5) return; // (a late joiner's catch-up: the loot's already out)
+  SUPPLY_LOOT.forEach((group, n) => {
+    const kind = group[(Math.random() * group.length) | 0];
+    const a = (n / SUPPLY_LOOT.length) * Math.PI * 2, r = 1.3 + Math.random() * 0.4;
+    const x = d.x + Math.cos(a) * r, z = d.z + Math.sin(a) * r;
+    spawnShared(kind, x, z, pickupData(kind), surfaceHeight(x, z));
+  });
+}
+
+function brUpdateSupply(delta) {
+  if (net.isHost) brHostSupply();
+  supplyDrops.update(br.t);
+  // The pins count down to the landing, then say it's down; gone 45 s after
+  if ((br.sdLabel -= delta) > 0) return;
+  br.sdLabel = 1;
+  for (const d of supplyDrops.drops) {
+    if (!d.active) continue;
+    const eta = supplyDrops.eta(d, br.t), age = br.t - d.t0 - DROP_FALL;
+    if (age > 45) { setPin(`drop${d.id}`, null); continue; }
+    setPin(`drop${d.id}`, d.x, d.z, false, { color: SUPPLY_COLOR, label: eta > 0 ? `SUPPLY ${Math.ceil(eta)}s` : "SUPPLY · DOWN" });
+  }
+}
+
+// ── Nemesis ──────────────────────────────────────────────────────────────────
+// Across matches the game remembers who knocks you out (by name, in
+// localStorage). Whoever has done it most (NEMESIS_MIN times or more) is your
+// Nemesis: when they're in your match you're told, a purple chip gives their
+// distance and direction (never their exact spot), and taking them down pays
+// NEMESIS_XP and settles the score. A new nemesis can take their place.
+const NEMESIS_KEY = "babylon-fps:nemesis";
+const NEMESIS_MIN = 2;
+const NEMESIS_XP = 500;
+const nemesis = (() => {
+  try { return { killers: {}, name: null, slain: 0, ...JSON.parse(localStorage.getItem(NEMESIS_KEY) ?? "{}") }; }
+  catch { return { killers: {}, name: null, slain: 0 }; }
+})();
+const _nem = { name: "", kills: 0, dist: 0, dir: "" };
+function saveNemesis() {
+  try { localStorage.setItem(NEMESIS_KEY, JSON.stringify(nemesis)); } catch { /* private mode */ }
+}
+
+/** Someone was eliminated: you by them (a grudge grows), or them by you (maybe settled). */
+function brNemesisElim(v, k) {
+  if (k === null || k === undefined || k === v) return;
+  if (v === net.id) {
+    const name = brName(k);
+    if (!name) return;
+    const n = nemesis.killers[name] = (nemesis.killers[name] ?? 0) + 1;
+    const top = nemesis.name ? nemesis.killers[nemesis.name] ?? 0 : 0;
+    if (name !== nemesis.name && n >= NEMESIS_MIN && n > top) {
+      nemesis.name = name;
+      br.nemesisId = k;
+      inventoryUI.feed(`${name} is your NEMESIS now · they've taken you out ${n} times`, "info");
+    }
+    saveNemesis();
+    return;
+  }
+  if (k === net.id && v === br.nemesisId) {
+    const name = nemesis.name;
+    nemesis.killers[name] = 0;
+    nemesis.name = null;
+    nemesis.slain++;
+    br.nemesisId = null;
+    saveNemesis();
+    progress.bonus(NEMESIS_XP, "Nemesis slain");
+    gameHud.showBanner({ title: "NEMESIS SLAIN", sub: name, text: `Score settled · +${NEMESIS_XP} XP`, color: "#d678ff", duration: 4.5 });
+    postFx.kick(0.5, 0xd678ff);
+    postFx.shockwave(0.5, 0.5, 1, 0xd678ff, 1.4, 0.9);
+    confetti.celebrate("level");
+  }
+}
+
+/** Each frame of a match: is your nemesis here, and how far? → the HUD chip's data, or null. */
+function brNemesisHud(delta) {
+  if (!nemesis.name || !br.inMatch) return null;
+  if ((br.nemesisScan -= delta) <= 0) {
+    br.nemesisScan = 2;
+    let found = null;
+    for (const id of br.alive) if (id !== net.id && brName(id) === nemesis.name) { found = id; break; }
+    if (found !== br.nemesisId) {
+      br.nemesisId = found;
+      if (found !== null) {
+        gameHud.showBanner({ title: "YOUR NEMESIS IS HERE", sub: nemesis.name, text: `They've taken you out ${nemesis.killers[nemesis.name] ?? NEMESIS_MIN} times. Settle it.`, color: "#d678ff", duration: 4 });
+        sfx.spotted();
+      }
+    }
+  }
+  if (br.nemesisId === null || !br.alive.has(br.nemesisId)) return null;
+  const at = brPlayerPos(br.nemesisId);
+  if (!at) return null;
+  const p = characterBody.position;
+  _nem.name = nemesis.name;
+  _nem.kills = nemesis.killers[nemesis.name] ?? NEMESIS_MIN;
+  _nem.dist = Math.hypot(at.x - p.x, at.z - p.z);
+  _nem.dir = headingName(bearingDeg(p.x, p.z, at.x, at.z));
+  return _nem;
 }
 
 /** Host: one player left (or nobody, in a practice drop) ends the match. */
@@ -7014,7 +7518,7 @@ function brNetTick(delta) {
   net.send({
     t: "br", s: br.state, seed: br.seed, tm: +br.t.toFixed(2), cd: +br.countdown.toFixed(1),
     et: +br.endTimer.toFixed(1), al: [...br.alive], hr: +env.hour.toFixed(3), wx: weather.state,
-    mw: br.mw, mk: br.mwKills, rv: [...br.revenants],
+    mw: br.mw, mk: br.mwKills, rv: [...br.revenants], sd: supplyDrops.state(),
   });
 }
 
@@ -7092,6 +7596,7 @@ net.on("br", msg => {
     else if (Math.abs(br.t - msg.tm) > 0.4) br.t = msg.tm;
     // The twists: who's wanted, who's out on a Revenge Run (late joiners catch up here)
     if (msg.mw !== undefined && (msg.mw !== br.mw || msg.mk !== br.mwKills)) brSetMostWanted(msg.mw, msg.mk ?? 0);
+    if (msg.sd) for (const [i, x, z, t0] of msg.sd) brOnSupply(i, x, z, t0);
     if (msg.rv) {
       br.revenants.clear();
       for (const id of msg.rv) if (id !== net.id || br.rev) br.revenants.add(id);
@@ -7112,6 +7617,7 @@ net.on("brwarm", () => { if (isBR()) brEnterWarmup(); });
 net.on("brlate", msg => { if (isBR() && br.state === "match" && msg.id !== net.id) br.alive.add(msg.id); });
 // Revenge Run: the host gave someone (maybe us) a second life; a revenant got their kill
 net.on("brrev", msg => { if (isBR() && !net.isHost) brOnRevenge(msg.id); });
+net.on("brsd", msg => { if (isBR() && br.state === "match") brOnSupply(msg.i, msg.x, msg.z, msg.t0); });
 net.on("brreborn", msg => {
   if (!isBR() || !br.revenants.delete(msg.from)) return;
   inventoryUI.feed(`${brName(msg.from)} took revenge and is REBORN`, "info");
@@ -7220,6 +7726,40 @@ if (scopeSensEl) {
 }
 
 // Graphics quality: applied at startup, so a change reloads the page
+// ── Settings: gameplay switches + key bindings (ui/SettingsPanel.js) ──────────
+const settingsPanel = new SettingsPanel({ settings, bindings, touch: IS_TOUCH });
+for (const id of ["open-settings", "lobby-settings"]) {
+  const b = document.getElementById(id);
+  if (!b) continue;
+  for (const t of ["pointerdown", "mousedown"]) b.addEventListener(t, e => e.stopPropagation());
+  b.addEventListener("click", e => { e.stopPropagation(); releaseLock(); settingsPanel.open(); });
+}
+/** Everything that shows a key: hotbar, the vehicle HUD's line, the start screen's list. */
+function refreshKeyLabels() {
+  inventoryUI.setKeyLabels(id => bindings.label(id));
+  const kb = id => `<kbd>${bindings.label(id)}</kbd>`;
+  const veh = document.querySelector("#vehicle-hud .veh-keys");
+  if (veh) veh.innerHTML = `${kb("forward")}${kb("back")} drive ${kb("left")}${kb("right")} steer ${kb("jump")} brake ${kb("refuel")} petrol ${kb("repair")} repair ${kb("vehicle")} out`;
+  const list = document.querySelector("#start-screen .controls");
+  if (list) {
+    const rows = [
+      [`${kb("forward")}${kb("left")}${kb("back")}${kb("right")}`, "Move"],
+      [kb("sprint"), "Sprint (while scoped: hold your breath)"],
+      ["<kbd>Mouse</kbd>", "Look / aim"], ["<kbd>LMB</kbd>", "Fire"], ["<kbd>RMB</kbd>", "Aim down sights (scopes zoom in)"],
+      [kb("reload"), "Reload"], [kb("jump"), "Jump (or stand up)"], [kb("crouch"), "Crouch"], [kb("prone"), "Go prone (you can still shoot)"],
+      ["<kbd>1</kbd>–<kbd>5</kbd>", "Switch weapon / wheel"], [kb("interact"), "Pick up"],
+      [kb("throw"), "Hold to aim, release to throw"], [kb("cycleThrow"), "Switch throwable"], [kb("heal"), "Heal"],
+      [kb("use"), "Doors · kick a crate (punch when crouched)"], [kb("light"), "Light switch"],
+      [kb("vehicle"), "Drive / ride / get out"], [`${kb("pillionFront")}${kb("pillionBack")}`, "Sit behind on a bike (front / back)"],
+      [kb("refuel"), "Refuel with a petrol can"], [kb("repair"), "Repair with a toolkit"], [kb("torch"), "Flashlight"],
+      [kb("inventory"), "Inventory"], [kb("map"), "Map: click to pin a spot"], [`${kb("chat")}<kbd>Enter</kbd>`, "Chat"], ["<kbd>Esc</kbd>", "Pause"],
+    ];
+    list.innerHTML = rows.map(([k, t]) => `<div>${k}<span>${t}</span></div>`).join("");
+  }
+}
+bindings.onChange = refreshKeyLabels;
+refreshKeyLabels();
+
 const qualityEl = document.getElementById("lobby-quality");
 if (qualityEl) {
   qualityEl.value = QUALITY_SETTING;
@@ -7420,6 +7960,10 @@ function animate() {
   updateWeapon(delta);
   updateThrowAim(delta);
   updateMelee(delta);
+  updateRepair(delta);
+  updateAutoDoors(delta);
+  updateLastPos(delta);
+  updateMapPrebuild(realDelta);
   crates?.update(delta);
   throwables.update(delta);
   if (zombieManager) fireFX.syncBodies(zombieManager.active, characterBody.position.x, characterBody.position.z);

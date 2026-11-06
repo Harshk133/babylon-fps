@@ -1,9 +1,9 @@
-import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, FUEL_CAN, BISCUIT, GEAR } from "../combat/weapons.js";
+import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, FUEL_CAN, TOOLKIT, BISCUIT, GEAR } from "../combat/weapons.js";
 
 import { fmtMoney } from "../economy/Currency.js";
 
 const FEED_LIFE = 2600; // ms
-const PROMPT_STRIDE = 5; // setPrompts rows: key, action, detail, icon, progress
+const PROMPT_STRIDE = 6; // setPrompts rows: key label, action, detail, icon, progress, key code (sent by a tap)
 const fmtReserve = r => (r === Infinity ? "∞" : `${r}`);
 
 function el(tag, cls, text) {
@@ -87,7 +87,8 @@ export class InventoryUI {
     medIcon.src = this.icons.medkit;
     medIcon.alt = "Medkit";
     const medCount = el("span", "hb-count", "0");
-    med.append(medIcon, medCount, el("kbd", "hb-kbd", "H"));
+    this.kbd = {};
+    med.append(medIcon, medCount, this.kbd.heal = el("kbd", "hb-kbd", "H"));
     itemsRow.append(med);
     this.medSlot = { slot: med, count: medCount, cache: {} };
     const bis = el("div", "hb-tslot hb-biscuit");
@@ -105,9 +106,18 @@ export class InventoryUI {
     fuelIcon.src = this.icons.fuel;
     fuelIcon.alt = FUEL_CAN.name;
     const fuelCount = el("span", "hb-count", "0");
-    fuel.append(fuelIcon, fuelCount, el("kbd", "hb-kbd", "T"));
+    fuel.append(fuelIcon, fuelCount, this.kbd.refuel = el("kbd", "hb-kbd", "T"));
     itemsRow.append(fuel);
     this.fuelSlot = { slot: fuel, count: fuelCount, cache: {} };
+    const kit = el("div", "hb-tslot hb-fuel");
+    kit.dataset.hb = "toolkit";
+    const kitIcon = el("img", "hb-ticon");
+    kitIcon.src = this.icons.toolkit;
+    kitIcon.alt = TOOLKIT.name;
+    const kitCount = el("span", "hb-count", "0");
+    kit.append(kitIcon, kitCount, this.kbd.repair = el("kbd", "hb-kbd", "K"));
+    itemsRow.append(kit);
+    this.kitSlot = { slot: kit, count: kitCount, cache: {} };
 
     const hints = el("div", "hb-hints no-throw");
     hints.innerHTML = `<span class="hb-hint-throw"><kbd>G</kbd> throw <kbd>Q</kbd> switch </span><kbd>Tab</kbd> inventory`;
@@ -120,6 +130,12 @@ export class InventoryUI {
     this.wallet = { el: wallet, value: wallet.querySelector("b"), cache: {} };
 
     root.append(weaponsRow, itemsRow, hints);
+  }
+
+  /** The keys shown on the hotbar, from the current bindings: label(id) → "H". */
+  setKeyLabels(label) {
+    for (const [id, node] of Object.entries(this.kbd)) node.textContent = label(id);
+    this.hints.el.innerHTML = `<span class="hb-hint-throw"><kbd>${label("throw")}</kbd> throw <kbd>${label("cycleThrow")}</kbd> switch </span><kbd>${label("inventory")}</kbd> inventory`;
   }
 
   /** Call every frame; only touches the DOM when the inventory changed. */
@@ -155,6 +171,8 @@ export class InventoryUI {
     setClass(this.wallet.el, this.wallet.cache, "empty", "empty", inv.cash <= 0);
     setText(this.fuelSlot.count, this.fuelSlot.cache, "n", `${inv.fuelCans}`);
     setClass(this.fuelSlot.slot, this.fuelSlot.cache, "empty", "empty", inv.fuelCans === 0);
+    setText(this.kitSlot.count, this.kitSlot.cache, "n", `${inv.toolkits}`);
+    setClass(this.kitSlot.slot, this.kitSlot.cache, "empty", "empty", inv.toolkits === 0);
 
   }
 
@@ -179,8 +197,8 @@ export class InventoryUI {
   // ── Prompt + feed ───────────────────────────────────────────────────────────
 
   /**
-   * rows: flat list of [key, action, detail, icon, progress] (progress 0..1,
-   * or -1 for no bar), reused by the caller, so nothing is allocated per
+   * rows: flat list of [key label, action, detail, icon, progress, code] (progress
+   * 0..1, or -1 for no bar; code: the key a tap on the row presses), reused by the caller, so nothing is allocated per
    * frame. The rows are rebuilt (and slide in) only when what they say
    * changes; a moving bar (a crate taking hits, the petrol gauge) is written
    * in place.
@@ -209,6 +227,7 @@ export class InventoryUI {
       const row = el("div", r === 0 ? "prompt-row primary" : "prompt-row");
       row.style.setProperty("--i", r);
       const k = el("kbd", key.length > 1 ? "wide" : null, key);
+      if (rows[i + 5]) k.dataset.code = rows[i + 5];
       row.append(k);
       const svg = this.promptIcon?.(iconName || key);
       if (svg) {

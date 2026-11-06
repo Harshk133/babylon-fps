@@ -8,9 +8,37 @@
 // PUBG. Builds its own DOM and only redraws while open.
 
 import { groundHeight, PLAY_RADIUS, SEA_Y } from "../world/Terrain.js";
+import { ICON_PATHS, icon } from "./gameIcons.js";
 
 const WORLD_R   = 520;   // metres from the map centre to its edge at zoom 1
-const RELIEF_PX = 768;   // terrain picture resolution (rendered once, on first open)
+const RELIEF_PX = 1280;  // terrain picture resolution (rendered once, on first open; opts.reliefPx overrides)
+const GRID     = 100;    // m: the lettered grid squares (A-J west to east, 1-10 north to south)
+const GRID_COLS = "ABCDEFGHIJ";
+/** Vehicle kind → icon and badge colour. */
+const VEHICLE_ICON = {
+  thar: ["jeep", "#8fbf4a"], rickshaw: ["rickshaw", "#ffd23a"], tractor: ["tractor", "#ff7a2e"],
+  sportbike: ["bike", "#4db8ff"], motorbike: ["bike", "#4db8ff"],
+};
+// Relief colours by height (0 = the lowest land, 1 = the highest): lush lowland,
+// grassland, dry upland, brown hills, bare rock
+const HYPSO = [[0, [74, 108, 56]], [0.22, [96, 122, 64]], [0.45, [132, 132, 80]], [0.7, [146, 116, 82]], [1, [176, 166, 150]]];
+const _paths = new Map();
+/** A game-icons path (512 × 512) as a Path2D, cached. */
+function iconPath(name) {
+  let p = _paths.get(name);
+  if (!p && ICON_PATHS[name]) _paths.set(name, p = new Path2D(ICON_PATHS[name]));
+  return p ?? null;
+}
+function hypso(t, out) {
+  for (let i = 1; i < HYPSO.length; i++) {
+    const [t1, c1] = HYPSO[i];
+    if (t > t1 && i < HYPSO.length - 1) continue;
+    const [t0, c0] = HYPSO[i - 1], k = Math.max(0, Math.min(1, (t - t0) / (t1 - t0)));
+    out[0] = c0[0] + (c1[0] - c0[0]) * k; out[1] = c0[1] + (c1[1] - c0[1]) * k; out[2] = c0[2] + (c1[2] - c0[2]) * k;
+    return out;
+  }
+  return out;
+}
 const REDRAW_HZ = 20;
 const PIN_HIT   = 24;    // px: tapping this close to your own pin lifts it
 const DRAG_PX   = 8;     // a press that moves further than this pans instead of pinning
@@ -95,7 +123,12 @@ export class WorldMap {
         <span><i class="lg-house"></i>Building</span>
         <span><i class="lg-tree"></i>Tree / rock</span>
         <span><i class="lg-fire"></i>Fire</span>
-        <span><i class="lg-car"></i>Rickshaw</span>
+        <span><b class="lg-veh" style="--c:#8fbf4a">${icon("jeep")}</b>Car</span>
+        <span><b class="lg-veh" style="--c:#4db8ff">${icon("bike")}</b>Bike</span>
+        <span><b class="lg-veh" style="--c:#ffd23a">${icon("rickshaw")}</b>Rickshaw</span>
+        <span><b class="lg-veh" style="--c:#ff7a2e">${icon("tractor")}</b>Tractor</span>
+        <span><b class="lg-veh wreck" style="--c:#6c6c6c">${icon("jeep")}</b>Wrecked</span>
+        <span><b class="lg-veh" style="--c:#ffc23d">${icon("parachute")}</b>Supply drop</span>
       </div>
       <div class="wm-buttons">
         <button data-act="clear" class="wm-ghost">Remove pin</button>
@@ -140,7 +173,7 @@ export class WorldMap {
     this._ptrs.clear();
     this._tap = this._pinch = null;
     if (open) {
-      if (!this._relief) this._relief = this._buildRelief();
+      if (!this._relief) this._relief = this._buildRelief();   // (finishes the background build, if it started)
       this._next = 0;
     }
   }
@@ -271,50 +304,109 @@ export class WorldMap {
   // ── Terrain picture ─────────────────────────────────────────────────────────
 
   /** Shaded relief of the heightmap, lit from the north-west. Rendered once. */
+  /** The whole relief now (what's left of it, if prebuild() already did some). */
   _buildRelief() {
-    const N = RELIEF_PX;
+    const job = this._reliefJob ??= this._reliefSteps();
+    let r;
+    while (!(r = job.next()).done);
+    this._reliefJob = null;
+    return r.value;
+  }
+
+  /**
+   * Builds the relief in slices of about budgetMs, so opening the map for the
+   * first time costs nothing mid-fight. Call it while the game idles; returns
+   * true once the picture is ready.
+   */
+  prebuild(budgetMs = 3) {
+    if (this._relief) return true;
+    const job = this._reliefJob ??= this._reliefSteps();
+    const end = performance.now() + budgetMs;
+    while (performance.now() < end) {
+      const r = job.next();
+      if (r.done) { this._relief = r.value; this._reliefJob = null; return true; }
+    }
+    return false;
+  }
+
+  /** The relief picture, a few rows per step (a generator: prebuild / _buildRelief drive it). */
+  *_reliefSteps() {
+    const N = this.opts.reliefPx ?? RELIEF_PX;
     const cv = document.createElement("canvas");
     cv.width = cv.height = N;
     const g = cv.getContext("2d");
     const img = g.createImageData(N, N);
     const step = (WORLD_R * 2) / N;
     const h = new Float32Array(N * N);
+    const height = this.sources.height ?? groundHeight;
     let lo = Infinity, hi = -Infinity;
     for (let j = 0; j < N; j++) {
       const z = WORLD_R - (j + 0.5) * step;
       for (let i = 0; i < N; i++) {
-        const v = (this.sources.height ?? groundHeight)(WORLD_R - (i + 0.5) * step, z);
+        const x = WORLD_R - (i + 0.5) * step;
+        const v = height(x, z);
         h[j * N + i] = v;
         // Height range of the playable land only (the edge ridges would wash it out)
-        if (Math.hypot(WORLD_R - (i + 0.5) * step, z) < PLAY_RADIUS && v > SEA_Y + 0.5) { if (v < lo) lo = v; if (v > hi) hi = v; }
+        if (Math.hypot(x, z) < PLAY_RADIUS && v > SEA_Y + 0.5) { if (v < lo) lo = v; if (v > hi) hi = v; }
       }
+      if ((j & 7) === 7) yield;
     }
     const span = Math.max(1, hi - lo);
+    // Light from the upper left of the picture, a little above the horizon (classic hill shading)
+    const Lx = -0.52, Ly = 0.68, Lz = -0.52;
+    const col = [0, 0, 0];
+    const d = img.data;
     for (let j = 0; j < N; j++) {
+      const z = WORLD_R - (j + 0.5) * step;
+      const jn = Math.min(N - 1, j + 1), jp = Math.max(0, j - 1);
       for (let i = 0; i < N; i++) {
-        const k = j * N + i;
-        const x = WORLD_R - (i + 0.5) * step, z = WORLD_R - (j + 0.5) * step;
-        // Slope from the neighbours; light from the upper left of the picture
-        const dx = h[j * N + Math.min(N - 1, i + 1)] - h[j * N + Math.max(0, i - 1)];
-        const dz = h[Math.min(N - 1, j + 1) * N + i] - h[Math.max(0, j - 1) * N + i];
-        const shade = Math.max(0.55, Math.min(1.35, 1 - (dx + dz) * 0.22));
-        const t = Math.max(0, Math.min(1, (h[k] - lo) / span));
-        // Low: dark olive grass; high: dry brown; a little contour banding
-        let r = 46 + t * 70, gg = 58 + t * 46, b = 34 + t * 34;
-        if (Math.abs(((h[k] - lo) % 4) - 2) < 0.12) { r *= 0.86; gg *= 0.86; b *= 0.86; }
-        // Water and fields have their own colours (water lies flat: no shading)
+        const k = j * N + i, o = k * 4;
+        const x = WORLD_R - (i + 0.5) * step;
+        const v = h[k];
+        // Water has its own colour and lies flat: no shading
         const paint = this.sources.surface?.(x, z);
-        if (paint) {
-          r = paint[0]; gg = paint[1]; b = paint[2];
-          if (paint[3]) { img.data[k * 4] = r; img.data[k * 4 + 1] = gg; img.data[k * 4 + 2] = b; img.data[k * 4 + 3] = 255; continue; }
+        if (paint && paint[3]) {
+          d[o] = paint[0]; d[o + 1] = paint[1]; d[o + 2] = paint[2]; d[o + 3] = 255;
+          continue;
         }
-        const out = Math.hypot(x, z) > PLAY_RADIUS;
-        const dim = out ? 0.38 : 1;
-        img.data[k * 4]     = Math.min(255, r * shade * dim);
-        img.data[k * 4 + 1] = Math.min(255, gg * shade * dim);
-        img.data[k * 4 + 2] = Math.min(255, b * shade * dim);
-        img.data[k * 4 + 3] = 255;
+        const ip = Math.max(0, i - 1), inn = Math.min(N - 1, i + 1);
+        const gx = (h[j * N + inn] - h[j * N + ip]) / (2 * step);
+        const gz = (h[jn * N + i] - h[jp * N + i]) / (2 * step);
+        // Surface normal (-gx, 1, -gz) against the light; flat ground comes out at 1
+        const len = Math.sqrt(gx * gx + 1 + gz * gz);
+        const diffuse = Math.max(0, (-gx * Lx + Ly - gz * Lz) / len);
+        const slope = 1 - 1 / len;                       // 0 flat .. 1 cliff
+        let shade = 0.32 + 0.68 * (diffuse / Ly);
+        shade *= 1 - slope * 0.25;
+        const t = Math.max(0, Math.min(1, (v - lo) / span));
+        hypso(t, col);
+        // Steep ground shows bare earth and rock
+        if (slope > 0.08) {
+          const r = Math.min(1, (slope - 0.08) * 3) * 0.6;
+          col[0] += (150 - col[0]) * r; col[1] += (128 - col[1]) * r; col[2] += (104 - col[2]) * r;
+        }
+        // Sand along the shore
+        if (v < SEA_Y + 1.4 && v > SEA_Y - 0.5) {
+          const r = 1 - Math.max(0, v - SEA_Y) / 1.4;
+          col[0] += (204 - col[0]) * r; col[1] += (188 - col[1]) * r; col[2] += (140 - col[2]) * r;
+        }
+        // Fields keep their own colours (shaded with the land under them)
+        if (paint) { col[0] = paint[0]; col[1] = paint[1]; col[2] = paint[2]; }
+        // Contour lines where the height crosses a 5 m step (every 25 m bolder)
+        const vr = h[j * N + inn], vd = h[jn * N + i];
+        let line = 1;
+        if (Math.floor(v / 25) !== Math.floor(vr / 25) || Math.floor(v / 25) !== Math.floor(vd / 25)) line = 0.72;
+        else if (Math.floor(v / 5) !== Math.floor(vr / 5) || Math.floor(v / 5) !== Math.floor(vd / 5)) line = 0.88;
+        // A little grain so big flat areas don't look like plastic
+        const grain = 0.975 + ((((i * 73856093) ^ (j * 19349663)) >>> 0) % 1000) / 1000 * 0.05;
+        const dim = Math.hypot(x, z) > PLAY_RADIUS ? 0.42 : 1;
+        const m = shade * line * grain * dim;
+        d[o]     = Math.min(255, col[0] * m);
+        d[o + 1] = Math.min(255, col[1] * m);
+        d[o + 2] = Math.min(255, col[2] * m);
+        d[o + 3] = 255;
       }
+      if ((j & 7) === 7) yield;
     }
     g.putImageData(img, 0, 0);
     return cv;
@@ -339,12 +431,23 @@ export class WorldMap {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(this._relief, X(WORLD_R), Y(WORLD_R), WORLD_R * 2 * k, WORLD_R * 2 * k);
 
-    // Grid: 100 m, finer when zoomed in
+    // Grid: the lettered 100 m squares, and finer lines when zoomed in
     const cell = this.zoom >= 3 ? 25 : this.zoom >= 1.8 ? 50 : 100;
-    ctx.strokeStyle = "rgba(255, 245, 225, 0.09)";
+    if (cell < GRID) {
+      ctx.strokeStyle = "rgba(255, 245, 225, 0.07)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let g = -500; g <= 500; g += cell) {
+        if (g % GRID === 0) continue;
+        ctx.moveTo(X(g), 0); ctx.lineTo(X(g), S);
+        ctx.moveTo(0, Y(g)); ctx.lineTo(S, Y(g));
+      }
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "rgba(255, 245, 225, 0.2)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let g = -500; g <= 500; g += cell) {
+    for (let g = -500; g <= 500; g += GRID) {
       ctx.moveTo(X(g), 0); ctx.lineTo(X(g), S);
       ctx.moveTo(0, Y(g)); ctx.lineTo(S, Y(g));
     }
@@ -455,15 +558,28 @@ export class WorldMap {
       ctx.fillText(t.name.toUpperCase(), X(t.x), ly);
     }
 
-    // Vehicles: yellow rickshaws, olive Thars
+    // Vehicles: an icon badge per kind with a health ring (grey with a cross when wrecked).
+    // In the battle royale, ones someone else is driving stay off the map (that would give them away).
+    const hideDriven = this.sources.hideDriven?.();
+    const vr = Math.max(8, Math.min(13, 6 + 2.2 * this.zoom));
     for (const car of this.sources.vehicles?.() ?? []) {
-      ctx.fillStyle = car.kind === "thar" ? "#9fbf5a" : "#ffd23a";
-      ctx.strokeStyle = "#1a1206";
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.roundRect(X(car.x) - 5, Y(car.z) - 4, 10, 8, 2);
-      ctx.fill();
-      ctx.stroke();
+      if (hideDriven && car.driver !== null && car.driver !== "local") continue;
+      this._drawVehicle(ctx, X(car.x), Y(car.z), car, vr);
+    }
+
+    // Grid letters along the top, numbers down the left (call out "F6")
+    ctx.font = "600 13px 'Teko', 'Segoe UI', sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(10, 12, 8, 0.55)";
+    ctx.fillRect(0, 0, S, 16);
+    ctx.fillRect(0, 16, 16, S - 16);
+    ctx.fillStyle = "rgba(255, 240, 210, 0.9)";
+    for (let c = 0; c < 10; c++) {
+      const gx = X(500 - (c + 0.5) * GRID);
+      if (gx > 20 && gx < S - 4) ctx.fillText(GRID_COLS[c], gx, 8.5);
+      const gy = Y(500 - (c + 0.5) * GRID);
+      if (gy > 22 && gy < S - 4) ctx.fillText(`${c + 1}`, 8, gy);
     }
 
     this._drawBr(ctx, X, Y, k, S);
@@ -596,6 +712,53 @@ export class WorldMap {
       ctx.textAlign = "center";
       ctx.fillStyle = "#fff";
       ctx.fillText(label, 0, -r * 3.3);
+    }
+    ctx.restore();
+  }
+
+  /** A vehicle badge: coloured disc with its icon, a ring for its health, a cross when wrecked. */
+  _drawVehicle(ctx, x, y, car, r) {
+    const [name, colour] = VEHICLE_ICON[car.kind] ?? VEHICLE_ICON.thar;
+    const frac = car.healthFrac ?? 1, wrecked = frac <= 0;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+    ctx.beginPath();
+    ctx.arc(1, 1.5, r + 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = wrecked ? "#5a5a5a" : colour;
+    ctx.strokeStyle = "#140c06";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    const p = iconPath(name);
+    if (p) {
+      const s = (r * 1.45) / 512;
+      ctx.save();
+      ctx.translate(-r * 0.725, -r * 0.725);
+      ctx.scale(s, s);
+      ctx.fillStyle = wrecked ? "#2a2a2a" : "#15110a";
+      ctx.fill(p);
+      ctx.restore();
+    }
+    // Health: a ring round the badge, green to red
+    if (!wrecked && frac < 0.999) {
+      ctx.strokeStyle = frac > 0.5 ? "#7ee05a" : frac > 0.25 ? "#ffc23d" : "#ff4b3a";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, r + 2.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+      ctx.stroke();
+    }
+    if (wrecked) {
+      ctx.strokeStyle = "#ff4b3a";
+      ctx.lineWidth = 2.5;
+      const c = r * 0.75;
+      ctx.beginPath();
+      ctx.moveTo(-c, -c); ctx.lineTo(c, c);
+      ctx.moveTo(c, -c); ctx.lineTo(-c, c);
+      ctx.stroke();
     }
     ctx.restore();
   }

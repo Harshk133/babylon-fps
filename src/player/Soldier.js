@@ -82,7 +82,7 @@ const SEG = {
 };
 // Gestures with nothing in the hands: the gun goes on the back meanwhile
 // (throwing stows the gun itself: see _updateToss)
-const GUN_AWAY = new Set(["eat", "drink", "heal", "vault", "climb"]);
+const GUN_AWAY = new Set(["eat", "drink", "heal", "vault", "climb", "repair"]);
 // Upper-body clip overlays (gesture → clip)
 const OVERLAY = { reload: "reload", eat: "drink", drink: "drink", heal: "drink" };
 const DEATHS = { front: "death_front", back: "death_back", right: "death_right", left: "death", head_front: "death_head_front", head_back: "death_head_back" };
@@ -1277,7 +1277,7 @@ export class Soldier {
    */
   _leftHandIK(dt, armed) {
     const b = this.b, g = this.gesture, sup = SUPPORT[this.currentGun];
-    const on = armed && sup && !this.swap && !this.toss && !(g && OVERLAY[g.name]) && this.sw.swim < 0.5 && !this.dead;
+    const on = armed && sup && !this.swap && !this.toss && !(g && (OVERLAY[g.name] || g.name === "repair")) && this.sw.swim < 0.5 && !this.dead;
     const st = this._ik ??= { w: 0, v: 0 };
     spring(st, "w", "v", on ? 1 : 0, 14, dt);
     const w = Math.min(1, st.w);
@@ -1617,11 +1617,50 @@ export class Soldier {
         turnBone(b.spine, fwd, 0.08 * w * hard);
       }
     }
+    // Repairing a vehicle (the "repair" gesture; repairStyle picks the pose)
+    const rg = this.gesture;
+    if (rg && rg.name === "repair") this._repairPose(rg, side, fwd);
     // On a bike the hands go last, onto whatever they hold (after the aim and the gun's own IK)
     if (riding) this._rideHands(side, fwd, armed);
     this._limitHead(riding ? RIDE_HEAD_MAX : HEAD_MAX);
   }
 }
+
+/**
+ * Repair poses, layered on the stance clip (bikes and rickshaws are fixed crouched,
+ * main.js sets that): bend = spine forward, look = head down (− up), reach = arms
+ * forward / up, elbow = forearm bend, rate = how fast the spanner works, twist =
+ * chest turned toward the part, lift = right arm higher than the left.
+ *   car: bent over the open bonnet, both hands down in the engine bay
+ *   tractor: standing at the big engine block, arms up, looking up into it
+ *   bike: crouched at the wheel, turned toward it, quick short turns of the spanner
+ *   rickshaw: crouched, leaning in under the body
+ */
+const REPAIR_POSE = {
+  car:      { bend: 0.95, look: 0.35, reach: 0.95, elbow: 0.55, rate: 7, twist: 0, lift: 0.1 },
+  tractor:  { bend: 0.2, look: -0.2, reach: 1.55, elbow: 0.45, rate: 5.5, twist: 0, lift: 0.25 },
+  bike:     { bend: 0.5, look: 0.5, reach: 0.7, elbow: 0.95, rate: 10, twist: 0.4, lift: 0 },
+  rickshaw: { bend: 0.7, look: 0.3, reach: 1.05, elbow: 0.7, rate: 8, twist: -0.25, lift: 0.05 },
+};
+
+Soldier.prototype._repairPose = function (g, side, fwd) {
+  const b = this.b, P = REPAIR_POSE[this.repairStyle] ?? REPAIR_POSE.car;
+  const w = Math.max(0, Math.min(1, g.t / 0.35, (g.dur - g.t) / 0.3));
+  if (w <= 0) return;
+  const work = Math.sin(g.t * P.rate), slow = Math.sin(g.t * P.rate * 0.5 + 1.3);
+  // Lean into the job, eyes on it
+  turnBone(b.spine, side, P.bend * 0.45 * w);
+  turnBone(b.spine1, side, P.bend * 0.35 * w);
+  turnBone(b.spine2, side, P.bend * 0.2 * w);
+  if (P.twist) turnBone(b.spine1, _up, P.twist * w);
+  turnBone(b.neck, side, P.look * w);
+  // Right hand works the spanner (the arm pumps, the wrist turns); the left holds the part steady
+  turnBone(b.rArm, side, -(P.reach + P.lift + 0.12 * work) * w);
+  turnBone(b.rFore, side, -(P.elbow + 0.35 * work) * w);
+  if (b.rHand) turnBone(b.rHand, fwd, 0.55 * work * w);
+  turnBone(b.lArm, side, -(P.reach * 0.92 + 0.04 * slow) * w);
+  turnBone(b.lFore, side, -(P.elbow * 0.85 + 0.08 * slow) * w);
+};
 
 const _hq = new THREE.Quaternion(), _hq2 = new THREE.Quaternion(), _hq3 = new THREE.Quaternion(), _hr = new THREE.Quaternion();
 // How far the head may turn from the chest. The prone clips look up about 73° on purpose;

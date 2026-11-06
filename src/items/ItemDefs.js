@@ -3,7 +3,7 @@
 // or attachment added there shows up here without UI changes). Pure data.
 
 import {
-  WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, MEDKIT, BISCUIT, FUEL_CAN, PICKUP_KINDS,
+  WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, MEDKIT, BISCUIT, FUEL_CAN, TOOLKIT, PICKUP_KINDS,
   GEAR, ATTACHMENTS, ATTACH_SLOTS, ITEM_WEIGHT, OPTICS,
 } from "../combat/weapons.js";
 
@@ -63,6 +63,11 @@ ITEMS.fuel = {
   id: "fuel", name: FUEL_CAN.name, type: "utility", group: "Utility", icon: "fuel", maxStack: FUEL_CAN.max,
   weight: ITEM_WEIGHT.fuel, rarity: "common", equipmentSlot: null, compatibleSlots: [], stackable: true,
   desc: "Fills a rickshaw or a Thar. Press T next to it.",
+};
+ITEMS.toolkit = {
+  id: "toolkit", name: TOOLKIT.name, type: "utility", group: "Utility", icon: "toolbox", maxStack: TOOLKIT.max,
+  weight: ITEM_WEIGHT.toolkit, rarity: "uncommon", equipmentSlot: null, compatibleSlots: [], stackable: true,
+  desc: "Repairs a damaged or wrecked vehicle. Press K next to it.",
 };
 ITEMS.ammo = {
   id: "ammo", name: PICKUP_KINDS.ammo.label, type: "ammo", group: null, icon: "ammo", maxStack: 1, weight: 0,

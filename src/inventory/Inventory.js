@@ -1,6 +1,6 @@
 import {
   WEAPONS, WEAPON_ORDER, STARTING_WEAPONS, STARTING_WEAPON,
-  THROWABLES, THROWABLE_ORDER, MEDKIT, BISCUIT, FUEL_CAN,
+  THROWABLES, THROWABLE_ORDER, MEDKIT, BISCUIT, FUEL_CAN, TOOLKIT,
   GEAR, ATTACHMENTS, ITEM_WEIGHT, BASE_CAPACITY,
 } from "../combat/weapons.js";
 import { weaponStats, fitsWeapon, attachSlotsFor } from "../items/ItemDefs.js";
@@ -38,6 +38,7 @@ export class Inventory {
     // The wallet outlives a death in solo / co-op; a battle royale drop starts broke
     if (empty || this.cash === undefined) this.cash = 0;
     this.fuelCans = 0;
+    this.toolkits = 0;
     this.bag = {};                // loose attachments: id → count
     this.gear = { helmet: null, vest: null, backpack: null };
     this.current = empty ? null : STARTING_WEAPON;
@@ -50,6 +51,25 @@ export class Inventory {
   }
 
   _touch() { this.version++; }
+
+  /** Everything carried, as plain data (JSON-safe: an endless reserve is saved as null). */
+  snapshot() {
+    return JSON.parse(JSON.stringify({
+      weapons: this.weapons, throwables: this.throwables, medkits: this.medkits, biscuits: this.biscuits,
+      cash: this.cash, fuelCans: this.fuelCans, toolkits: this.toolkits, bag: this.bag, gear: this.gear,
+      current: this.current, selectedThrowable: this.selectedThrowable,
+    }));
+  }
+
+  /** Back to a snapshot(). */
+  restore(s) {
+    if (!s) return;
+    for (const w of Object.values(s.weapons ?? {})) if (w.reserve === null) w.reserve = Infinity;
+    Object.assign(this, JSON.parse(JSON.stringify(s)));
+    for (const w of Object.values(this.weapons)) if (w.reserve === null) w.reserve = Infinity;
+    this.toolkits ??= 0;
+    this._touch();
+  }
 
   has(id) { return !!this.weapons[id]; }
 
@@ -66,7 +86,7 @@ export class Inventory {
   get load() {
     let w = 0;
     for (const k of THROWABLE_ORDER) w += this.throwables[k] * (ITEM_WEIGHT[k] ?? 0);
-    w += this.medkits * ITEM_WEIGHT.medkit + this.biscuits * ITEM_WEIGHT.biscuit + this.fuelCans * ITEM_WEIGHT.fuel;
+    w += this.medkits * ITEM_WEIGHT.medkit + this.biscuits * ITEM_WEIGHT.biscuit + this.fuelCans * ITEM_WEIGHT.fuel + this.toolkits * ITEM_WEIGHT.toolkit;
     for (const [id, n] of Object.entries(this.bag)) w += n * (ITEM_WEIGHT[id] ?? 0);
     return w;
   }
@@ -90,6 +110,7 @@ export class Inventory {
     if (kind === "medkit") return this.medkits;
     if (kind === "biscuit") return this.biscuits;
     if (kind === "fuel") return this.fuelCans;
+    if (kind === "toolkit") return this.toolkits;
     if (ATTACHMENTS[kind]) return this.bag[kind] ?? 0;
     return 0;
   }
@@ -100,6 +121,7 @@ export class Inventory {
     if (kind === "medkit") return MEDKIT.max;
     if (kind === "biscuit") return BISCUIT.max;
     if (kind === "fuel") return FUEL_CAN.max;
+    if (kind === "toolkit") return TOOLKIT.max;
     if (ATTACHMENTS[kind]) return Infinity;
     return 0;
   }
@@ -120,6 +142,7 @@ export class Inventory {
     else if (kind === "medkit") this.medkits += take;
     else if (kind === "biscuit") this.biscuits += take;
     else if (kind === "fuel") this.fuelCans += take;
+    else if (kind === "toolkit") this.toolkits += take;
     else if (ATTACHMENTS[kind]) this.bag[kind] = (this.bag[kind] ?? 0) + take;
     else return 0;
     this._touch();
@@ -134,6 +157,7 @@ export class Inventory {
     else if (kind === "medkit") this.medkits -= take;
     else if (kind === "biscuit") this.biscuits -= take;
     else if (kind === "fuel") this.fuelCans -= take;
+    else if (kind === "toolkit") this.toolkits -= take;
     else if (ATTACHMENTS[kind]) {
       this.bag[kind] -= take;
       if (this.bag[kind] <= 0) delete this.bag[kind];
@@ -386,6 +410,10 @@ export class Inventory {
   addFuelCan(n = 1) {
     const taken = this.addStack("fuel", n);
     return taken > 0 ? { msg: `+${taken} ${FUEL_CAN.name}`, taken } : null;
+  }
+
+  takeToolkit() {
+    return this.removeStack("toolkit", 1) > 0;
   }
 
   takeFuelCan() {

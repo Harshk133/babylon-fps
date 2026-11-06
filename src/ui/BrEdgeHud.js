@@ -17,6 +17,10 @@ export class BrEdgeHud {
         <span class="bre-text"><b class="bre-title"></b><small class="bre-sub"></small></span>
         <span class="bre-bounty"></span>
       </div>
+      <div class="bre-nemesis">
+        <span class="bre-ico">${icon("nemesis")}</span>
+        <span class="bre-text"><b class="bre-ntitle"></b><small class="bre-nsub"></small></span>
+      </div>
       <div class="bre-revenge">
         <span class="bre-rtitle">REVENGE RUN</span>
         <span class="bre-clock"></span>
@@ -32,6 +36,9 @@ export class BrEdgeHud {
     this.bounty = this.root.querySelector(".bre-bounty");
     this.revenge = this.root.querySelector(".bre-revenge");
     this.clock = this.root.querySelector(".bre-clock");
+    this.nemesis = this.root.querySelector(".bre-nemesis");
+    this.ntitle = this.root.querySelector(".bre-ntitle");
+    this.nsub = this.root.querySelector(".bre-nsub");
     this._c = {};
   }
 
@@ -49,8 +56,15 @@ export class BrEdgeHud {
   /**
    * w: null, or { self, name, bounty, dist (m, or null), next (s to the next reveal) }.
    * rev: null, or { t (s left), urgent }.
+   * nem: null, or { name, kills (times they've killed you), dist (m), dir ("NE"…) }.
    */
-  update(w, rev) {
+  update(w, rev, nem = null) {
+    this._toggle(this.nemesis, "nv", "on", !!nem);
+    if (nem) {
+      this._set(this.ntitle, "nt", `NEMESIS · ${nem.name}`);
+      this._set(this.nsub, "ns", `${Math.round(nem.dist / 10) * 10} m ${nem.dir} · killed you ${nem.kills}×`);
+      this._toggle(this.nemesis, "nc", "close", nem.dist < 60);
+    }
     this._toggle(this.wanted, "wv", "on", !!w);
     if (w) {
       this._toggle(this.wanted, "ws", "self", w.self);
@@ -69,5 +83,5 @@ export class BrEdgeHud {
     }
   }
 
-  hide() { this.update(null, null); }
+  hide() { this.update(null, null, null); }
 }

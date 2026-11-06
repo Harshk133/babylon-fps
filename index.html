@@ -321,7 +321,12 @@
         <div class="veh-fuel-track"><div id="veh-fuel-fill"></div></div>
         <span id="veh-fuel-val">0%</span>
       </div>
-      <div class="veh-keys"><kbd>W</kbd><kbd>S</kbd> drive <kbd>A</kbd><kbd>D</kbd> steer <kbd>Space</kbd> brake <kbd>T</kbd> petrol <kbd>V</kbd> out</div>
+      <div class="veh-fuel veh-hp">
+        <span class="veh-fuel-label">BODY</span>
+        <div class="veh-fuel-track"><div id="veh-hp-fill"></div></div>
+        <span id="veh-hp-val">100%</span>
+      </div>
+      <div class="veh-keys"><kbd>W</kbd><kbd>S</kbd> drive <kbd>A</kbd><kbd>D</kbd> steer <kbd>Space</kbd> brake <kbd>T</kbd> petrol <kbd>K</kbd> repair <kbd>V</kbd> out</div>
     </div>
 
     <!-- Squad (co-op teammates) -->
@@ -348,6 +353,7 @@
             <option value="high">High</option>
           </select>
         </label>
+        <button id="lobby-settings" class="settings-btn" type="button" aria-label="Settings">⚙ Settings</button>
       </header>
 
       <main class="lb-main">
@@ -440,6 +446,7 @@
         <div><kbd>M</kbd><span>Map: click to pin a spot</span></div>
         <div><kbd>Esc</kbd><span>Pause</span></div>
       </div>
+      <button id="open-settings" class="settings-btn" type="button">⚙ Settings · keys, auto doors, bots</button>
       <label class="scope-sens">Scoped look speed <input id="scope-sens" type="range" min="0.3" max="2" step="0.05"><output id="scope-sens-out"></output></label>
       <p class="start-tip br-tip">Battle royale: <kbd>Space</kbd> jumps from the plane, then opens your parachute. Hold <kbd>W</kbd> to dive. Stay inside the blue zone; it keeps shrinking.</p>
       <p class="start-tip horde-tip">Monsters hunt by sight and sound; hellhounds hunt by scent. Crouch and go prone to stay unseen; step inside a house to switch to first person. Clear each level to face worse.</p>

@@ -39,7 +39,7 @@ export const VEHICLES = {
     maxSpeed: 15,         // m/s (~54 km/h)
     reverseSpeed: 5, accel: 5.5, brake: 13, coast: 1.4,
     maxSteer: 0.6, wheelBase: 1.75,
-    fuelMax: 100, fuelStart: 35, burn: 0.85, idleBurn: 0.05, canFuel: 50,
+    fuelMax: 100, fuelStart: 35, burn: 0.85, idleBurn: 0.05, canFuel: 50, health: 90,
     enterRange: 3.2, headlight: 130,
     seat: [0, 0.66, 0.38],
     lamps: [[0, 0.98, 1.3]],
@@ -57,7 +57,7 @@ export const VEHICLES = {
     maxSpeed: 24,         // m/s (~86 km/h)
     reverseSpeed: 7, accel: 7.5, brake: 16, coast: 1.6,
     maxSteer: 0.55, wheelBase: 2.71,
-    fuelMax: 100, fuelStart: 55, burn: 1.1, idleBurn: 0.06, canFuel: 40,
+    fuelMax: 100, fuelStart: 55, burn: 1.1, idleBurn: 0.06, canFuel: 40, health: 140,
     enterRange: 4.21, headlight: 170,
     seat: [-0.47, 1.05, 0.06],   // right-hand drive
     lamps: [[0.69, 1.13, 2.19], [-0.69, 1.13, 2.19]],
@@ -75,7 +75,7 @@ export const VEHICLES = {
     maxSpeed: 11,         // m/s (~40 km/h): heavy and geared low
     reverseSpeed: 4, accel: 3.4, brake: 7.5, coast: 0.9,
     maxSteer: 0.62, wheelBase: 2.05,
-    fuelMax: 100, fuelStart: 70, burn: 0.7, idleBurn: 0.05, canFuel: 45,
+    fuelMax: 100, fuelStart: 70, burn: 0.7, idleBurn: 0.05, canFuel: 45, health: 180,
     enterRange: 3.6, headlight: 120,
     seat: [0, 1.38, -0.62],
     lamps: [[0.34, 1.22, 1.74], [-0.34, 1.22, 1.74]],
@@ -101,7 +101,7 @@ export const VEHICLES = {
     maxSpeed: 31,         // m/s (~110 km/h)
     reverseSpeed: 2, accel: 9, brake: 15, coast: 1.2,
     maxSteer: 0.5, wheelBase: 1.42,
-    fuelMax: 100, fuelStart: 50, burn: 0.7, idleBurn: 0.03, canFuel: 60,
+    fuelMax: 100, fuelStart: 50, burn: 0.7, idleBurn: 0.03, canFuel: 60, health: 70,
     enterRange: 2.2, headlight: 110,
     seat: [0, 0.92, -0.14],
     lamps: [[0, 0.86, 0.86]],
@@ -127,7 +127,7 @@ export const VEHICLES = {
     maxSpeed: 22,         // m/s (~80 km/h): old and heavy, but at home on dirt
     reverseSpeed: 2, accel: 6.5, brake: 11, coast: 1.0,
     maxSteer: 0.55, wheelBase: 1.49,
-    fuelMax: 100, fuelStart: 65, burn: 0.6, idleBurn: 0.03, canFuel: 60,
+    fuelMax: 100, fuelStart: 65, burn: 0.6, idleBurn: 0.03, canFuel: 60, health: 80,
     enterRange: 2.3, headlight: 100,
     seat: [0, 0.76, -0.05],
     lamps: [[0, 0.93, 1.0]],
@@ -428,6 +428,7 @@ export class Vehicle {
     this.nextHit = 0;         // (effects aren't repeated on every frame of one contact)
     this.contact = { on: false, scrape: false, x: 0, z: 0, nx: 0, nz: 0, vx: 0, vz: 0 };
     this.fuel = this.spec.fuelStart;
+    this.health = this.maxHealth;  // crashes wear it down; at 0 it's wrecked until someone repairs it (a toolkit)
     this.driver = null;
     this.pillion = null;
     this.throttle = 0;
@@ -443,6 +444,25 @@ export class Vehicle {
   }
 
   get empty() { return this.fuel <= 0; }
+  get maxHealth() { return this.spec.health ?? 100; }
+  get wrecked() { return this.health <= 0; }
+  get healthFrac() { return Math.max(0, this.health) / this.maxHealth; }
+
+  /** Crash damage. Returns true if this hit wrecked it. */
+  hurt(amount) {
+    if (this.wrecked || amount <= 0) return false;
+    this.health = Math.max(0, this.health - amount);
+    if (!this.wrecked) return false;
+    this.damage = 1;            // smokes until it's repaired
+    this.speed *= 0.3;
+    return true;
+  }
+
+  /** Repaired (by a toolkit) or synced from someone else. */
+  setHealth(h) {
+    this.health = Math.max(0, Math.min(this.maxHealth, h));
+    if (this.wrecked) this.damage = 1;
+  }
 
   /** Ground pose from the wheels: height, pitch and roll. */
   _pose(delta) {
@@ -485,7 +505,7 @@ export class Vehicle {
    */
   drive(delta, input, blocked) {
     const R = this.spec;
-    const t = this.fuel > 0 ? input.throttle : 0;
+    const t = this.fuel > 0 && !this.wrecked ? input.throttle : 0;
     this.throttle = Math.abs(t);
     let v = this.speed;
     if (t > 0) {
@@ -699,7 +719,7 @@ export class Vehicle {
       this.jolt += this.joltV * d;
       this.joltRollV += (-this.joltRoll * JOLT_K - this.joltRollV * JOLT_D) * d;
       this.joltRoll += this.joltRollV * d;
-      if (this.damage > 0) this.damage = Math.max(0, this.damage - delta / DAMAGE_CLEAR);
+      if (this.damage > 0 && !this.wrecked) this.damage = Math.max(0, this.damage - delta / DAMAGE_CLEAR);
     }
     // A parked vehicle nobody touches doesn't need re-posing every frame
     const moving = this.driver !== null || this._settle > 0 || (this.spec.bike && Math.abs(this.leanV) + Math.abs(this.diveV) > 0.01);
@@ -725,7 +745,7 @@ export class Vehicle {
     }
     for (const w of this.bikeWheels) w.group.rotation.x += (this.speed / w.r) * delta;
 
-    const on = this.driver !== null && this.fuel > 0;
+    const on = this.driver !== null && this.fuel > 0 && !this.wrecked;
     const want = on && darkness > 0.4 ? 1 : 0;
     if (want || this.lightLevel > 0.001) {
       this.lightLevel += (want - this.lightLevel) * (1 - Math.exp(-8 * delta));

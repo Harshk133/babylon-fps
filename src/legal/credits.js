@@ -113,7 +113,7 @@ export const CREDIT_GROUPS = [
   },
   {
     title: "Made for this game",
-    note: "Built for the game and owned by its developer: the CSE building, the college workshop, the college gate, the water towers, the chaiwala, the city, villages, caves, terrain, roads, fields and procedural props, the wooden crates and their texture, the made-up Taara money and Krunchu Biscuits, the stand-in vehicles, every shader and effect (crash sparks, smoke, fire, blood, post-processing), the kick, punch, rider, mount and vehicle animation, and the game's own rules: Most Wanted bounties and Revenge Run.",
+    note: "Built for the game and owned by its developer: the CSE building, the college workshop, the college gate, the water towers, the chaiwala, the city, villages, caves, terrain, roads, fields and procedural props, the wooden crates and their texture, the made-up Taara money and Krunchu Biscuits, the toolkit, spanner and supply-drop crate, the stand-in vehicles, every shader and effect (crash sparks, smoke, fire, blood, post-processing), the kick, punch, rider, mount and vehicle animation, and the game's own rules: Most Wanted bounties, Revenge Run, supply drops, Nemesis rivals and vehicle repairs.",
     items: [],
   },
 ];

@@ -198,6 +198,7 @@ export class LootScreen {
     for (const [k, n] of Object.entries(inv.bag)) {
       if (n > 0) groups.Attachments.push(this._row({ src: `data-src="bag" data-kind="${k}"`, kind: k, name: ITEMS[k].name, sub: ATTACH_SLOT_NAMES[ATTACHMENTS[k].slot], qty: n > 1 ? `×${n}` : "" }));
     }
+    if (inv.toolkits) groups.Utility.push(this._row({ src: `data-src="bag" data-kind="toolkit"`, kind: "toolkit", name: ITEMS.toolkit.name, sub: "K next to a vehicle", qty: `×${inv.toolkits}` }));
     if (inv.fuelCans) groups.Utility.push(this._row({ src: `data-src="bag" data-kind="fuel"`, kind: "fuel", name: ITEMS.fuel.name, sub: "T next to a vehicle", qty: `×${inv.fuelCans}` }));
 
     // Ammo rides with each gun; listed here so you can see what you've got
@@ -439,7 +440,7 @@ export class LootScreen {
       case "loot": res = this.actions.pickup(src.entry, { uid: src.uid, equip: true }); break;
       case "bag":
         if (src.kind === "medkit" || src.kind === "biscuit") { this.cb.onUse(src.kind); return; }
-        if (src.kind === "fuel") { this.cb.onUse("fuel"); return; }
+        if (src.kind === "fuel" || src.kind === "toolkit") { this.cb.onUse(src.kind); return; }
         if (THROWABLE_ORDER.includes(src.kind)) { this.cb.onSelectThrowable(src.kind); return; }
         if (ATTACHMENTS[src.kind]) {
           const w = [inv.current, ...inv.ownedWeapons].find(id => id && inv.canAttach(id, src.kind));
@@ -473,6 +474,7 @@ export class LootScreen {
         if (src.kind === "medkit") items.push(["use", "Use"]);
         if (src.kind === "biscuit") items.push(["use", "Eat"]);
         if (src.kind === "fuel") items.push(["use", "Fill the rickshaw"]);
+        if (src.kind === "toolkit") items.push(["use", "Repair a vehicle"]);
         if (THROWABLE_ORDER.includes(src.kind) && inv.selectedThrowable !== src.kind) items.push(["select", "Ready to throw"]);
         if (ATTACHMENTS[src.kind]) for (const w of inv.ownedWeapons) if (inv.canAttach(w, src.kind)) items.push([`attach:${w}`, `Attach to ${WEAPONS[w].short}`]);
         items.push(["drop", "Drop"]);
