@@ -1035,46 +1035,154 @@ kbd {
 .hb-hints kbd:first-child { margin-left: 0; }
 
 /* ── Pickup prompt + feed ─────────────────────────────────────────────────── */
+/* Context prompts, battle-royale style: a stack of slanted cards just right of the
+   crosshair. Key cap, icon, the ACTION big and what it's on small underneath, an
+   optional bar (a crate's health, a vehicle's petrol). The first row is the one
+   you're looking at; each row slides in after the one above it. */
 #pickup-prompt {
+  --accent: #ffc23d;
   position: fixed;
-  left: 50%;
-  top: 63%;
+  left: calc(50% + 64px);
+  top: 50%;
   z-index: 110;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
-  padding: 8px 16px 8px 8px;
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  gap: 5px;
+  font-family: "Teko", "Bahnschrift", "Segoe UI", system-ui, sans-serif;
   color: #fff;
-  background: rgba(20, 12, 10, 0.72);
-  border: 1px solid rgba(255, 166, 48, 0.45);
-  border-radius: 4px;
   opacity: 0;
-  transform: translate(-50%, 6px);
-  transition: opacity 0.12s ease, transform 0.12s ease;
+  transform: translate(-6px, -10%);
+  transition: opacity 0.14s ease, transform 0.18s cubic-bezier(.2, .9, .3, 1.3);
   pointer-events: none;
   user-select: none;
 }
 
 #pickup-prompt.visible {
   opacity: 1;
-  transform: translate(-50%, 0);
+  transform: translate(0, -10%);
 }
 
 .prompt-row {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
+  min-width: 168px;
+  padding: 4px 18px 4px 5px;
+  background: linear-gradient(90deg, rgba(8, 10, 14, 0.86) 0%, rgba(8, 10, 14, 0.62) 70%, rgba(8, 10, 14, 0) 100%);
+  border-left: 3px solid rgba(255, 255, 255, 0.35);
+  clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+  animation: prompt-in 0.22s cubic-bezier(.2, .9, .3, 1.2) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+
+.prompt-row.primary {
+  border-left-color: var(--accent);
+  background: linear-gradient(90deg, rgba(14, 12, 6, 0.9) 0%, rgba(14, 12, 6, 0.66) 70%, rgba(14, 12, 6, 0) 100%);
+}
+
+/* A thin shine sweeping across the card you're looking at */
+.prompt-row.primary::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(255, 220, 140, 0.16) 48%, transparent 62%);
+  transform: translateX(-100%);
+  animation: prompt-shine 2.6s ease-in-out 0.3s infinite;
+  pointer-events: none;
+}
+
+@keyframes prompt-in {
+  from { opacity: 0; transform: translateX(14px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes prompt-shine {
+  0%, 55% { transform: translateX(-100%); }
+  100%    { transform: translateX(100%); }
 }
 
 #pickup-prompt kbd {
-  color: #1a0f08;
-  background: #ffa630;
-  border-color: #ffa630;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0 6px;
+  font-family: "Teko", "Bahnschrift", system-ui, sans-serif;
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1;
+  padding-top: 3px;
+  color: #111;
+  background: linear-gradient(#ffffff, #d9dde3);
+  border: 0;
+  border-radius: 4px;
+  box-shadow: 0 2px 0 #7d838c, 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+#pickup-prompt kbd.wide { font-size: 16px; letter-spacing: 0.06em; text-transform: uppercase; }
+
+.prompt-row.primary kbd {
+  background: linear-gradient(#ffe08a, var(--accent));
+  box-shadow: 0 2px 0 #9a6a10, 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 12px rgba(255, 194, 61, 0.55);
+  animation: prompt-key 1.4s ease-in-out infinite;
+}
+@keyframes prompt-key {
+  0%, 100% { box-shadow: 0 2px 0 #9a6a10, 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 6px rgba(255, 194, 61, 0.35); }
+  50%      { box-shadow: 0 2px 0 #9a6a10, 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 16px rgba(255, 194, 61, 0.8); }
+}
+
+.prompt-ico {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+#pickup-prompt .prompt-icon { width: 22px; height: 22px; fill: rgba(255, 255, 255, 0.85); }
+.prompt-row.primary .prompt-icon { fill: var(--accent); filter: drop-shadow(0 0 4px rgba(255, 194, 61, 0.5)); }
+
+.prompt-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1;
+  padding-top: 2px;
+}
+.prompt-act {
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+}
+.prompt-sub {
+  margin-top: -2px;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
+}
+.prompt-row.primary .prompt-sub { color: rgba(255, 226, 160, 0.78); }
+.prompt-bar {
+  display: block;
+  width: 100%;
+  min-width: 96px;
+  height: 3px;
+  margin-top: 4px;
+  background: rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+}
+.prompt-bar i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #ff6a3d, var(--accent) 45%, #9cf25b);
+  background-size: 100px 100%;
+  transform-origin: left;
+  transition: transform 0.18s ease-out;
 }
 
 #pickup-feed {

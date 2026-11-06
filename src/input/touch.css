@@ -441,14 +441,18 @@ body.touch #pickup-prompt { top: 46%; left: 62%; transform: none; pointer-events
 body.touch #pickup-prompt.visible .prompt-row { pointer-events: auto; }
 body.touch #pickup-prompt { padding: 0; gap: 8px; background: none; border: 0; box-shadow: none; }
 body.touch #pickup-prompt kbd { display: none; }
+/* BGMI-style: a round icon badge on a dark pill, the action beside it */
 body.touch .prompt-row {
   padding: 8px 18px;
-  border: 1.5px solid rgba(255, 255, 255, 0.6);
-  border-radius: 22px;
-  background: rgba(0, 0, 0, 0.55);
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
+  border-radius: 30px;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0.45));
+  clip-path: none;
 }
-body.touch .prompt-row::before { content: "▸ "; color: #e2a42b; }
-body.touch .prompt-row.down { background: rgba(255, 255, 255, 0.4); }
+body.touch .prompt-row.primary { border-color: rgba(255, 194, 61, 0.85); box-shadow: 0 0 14px rgba(255, 194, 61, 0.25); }
+body.touch .prompt-row::before { content: none; }
+body.touch .prompt-row.primary::after { border-radius: 30px; }
+body.touch .prompt-row.down { background: rgba(255, 194, 61, 0.45); transform: scale(0.96); }
 /* Pickup feed: above the health bar */
 body.touch #pickup-feed { right: auto; left: 50%; bottom: 125px; transform: translateX(-50%); align-items: center; zoom: 0.7; } /* 88 px */
 
@@ -525,13 +529,22 @@ body.touch .hb-tslot { height: 42px; padding: 3px 10px 3px 6px; }
 body.touch .hb-wallet { height: 42px; }
 body.touch #pickup-prompt { zoom: 1; gap: 10px; }
 body.touch .prompt-row {
-  min-height: 46px;
-  padding: 6px 20px 6px 12px;
+  min-height: 48px;
+  min-width: 0;
+  padding: 5px 22px 5px 5px;
   font-size: 15px;
 }
-body.touch .prompt-row::before { content: none; }
 .prompt-icon { width: 20px; height: 20px; flex-shrink: 0; fill: #ffa630; }
-body.touch .prompt-icon { width: 26px; height: 26px; }
+body.touch .prompt-ico {
+  width: 38px; height: 38px;
+  align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1.5px solid rgba(255, 255, 255, 0.4);
+}
+body.touch .prompt-row.primary .prompt-ico { background: rgba(255, 194, 61, 0.18); border-color: #ffc23d; }
+body.touch #pickup-prompt .prompt-icon { width: 24px; height: 24px; }
+body.touch .prompt-act { font-size: 24px; }
 
 /* RUN: a sprint toggle you can tap instead of pushing the joystick past its ring */
 .tc-run { left: calc(var(--l) + 24px); top: 26%; width: calc(52 * var(--s)); height: calc(52 * var(--s)); flex-direction: column; }

@@ -86,6 +86,7 @@ import { applyStaticIcons, gameItemIcon } from "./ui/applyIcons.js";
 import { icon } from "./ui/gameIcons.js";
 import { SHOP_ITEMS, ShopUI, fmtRupees } from "./economy/Shop.js";
 import { shopSpots, buildShops, SHOP_RANGE } from "./world/Shops.js";
+import { Crates, CRATE_SIZE, CRATE_HP } from "./world/Crates.js";
 import { waterTowerSpots, buildWaterTowers } from "./world/WaterTowers.js";
 import { buildChaiwalas, chaiwalaByStall, chaiwalaAtFront, CHAIWALA_R } from "./world/Chaiwalas.js";
 import { WeaponWheel } from "./ui/WeaponWheel.js";
@@ -1199,7 +1200,7 @@ function setKey(code, pressed, repeat) {
       case "KeyQ": cycleThrowable(); break;
       case "KeyH": useHeal(); break;
       case "KeyB": if (nearShop) setShopOpen(!shopUI.open); break;
-      case "KeyF": if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); else if (nearCseDoor) useCseDoor(); break;
+      case "KeyF": if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); else if (nearCseDoor) useCseDoor(); else if (nearCrate) meleeCrate(); break;
       case "KeyC": toggleStance("crouch"); break;
       case "KeyZ": toggleStance("prone"); break;
       case "KeyL": useLightSwitch(); break;
@@ -2299,6 +2300,7 @@ function fireShot(def) {
     } else {
       const n = _shotResult.hitNormalWorld;
       effects.impact(_hitPoint, n.x, n.y, n.z, "dust", def.pellets > 1 ? 3 : 7);
+      if (_shotResult.body.crate !== undefined) damageCrate(_shotResult.body.crate, def.damage * CRATE_BULLET, _shotDir.x, _shotDir.z);
     }
   }
 
@@ -2502,6 +2504,16 @@ function onGrenadeExplode(pos, owner = null) {
     if (anyHit) showHitMarker(false, anyKill);
     if (anyKill) sfx.kill();
   }
+  // Crates in the blast: close ones burst, the rest take a beating (the host's copy decides)
+  if (crates && !net.isClient) {
+    for (const c of crates.list) {
+      if (c.broken) continue;
+      const dx = c.x - pos.x, dz = c.z - pos.z, d = Math.hypot(dx, dz);
+      if (d >= R) continue;
+      if (d < R * 0.6) breakCrate(c.i, dx, dz);
+      else damageCrate(c.i, CRATE_HP * (1 - d / R) * 1.5, dx, dz);
+    }
+  }
 
   const px = characterBody.position.x - pos.x, pz = characterBody.position.z - pos.z;
   const pd = Math.hypot(px, pz);
@@ -2620,81 +2632,213 @@ function updatePickups(delta) {
     for (let i = pickups.touching.length - 1; i >= 0; i--) collectPickup(pickups.touching[i]);
   }
 
-  // Context prompts: weapon pickup, door, light switch
-  let n = 0;
+  // Context prompts: key, action, what it's on, icon, and a bar (0..1, or -1 for none)
+  promptN = 0;
   if (canLoot) {
     const e = drive.on ? null : pickups.nearestWeapon;
     if (e) {
-      promptRows[n++] = "E";
-      promptRows[n++] = e.def.category === "gear"
-        ? `${inventory.gear[GEAR[e.kind].slot] ? "Swap for" : "Wear"} ${e.def.label}`
-        : e.def.category === "weapon" && inventory.has(e.kind) ? `Take ammo · ${e.def.label}` : `Pick up ${e.def.label}`;
+      const act = e.def.category === "gear" ? (inventory.gear[GEAR[e.kind].slot] ? "Swap" : "Wear")
+        : e.def.category === "weapon" && inventory.has(e.kind) ? "Take ammo" : "Pick up";
+      addPrompt("E", act, e.def.label, e.kind);
     }
-    const near = houses?.interaction(characterBody.position.x, characterBody.position.z, characterBody.position.y - FEET_OFFSET);
+    const p = characterBody.position, feetY = p.y - FEET_OFFSET;
+    if (climb.offer && !drive.on && !ride.on) addPrompt("Space", climb.offer === "wall" ? "Climb over" : "Vault", climb.offer === "wall" ? "Wall" : "Window", "jump");
+    const near = houses?.interaction(p.x, p.z, feetY);
     nearDoor = near?.door ?? null;
     nearSwitch = near?.sw ?? null;
-    if (nearDoor) {
-      promptRows[n++] = "F";
-      promptRows[n++] = nearDoor.doorOpen ? "Close door" : "Open door";
-    }
-    const gateHere = !nearDoor && !drive.on ? collegeGate?.interaction(characterBody.position.x, characterBody.position.z) : null;
+    if (nearDoor) addPrompt("F", nearDoor.doorOpen ? "Close" : "Open", "Door", "door");
+    const gateHere = !nearDoor && !drive.on ? collegeGate?.interaction(p.x, p.z) : null;
     nearGatePart = gateHere?.part ?? null;
     if (gateHere) {
-      promptRows[n++] = "F";
-      promptRows[n++] = gateHere.label;
+      // "Open the college gate" → OPEN · College gate
+      const [act, ...rest] = gateHere.label.replace(" the ", " ").split(" ");
+      const what = rest.join(" ");
+      addPrompt("F", act, what.charAt(0).toUpperCase() + what.slice(1), gateHere.part === "gate" ? "gate" : "door");
     }
-    nearCseDoor = !nearDoor && !gateHere && !drive.on ? cseBuilding?.doorAt(characterBody.position.x, characterBody.position.z, characterBody.position.y - FEET_OFFSET) ?? null : null;
-    if (nearCseDoor) {
-      promptRows[n++] = "F";
-      promptRows[n++] = nearCseDoor.open ? "Close door" : "Open door";
+    nearCseDoor = !nearDoor && !gateHere && !drive.on ? cseBuilding?.doorAt(p.x, p.z, feetY) ?? null : null;
+    if (nearCseDoor) addPrompt("F", nearCseDoor.open ? "Close" : "Open", "Door", "door");
+    // A crate in front of you: kick it standing, punch it crouched or prone
+    nearCrate = null;
+    if (crates && !nearDoor && !gateHere && !nearCseDoor && !drive.on && !ride.on) {
+      camera.getWorldDirection(_crateFwd);
+      const fl = Math.hypot(_crateFwd.x, _crateFwd.z) || 1;
+      nearCrate = crates.nearest(p.x, feetY, p.z, _crateFwd.x / fl, _crateFwd.z / fl);
+      if (nearCrate) {
+        const kick = stance === "stand";
+        addPrompt("F", kick ? "Kick" : "Punch", "Wooden crate", kick ? "kick" : "punch", Math.max(0, nearCrate.hp) / CRATE_HP);
+      }
     }
-    if (nearSwitch) {
-      promptRows[n++] = "L";
-      promptRows[n++] = nearSwitch.lightOn ? "Turn lights off" : "Turn lights on";
-    }
+    if (nearSwitch) addPrompt("L", nearSwitch.lightOn ? "Lights off" : "Lights on", "Switch", "bulb");
     nearShop = null;
     if (!drive.on) {
-      const p = characterBody.position;
       for (const s of shops) if (Math.hypot(s.front.x - p.x, s.front.z - p.z) < SHOP_RANGE) { nearShop = s; break; }
     }
-    if (nearShop) {
-      promptRows[n++] = "B";
-      promptRows[n++] = `Shop · ${fmtRupees(inventory.cash)}`;
-    }
+    if (nearShop) addPrompt("B", "Open shop", `Dukaan · ${fmtRupees(inventory.cash)}`, "shop");
     const car = drive.car ?? ride.car ?? nearestVehicle();
     if (car) {
       const bike = !!car.spec.bike;
+      const fuel = car.fuel / car.spec.fuelMax;
       if (drive.on || ride.on) {
-        promptRows[n++] = "V";
-        promptRows[n++] = bike ? "Get off" : "Get out";
-        if (ride.on) {
-          promptRows[n++] = ride.facing > 0 ? "Y" : "X";
-          promptRows[n++] = ride.facing > 0 ? "Turn round (face back)" : "Turn round (face front)";
-        }
+        addPrompt("V", bike ? "Get off" : "Get out", car.spec.label, "steering");
+        if (ride.on) addPrompt(ride.facing > 0 ? "Y" : "X", "Turn round", ride.facing > 0 ? "Face back" : "Face front", "swap");
       } else {
-        if (car.driver === null) {
-          promptRows[n++] = "V";
-          promptRows[n++] = `${bike ? "Ride" : "Drive"} the ${car.spec.label}${car.empty ? " (no petrol)" : ""}`;
-        }
+        if (car.driver === null) addPrompt("V", bike ? "Ride" : "Drive", car.empty ? `${car.spec.label} · No petrol` : car.spec.label, "steering", fuel);
         if (bike && car.pillion === null) {
-          promptRows[n++] = "X";
-          promptRows[n++] = "Sit behind, facing front";
-          promptRows[n++] = "Y";
-          promptRows[n++] = "Sit behind, facing back";
+          addPrompt("X", "Sit behind", "Facing front", "jump");
+          addPrompt("Y", "Sit behind", "Facing back", "jump");
         }
       }
       if (inventory.fuelCans > 0 && car.fuel < car.spec.fuelMax - 1) {
-        promptRows[n++] = "T";
-        promptRows[n++] = `Fill petrol (${inventory.fuelCans} can${inventory.fuelCans > 1 ? "s" : ""})`;
+        addPrompt("T", "Refuel", `${inventory.fuelCans} petrol can${inventory.fuelCans > 1 ? "s" : ""}`, "fuel", fuel);
       }
     }
   } else {
-    nearDoor = nearSwitch = nearShop = nearCseDoor = null;
+    nearDoor = nearSwitch = nearShop = nearCseDoor = nearCrate = null;
   }
   // Walked away (or died): the shop closes
   if (shopUI.open && !nearShop) setShopOpen(false);
   shopUI.update(inventory.cash);
-  inventoryUI.setPrompts(promptRows, n);
+  inventoryUI.setPrompts(promptRows, promptN);
+}
+
+/** One context prompt row; promptRows is reused (stride 5), so nothing is allocated per frame. */
+let promptN = 0;
+function addPrompt(key, action, detail = "", iconName = "", progress = -1) {
+  promptRows[promptN++] = key;
+  promptRows[promptN++] = action;
+  promptRows[promptN++] = detail;
+  promptRows[promptN++] = iconName;
+  promptRows[promptN++] = progress;
+}
+const _crateFwd = new THREE.Vector3();
+
+// ─── Wooden crates: kick (standing) or punch (crouched / prone) ───────────────
+// F at a crate starts the move; the blow lands at the move's peak. Bullets,
+// grenades and vehicles break them too. In a room the host breaks a crate and
+// rolls its loot (a client breaks it at once on its own screen and asks); the
+// index is the network id: crate { i, dx, dz } breaks, crate { i, r: 1 } restores.
+let nearCrate = null;
+const KICK  = { dmg: 55, dur: 0.62, impact: 0.26, cd: 0.7, noise: 10 };
+const PUNCH = { dmg: 35, dur: 0.45, impact: 0.17, cd: 0.5, noise: 6 };
+const CRATE_BULLET = 0.6;          // × the gun's damage, per pellet
+const CRATE_RESPAWN = 240;         // s before a broken crate comes back (not in the battle royale)
+const CRATE_RESPAWN_CLEAR = 40;    // ...and only with no player that close
+const melee = { cd: 0, pending: 0, crate: -1, move: KICK, dx: 0, dz: 0 };
+const _crateAt = { x: 0, y: 0, z: 0 };
+const _crateP = new THREE.Vector3();
+
+// Two or three things per crate: mostly supplies, now and then gear or a gun
+const CRATE_LOOT = [
+  ["ammo", 26], ["medkit", 8], ["biscuit", 12], ["grenade", 7], ["molotov", 5], ["cash", 10], ["fuel", 3],
+  ["helmet1", 4], ["vest1", 4], ["backpack1", 3], ["helmet2", 1.5], ["vest2", 1.5], ["backpack2", 1],
+  ["reddot", 3], ["holo", 2], ["scope2x", 3], ["scope4x", 1.5], ["extmag", 3], ["grip", 2], ["compensator", 2], ["suppressor", 1],
+  ["smg", 2.5], ["shotgun", 2.5], ["rifle", 1.5], ["sniper", 0.6],
+];
+const CRATE_LOOT_TOTAL = CRATE_LOOT.reduce((s, [, w]) => s + w, 0);
+function rollCrateItem() {
+  if (isBR() && Math.random() < 0.08) return "smoke";
+  let r = Math.random() * CRATE_LOOT_TOTAL;
+  for (const [k, w] of CRATE_LOOT) if ((r -= w) < 0) return k;
+  return "ammo";
+}
+
+function meleeCrate() {
+  if (!nearCrate || melee.cd > 0 || melee.pending > 0 || playerHealth <= 0 || drive.on || ride.on || brAirborne()) return;
+  const move = stance === "stand" ? KICK : PUNCH;
+  melee.move = move;
+  melee.cd = move.cd;
+  melee.pending = move.impact;
+  melee.crate = nearCrate.i;
+  melee.dx = nearCrate.x - characterBody.position.x;
+  melee.dz = nearCrate.z - characterBody.position.z;
+  playerAnim.clip(move === KICK ? "kick" : "punch", move.dur);
+  sfx.throwWhoosh();
+}
+
+function updateMelee(delta) {
+  if (melee.cd > 0) melee.cd -= delta;
+  if (melee.pending > 0 && (melee.pending -= delta) <= 0) {
+    const c = crates?.list[melee.crate];
+    // Still in reach (you can step back mid-kick and miss)
+    if (!c || c.broken || Math.hypot(c.x - characterBody.position.x, c.z - characterBody.position.z) > 1.9) return;
+    cameraTrauma = Math.min(1, cameraTrauma + (melee.move === KICK ? 0.22 : 0.12));
+    damageCrate(c.i, melee.move.dmg, melee.dx, melee.dz, melee.move.noise);
+  }
+  crateRespawns(delta);
+}
+
+/** A blow, a bullet or a blast on crate i, from the direction (dx, dz). */
+function damageCrate(i, dmg, dx, dz, noise = 0) {
+  const c = crates?.list[i];
+  if (!c || c.broken) return;
+  _crateAt.x = c.x; _crateAt.y = c.y + CRATE_SIZE * 0.6; _crateAt.z = c.z;
+  if (noise) makeNoise(c.x, c.z, noise, "door");
+  if (crates.hit(i, dmg, dx, dz)) { breakCrate(i, dx, dz); return; }
+  sfx.thud(_crateAt, false);
+  const l = Math.hypot(dx, dz) || 1;
+  effects.impact(_crateP.set(c.x - dx / l * CRATE_SIZE * 0.5, c.y + CRATE_SIZE * 0.55, c.z - dz / l * CRATE_SIZE * 0.5), -dx / l, 0.5, -dz / l, "dust", 6);
+}
+
+/** Bursts crate i. remote: the host told us (or a client asked the host). */
+function breakCrate(i, dx = 0, dz = 0, remote = false) {
+  if (!crates?.break(i, dx, dz, performance.now() / 1000)) return;
+  const c = crates.list[i];
+  _crateAt.x = c.x; _crateAt.y = c.y + CRATE_SIZE * 0.5; _crateAt.z = c.z;
+  sfx.thud(_crateAt, false);
+  sfx.play("door_bang", { at: _crateAt, vol: 1.2, rate: 0.55, ref: 6, wet: 0.3 });
+  for (let k = 0; k < 3; k++) effects.impact(_crateP.set(c.x, c.y + 0.3 + k * 0.25, c.z), Math.random() - 0.5, 1, Math.random() - 0.5, "dust", 8);
+  if (!net.inRoom) { spawnCrateLoot(c); return; }
+  if (net.isHost) {
+    net.send({ t: "crate", i, dx: +dx.toFixed(2), dz: +dz.toFixed(2) });
+    spawnCrateLoot(c);
+  } else if (!remote) {
+    net.send({ t: "crate", to: "host", i, dx: +dx.toFixed(2), dz: +dz.toFixed(2) });
+  }
+}
+
+function spawnCrateLoot(c) {
+  const n = 2 + (Math.random() < 0.4 ? 1 : 0);
+  const a0 = Math.random() * Math.PI * 2;
+  for (let k = 0; k < n; k++) {
+    const kind = rollCrateItem();
+    const a = a0 + (k / n) * Math.PI * 2, r = 0.35 + Math.random() * 0.3;
+    const x = c.x + Math.cos(a) * r, z = c.z + Math.sin(a) * r, y = groundHeight(x, z);
+    const data = pickupData(kind);
+    if (net.inRoom) spawnShared(kind, x, z, data, y);
+    else pickups.spawn(kind, x, z, data, Infinity, null, y);
+  }
+}
+
+/** The host (or a solo game) puts broken crates back after a while, out of sight. */
+let crateRespawnT = 0;
+function crateRespawns(delta) {
+  if (!crates || isBR() || net.isClient || (crateRespawnT -= delta) > 0) return;
+  crateRespawnT = 2;
+  const now = performance.now() / 1000;
+  for (const c of crates.list) {
+    if (!c.broken || now - c.brokenAt < CRATE_RESPAWN) continue;
+    let clear = Math.hypot(c.x - characterBody.position.x, c.z - characterBody.position.z) > CRATE_RESPAWN_CLEAR;
+    if (clear) for (const t of remotePlayers.players.values()) {
+      const rp = t.body?.position;
+      if (rp && Math.hypot(c.x - rp.x, c.z - rp.z) < CRATE_RESPAWN_CLEAR) { clear = false; break; }
+    }
+    if (!clear) continue;
+    crates.restore(c.i);
+    net.send({ t: "crate", i: c.i, r: 1 });
+  }
+}
+
+/** A vehicle you drive smashes through crates instead of stopping at them. */
+function smashCrates(car) {
+  if (!crates || Math.abs(car.speed) < 1.5) return;
+  const fx = Math.sin(car.yaw), fz = Math.cos(car.yaw), dir = Math.sign(car.speed);
+  const hl = car.spec.length / 2 + CRATE_SIZE / 2, hw = car.spec.width / 2 + CRATE_SIZE / 2;
+  for (const c of crates.list) {
+    if (c.broken) continue;
+    const dx = c.x - car.x, dz = c.z - car.z;
+    if (Math.abs(dx) > hl + 1 || Math.abs(dz) > hl + 1) continue;
+    if (Math.abs(dx * fx + dz * fz) < hl && Math.abs(dx * fz - dz * fx) < hw) breakCrate(c.i, fx * dir, fz * dir);
+  }
 }
 
 // ─── Doors & lights ───────────────────────────────────────────────────────────
@@ -2933,8 +3077,13 @@ document.querySelector("#lobby .lb-top")?.append(legalButton(legal, "lb-legal"))
 document.getElementById("start-screen")?.append(legalButton(legal));
 legal.showFirstTime();
 // Prompt rows show what the key does as an icon too (and that's all a phone shows)
-const PROMPT_ICONS = { O: "door", E: "bag", V: "steering", B: "shop", Space: "jump", L: "flashlight", T: "fuel", H: "medkit" };
-const inventoryUI = new InventoryUI({ inventory, icons: itemIcons, promptIcon: key => icon(PROMPT_ICONS[key] ?? "", "prompt-icon") });
+// A prompt names its icon (an item kind like "helmet2" or "scope4x" falls back to its
+// family, then to the bag); a bare key still gets its old one
+const PROMPT_ICONS = { O: "door", E: "bag", V: "steering", B: "shop", Space: "jump", L: "bulb", T: "fuel", H: "medkit", F: "hand" };
+const promptIcon = name => icon(name, "prompt-icon") || icon(name.replace(/\d+x?$/, ""), "prompt-icon")
+  || (name.startsWith("scope") || name === "holo" ? icon("scope", "prompt-icon") : "")
+  || icon(PROMPT_ICONS[name] ?? "bag", "prompt-icon");
+const inventoryUI = new InventoryUI({ inventory, icons: itemIcons, promptIcon });
 
 
 // Mouse-wheel weapon carousel around the player. In solo it slows the world
@@ -3853,6 +4002,7 @@ const chunks = new WorldChunks(); // world/Chunks.js: far static meshes aren't d
 let collegeGate = null;    // world/CollegeGate.js, placed in loadWorld()
 let cseBuilding = null;    // world/CseBuilding.js: the CSE department block behind the gate
 let collegeWorkshop = null; // world/CollegeWorkshop.js: the workshop hall, up the North Road
+let crates = null;          // world/Crates.js: breakable wooden crates with loot inside
 let waterTowers = null;    // world/WaterTowers.js: { towers, lootSpots, blocks() }, built in loadWorld()
 let indiaModels = {};      // world/IndiaAssets.js: { rickshaw, thar, truck, … } (null where missing)
 let townLabels = [];       // town names for the world map
@@ -4288,6 +4438,75 @@ async function loadWorld() {
       || fireSpots.some(s => Math.hypot(s.x - x, s.z - z) < 5),
   });
 
+  // Breakable wooden crates (world/Crates.js): stacked by the side and back walls of
+  // houses, a few round the spawn and out in the country. Seeded and tested only
+  // against colliders and the layout, so every player and preset gets the same
+  // list (the index is the crate's network id).
+  {
+    const rng = makeLCG(0xc4a7e5);
+    const spots = [];
+    const P = { x: 0, z: 0 };
+    const half = CRATE_SIZE / 2;
+    const free = (x, z) => {
+      if (Math.hypot(x, z) > shoreRadius(x, z) - 10 || solidAt(x, z, 0.7)) return false;
+      if (caveBlocks(x, z, 2) || roads.onRoad(x, z, 1.4) || nearGate(x, z, 1) || nearParked(x, z, 2.5) || wetOrFarmed(x, z, 0.8)) return false;
+      if (houses.blocks(x, z, 0.75) || city?.blocks(x, z, 1) || indiaBuildings?.blocks(x, z, 1) || plots?.blocks(x, z, 0.5)) return false;
+      if (spots.some(s => Math.abs(s.x - x) < 1 && Math.abs(s.z - z) < 1)) return false;
+      if (STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 1.6) || fireSpots.some(f => Math.hypot(f.x - x, f.z - z) < 3)) return false;
+      // Level enough to sit flat
+      const g = groundHeight(x, z);
+      for (const [ox, oz] of [[half, half], [-half, half], [half, -half], [-half, -half]]) {
+        if (Math.abs(groundHeight(x + ox, z + oz) - g) > 0.2) return false;
+      }
+      return true;
+    };
+    const add = (x, z, yaw) => spots.push({ x, y: groundHeight(x, z), z, yaw });
+    // Beside houses: by a side wall or the back wall (the door is on the front)
+    for (const h of houses.houses) {
+      if (rng() < 0.5) continue;
+      const pair = rng() < 0.35;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const back = rng() < 0.4, side = rng() < 0.5 ? -1 : 1;
+        // Kit units: about 0.75 m off the wall
+        const lx = back ? (rng() * 1.4 - 0.7) * h.hw : side * (h.hw + 0.62);
+        const lz = back ? -(h.hd + 0.62) : (rng() * 1.4 - 0.7) * h.hd;
+        houses._toWorld(h, lx, lz, P);
+        if (!free(P.x, P.z)) continue;
+        const yaw = h.rot + (rng() - 0.5) * 0.3;
+        add(P.x, P.z, yaw);
+        if (pair) {
+          // A second one alongside, along the wall
+          const ax = back ? Math.cos(h.rot) : Math.sin(h.rot), az = back ? -Math.sin(h.rot) : Math.cos(h.rot);
+          const s = rng() < 0.5 ? -1 : 1;
+          const x2 = P.x + ax * s * 1.05, z2 = P.z + az * s * 1.05;
+          if (free(x2, z2)) add(x2, z2, h.rot + (rng() - 0.5) * 0.3);
+        }
+        break;
+      }
+    }
+    // Round the spawn (something to try your boots on) and out in the country
+    const scatter = (count, rMin, rMax, cluster) => {
+      for (let n = 0; n < count; n++) {
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const a = rng() * Math.PI * 2, r = rMin + Math.sqrt(rng()) * (rMax - rMin);
+          const x = Math.cos(a) * r, z = Math.sin(a) * r;
+          if (!free(x, z)) continue;
+          add(x, z, rng() * Math.PI * 2);
+          const extra = cluster ? Math.floor(rng() * 3) : 0;
+          for (let k = 0; k < extra; k++) {
+            const b = rng() * Math.PI * 2;
+            const x2 = x + Math.cos(b) * 1.15, z2 = z + Math.sin(b) * 1.15;
+            if (free(x2, z2)) add(x2, z2, rng() * Math.PI * 2);
+          }
+          break;
+        }
+      }
+    };
+    scatter(4, 9, 24, false);
+    scatter(36, 30, 430, true);
+    crates = new Crates({ scene, world, material: staticMaterial, renderer, spots, mapObstacles });
+  }
+
   loadMark("· trees, rocks, forest");
   // Rocks, dead trees and power poles were one instanced mesh each for the
   // whole island: split them per map cell so far ones aren't drawn
@@ -4631,7 +4850,7 @@ function playerJoined(p) {
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
     if (net.isHost) {
-      net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state }, cse: cseBuilding?.openDoors() });
+      net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state }, cse: cseBuilding?.openDoors(), crates: crates?.brokenList() });
       brAdmitLate(p);
     }
     return;
@@ -4645,6 +4864,7 @@ function playerJoined(p) {
       veh: vehiclesState(),
       gate: collegeGate && { ...collegeGate.state },
       cse: cseBuilding?.openDoors(),
+      crates: crates?.brokenList(),
     });
   }
 }
@@ -4901,7 +5121,14 @@ net.on("light", msg => {
   const f = houses.houses[msg.h]?.floors[msg.f ?? 0];
   if (f && f.lightOn !== msg.on) houses.toggleLight(f);
 });
+net.on("crate", msg => {
+  if (!crates) return;
+  if (msg.r) { crates.restore(msg.i); return; }
+  // On the host this is a client asking (it rolls the loot); elsewhere the host's word
+  breakCrate(msg.i, msg.dx ?? 0, msg.dz ?? 0, true);
+});
 net.on("world", msg => {
+  if (msg.crates) for (const i of msg.crates) crates?.break(i, 0, 0, performance.now() / 1000, false);
   if (msg.gate) for (const part of ["gate", "booth"]) collegeGate?.setState(part, msg.gate[part], true);
   if (msg.cse) for (const i of msg.cse) cseBuilding?.setDoor(i, true, true);
   msg.doors.forEach((o, i) => { if (houses.houses[i]) houses.setDoor(houses.houses[i], o); });
@@ -5197,7 +5424,7 @@ function solidAt(x, z, r, self = null) {
   solidKind = CRASH_KIND.HARD;
   if (caves?.solidAt(x, z, r)) return true;
   for (const o of mapObstacles) {
-    if (o.vehicle) continue;
+    if (o.vehicle || o.crate) continue;   // (a vehicle smashes crates: smashCrates)
     const dx = x - o.x, dz = z - o.z;
     if (o.type === "circle") {
       const rr = (o.hit ?? o.r) + r;
@@ -5464,6 +5691,7 @@ function updateDriving(delta) {
     aimPitch += (-0.16 - aimPitch) * (1 - Math.exp(-2 * delta));
   }
   vehicleRunOver(car);
+  smashCrates(car);
 }
 
 const CRASH_MIN = 1.5;        // m/s into a surface for it to count as a hit
@@ -6097,6 +6325,7 @@ function brStartMatch(seed, ids, t) {
   takenLoot.clear(); // the next match's loot reuses the ids
   lootClaims.clear();
   brSpawnLoot(seed);
+  crates?.restoreAll(); // every crate whole again for the drop
   resetVehicles();
   brHud.hideResult();
 
@@ -6951,6 +7180,8 @@ function animate() {
   if (!watched) applyFirstPersonCamera();
   updateWeapon(delta);
   updateThrowAim(delta);
+  updateMelee(delta);
+  crates?.update(delta);
   throwables.update(delta);
   if (zombieManager) fireFX.syncBodies(zombieManager.active, characterBody.position.x, characterBody.position.z);
   fireFX.update(delta);

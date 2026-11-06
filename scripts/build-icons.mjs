@@ -45,6 +45,12 @@ const ICONS = {
   map: "lorc/treasure-map",
   gyro: "caro-asercion/gyroscope",
   door: "delapouite/door",
+  crate: "delapouite/wooden-crate",
+  kick: "lorc/boot-kick",
+  punch: "lorc/punch",
+  bulb: "lorc/light-bulb",
+  gate: "delapouite/gate",
+  hand: "lorc/hand",
   // Items (hotbar, inventory, pickups feed, shop)
   pistol: "skoll/colt-m1911",
   smg: "skoll/mp5",

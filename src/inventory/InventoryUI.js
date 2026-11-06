@@ -1,6 +1,7 @@
 import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, FUEL_CAN, BISCUIT, GEAR } from "../combat/weapons.js";
 
 const FEED_LIFE = 2600; // ms
+const PROMPT_STRIDE = 5; // setPrompts rows: key, action, detail, icon, progress
 const fmtReserve = r => (r === Infinity ? "∞" : `${r}`);
 
 function el(tag, cls, text) {
@@ -171,21 +172,55 @@ export class InventoryUI {
   // ── Prompt + feed ───────────────────────────────────────────────────────────
 
   /**
-   * rows: flat list [key, text, key, text, …] (reused by the caller, so no
-   * allocation per frame). Rebuilds the DOM only when the content changes.
+   * rows: flat list of [key, action, detail, icon, progress] (progress 0..1,
+   * or -1 for no bar), reused by the caller, so nothing is allocated per
+   * frame. The rows are rebuilt (and slide in) only when what they say
+   * changes; a moving bar (a crate taking hits, the petrol gauge) is written
+   * in place.
    */
   setPrompts(rows, count) {
-    let sig = "";
-    for (let i = 0; i < count; i++) sig += rows[i] + "|";
-    if (sig === this._prompt) return;
-    this._prompt = sig;
+    const prev = this._rows ??= [];
+    let same = count === this._count;
+    for (let i = 0; same && i < count; i++) {
+      if (i % PROMPT_STRIDE !== 4 && rows[i] !== prev[i]) same = false;
+    }
+    if (same) {
+      for (let i = 4, r = 0; i < count; i += PROMPT_STRIDE, r++) {
+        if (rows[i] === prev[i]) continue;
+        prev[i] = rows[i];
+        const fill = this._bars[r];
+        if (fill) fill.style.transform = `scaleX(${Math.max(0, Math.min(1, rows[i]))})`;
+      }
+      return;
+    }
+    for (let i = 0; i < count; i++) prev[i] = rows[i];
+    this._count = count;
+    this._bars = [];
     this.promptEl.replaceChildren();
-    for (let i = 0; i < count; i += 2) {
-      const row = el("div", "prompt-row");
-      row.append(el("kbd", null, rows[i]));
-      const svg = this.promptIcon?.(rows[i]);
-      if (svg) row.insertAdjacentHTML("beforeend", svg);
-      row.append(el("span", null, rows[i + 1]));
+    for (let i = 0, r = 0; i < count; i += PROMPT_STRIDE, r++) {
+      const [key, action, detail, iconName, progress] = [rows[i], rows[i + 1], rows[i + 2], rows[i + 3], rows[i + 4]];
+      const row = el("div", r === 0 ? "prompt-row primary" : "prompt-row");
+      row.style.setProperty("--i", r);
+      const k = el("kbd", key.length > 1 ? "wide" : null, key);
+      row.append(k);
+      const svg = this.promptIcon?.(iconName || key);
+      if (svg) {
+        const ico = el("span", "prompt-ico");
+        ico.innerHTML = svg;
+        row.append(ico);
+      }
+      const text = el("span", "prompt-text");
+      text.append(el("span", "prompt-act", action));
+      if (detail) text.append(el("span", "prompt-sub", detail));
+      if (progress >= 0) {
+        const bar = el("span", "prompt-bar");
+        const fill = el("i");
+        fill.style.transform = `scaleX(${Math.max(0, Math.min(1, progress))})`;
+        bar.append(fill);
+        text.append(bar);
+        this._bars[r] = fill;
+      }
+      row.append(text);
       this.promptEl.append(row);
     }
     this.promptEl.classList.toggle("visible", count > 0);

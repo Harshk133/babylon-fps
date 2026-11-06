@@ -1589,6 +1589,27 @@ export class Soldier {
       if (os.name === "interact") {
         turnBone(b.rArm, side, -1.0 * w);
         turnBone(b.rFore, side, -0.4 * w);
+      } else if (os.name === "kick") {
+        // A front kick: knee up (chamber), snap the shin out at ~45 %, pull back
+        const lift = bump(k, 0, 0.92, 0.3) * os.weight;
+        const snap = bump(k, 0.28, 0.7, 0.35) * os.weight;
+        turnBone(b.rUpLeg, side, -(1.15 * lift + 0.35 * snap));
+        turnBone(b.rLeg, side, 1.45 * lift * (1 - snap * 0.9));
+        turnBone(b.rFoot, side, 0.35 * snap);
+        // Lean back for balance, arms out a little
+        turnBone(b.spine, side, -0.22 * lift);
+        turnBone(b.spine1, side, -0.12 * lift);
+        turnBone(b.lUpLeg, side, 0.12 * lift);
+        turnBone(b.lLeg, side, 0.2 * lift);
+      } else if (os.name === "punch") {
+        // A straight right: wind back, drive the fist out, the shoulders turn into it
+        const wind = bump(k, 0, 0.35, 0.5) * os.weight;
+        const drive = bump(k, 0.2, 0.85, 0.3) * os.weight;
+        turnBone(b.rArm, side, 0.35 * wind - 1.45 * drive);
+        turnBone(b.rFore, side, -1.2 * wind + 0.9 * drive);
+        turnBone(b.spine1, _up, 0.18 * wind - 0.32 * drive);
+        turnBone(b.spine2, _up, -0.18 * drive);
+        turnBone(b.spine1, side, 0.12 * drive);
       } else {
         const hard = os.name === "hit2" ? 1.6 : 1;
         turnBone(b.spine1, side, -0.22 * w * hard);
