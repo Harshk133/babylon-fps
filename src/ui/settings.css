@@ -74,6 +74,9 @@
   cursor: pointer;
 }
 .st-toggle.on { border-color: rgba(255, 194, 61, 0.55); background: rgba(255, 194, 61, 0.08); }
+.st-range { cursor: default; }
+.st-range input { width: 150px; accent-color: #ffc23d; }
+.st-range output { min-width: 40px; text-align: right; font: 600 16px "Teko", sans-serif; color: #ffc23d; }
 .st-ttext { display: flex; flex-direction: column; gap: 3px; flex: 1; }
 .st-ttext b { font: 600 20px/1 "Teko", sans-serif; letter-spacing: 0.06em; }
 .st-ttext small { font-size: 12.5px; color: rgba(242, 234, 216, 0.68); }

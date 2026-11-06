@@ -10,6 +10,9 @@ const KEY = "babylon-fps:settings";
 export const SETTING_DEFAULTS = {
   autoDoors: false,     // house and classroom doors open as you walk up and close behind you
   bots: false,          // battle royale bots in your room (anyone in the room turning them on brings them in)
+  sound: true,          // every sound in the game
+  volume: 0.9,          // master volume 0..1
+  music: false,         // the horror score in zombie mode
 };
 
 export class Settings {
@@ -29,6 +32,9 @@ export class Settings {
 }
 
 const TOGGLES = [
+  { id: "sound", title: "Sound", text: "Every sound in the game. Off mutes it all." },
+  { id: "volume", title: "Volume", text: "Master volume.", range: true },
+  { id: "music", title: "Horror music (zombie modes)", text: "A live, ever-changing horror score in Solo and Co-op that tightens when monsters hunt you." },
   { id: "autoDoors", title: "Auto-open doors", text: "Doors swing open as you walk up to them and shut behind you. Off: press the use key." },
   { id: "bots", title: "Bots in Battle Royale", text: "AI players fill your room. If anyone in the room turns this on, everyone in it plays with bots. Takes effect in the warm-up." },
 ];
@@ -62,6 +68,13 @@ export class SettingsPanel {
     this.body = this.el.querySelector(".st-body");
     this.note = this.el.querySelector(".st-note");
     this.resetBtn = this.el.querySelector(".st-reset");
+    this.el.addEventListener("input", e => {
+      const r = e.target.closest("[data-range]");
+      if (!r) return;
+      this.settings.set(r.dataset.range, +r.value / 100);
+      const out = r.parentElement.querySelector("output");
+      if (out) out.textContent = `${r.value}%`;
+    });
     this.el.addEventListener("click", e => {
       const tab = e.target.closest("[data-tab]");
       if (tab) { this.tab(tab.dataset.tab); return; }
@@ -126,6 +139,12 @@ export class SettingsPanel {
     }
     let html = "";
     for (const t of TOGGLES) {
+      if (t.range) {
+        const v = Math.round((this.settings.get(t.id) ?? 1) * 100);
+        html += `<label class="st-toggle st-range"><span class="st-ttext"><b>${t.title}</b><small>${t.text}</small></span>
+          <input type="range" min="0" max="100" step="1" value="${v}" data-range="${t.id}"><output>${v}%</output></label>`;
+        continue;
+      }
       const on = !!this.settings.get(t.id);
       html += `<button class="st-toggle${on ? " on" : ""}" data-toggle="${t.id}" role="switch" aria-checked="${on}">
         <span class="st-ttext"><b>${t.title}</b><small>${t.text}</small></span><span class="st-switch"><i></i></span></button>`;

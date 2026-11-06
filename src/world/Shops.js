@@ -113,14 +113,9 @@ export function buildShops({ scene, world, material, spots, groundAt, mapObstacl
     bottle: new THREE.MeshStandardMaterial({ color: 0x3a8a3a, roughness: 0.3, metalness: 0.1 }),
   };
   const template = buildStall(mats);
-  const all = new THREE.Group();
   const out = [];
   for (const s of spots) {
     const y = groundAt(s.x, s.z);
-    const stall = template.clone(true);
-    stall.position.set(s.x, y, s.z);
-    stall.rotation.y = s.rot;
-    all.add(stall);
 
     // Solid: the counter-and-wall block (you buy from the front, you can't walk through)
     const body = new CANNON.Body({ mass: 0, material, collisionFilterGroup: GROUP_WORLD });
@@ -133,12 +128,62 @@ export function buildShops({ scene, world, material, spots, groundAt, mapObstacl
     navObstacles.push(o);
 
     const fx = s.x + Math.sin(s.rot) * (D / 2 + 1.0), fz = s.z + Math.cos(s.rot) * (D / 2 + 1.0);
-    out.push({ ...s, front: { x: fx, z: fz } });
+    const stall = { ...s, y, front: { x: fx, z: fz }, index: out.length, body, obstacle: o, broken: false, brokenAt: 0 };
+    o.stall = stall;
+    out.push(stall);
   }
-  // One mesh per material for every stall together
-  mergeStaticMeshes(all);
-  scene.add(all);
-  all.updateMatrixWorld(true);
-  all.traverse(o => { o.matrixAutoUpdate = false; });
+  // One mesh per material for every standing stall together. A smashed stall leaves the
+  // merge: it's rebuilt without it (five stalls: a few ms, once, instead of 5× the draw calls)
+  let group = null;
+  const rebuild = () => {
+    if (group) {
+      scene.remove(group);
+      group.traverse(m => { if (m.isMesh) m.geometry.dispose(); });
+    }
+    group = new THREE.Group();
+    for (const s of out) {
+      if (s.broken) continue;
+      const st = template.clone(true);
+      st.position.set(s.x, s.y, s.z);
+      st.rotation.y = s.rot;
+      group.add(st);
+    }
+    mergeStaticMeshes(group);
+    scene.add(group);
+    group.updateMatrixWorld(true);
+    group.traverse(m => { m.matrixAutoUpdate = false; });
+  };
+  rebuild();
+  /** A vehicle smashed stall i: gone (no collider, no shop) until restore(). False if it already was. */
+  out.smash = (i, now = 0) => {
+    const s = out[i];
+    if (!s || s.broken) return false;
+    s.broken = true;
+    s.brokenAt = now;
+    world.removeBody(s.body);
+    s.obstacle.w = s.obstacle.d = 0.01;
+    s.obstacle.hw = s.obstacle.hd = 0.005;
+    rebuild();
+    return true;
+  };
+  out.restore = i => {
+    const s = out[i];
+    if (!s || !s.broken) return;
+    s.broken = false;
+    world.addBody(s.body);
+    s.obstacle.w = W; s.obstacle.d = D; s.obstacle.hw = W / 2; s.obstacle.hd = D / 2;
+    rebuild();
+  };
+  out.restoreAll = () => {
+    if (!out.some(s => s.broken)) return;
+    for (const s of out) {
+      if (!s.broken) continue;
+      s.broken = false;
+      world.addBody(s.body);
+      s.obstacle.w = W; s.obstacle.d = D; s.obstacle.hw = W / 2; s.obstacle.hd = D / 2;
+    }
+    rebuild();
+  };
+  out.brokenList = () => out.filter(s => s.broken).map(s => s.index);
   return out;
 }

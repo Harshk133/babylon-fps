@@ -253,6 +253,17 @@ const BUILDERS = {
     return g;
   },
 
+  // Rope gun: a chunky pistol with a three-pronged hook in the muzzle and a rope drum under the barrel
+  grapple: () => {
+    const g = new THREE.Group();
+    box(g, 0.2, 0.06, 0.05,  MAT.polymer, 0.05, 0.03, 0);
+    box(g, 0.05, 0.11, 0.045, MAT.polymer, -0.02, -0.04, 0);
+    part(g, cylGeo(0.035, 0.035, 0.07, false), MAT.red, 0.06, -0.02, 0, Math.PI / 2);
+    box(g, 0.07, 0.015, 0.015, MAT.metal, 0.18, 0.03, 0);
+    for (const a of [0, 2.1, 4.2]) box(g, 0.04, 0.012, 0.012, MAT.metal, 0.22, 0.03 + Math.cos(a) * 0.018, Math.sin(a) * 0.018, 0.6);
+    return g;
+  },
+
   // Toolkit: a red steel toolbox with a lid seam, latches and a handle, a spanner strapped on top
   toolkit: () => {
     const g = new THREE.Group();

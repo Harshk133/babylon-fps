@@ -35,6 +35,19 @@ const MAX_VOICES = 36;    // sample voices at once; extra low-priority ones are 
 const LOW_PRIORITY = 24;  // footsteps / idle groans give way above this many
 const SPACE_WET = { outdoor: 0.16, indoor: 0.3, cave: 0.75 };
 
+/**
+ * Engines by vehicle kind: wave, base / span (Hz, idle → flat out), beat (pulse ratio:
+ * how lumpy the firing is), lp / lpSpan (filter), q (filter resonance), rasp (exhaust
+ * noise) and whine (Hz of a turbo / intake whistle, 0 for none).
+ */
+const ENGINE = {
+  rickshaw:  { wave: "sawtooth", base: 38, span: 70,  beat: 0.5,  lp: 450, lpSpan: 900,  q: 1,   rasp: 0.35, whine: 0 },     // two-stroke putt-putt
+  thar:      { wave: "sawtooth", base: 26, span: 58,  beat: 0.25, lp: 300, lpSpan: 750,  q: 2.5, rasp: 0.25, whine: 2600 },  // diesel with a turbo
+  tractor:   { wave: "square",   base: 16, span: 28,  beat: 0.5,  lp: 200, lpSpan: 380,  q: 3,   rasp: 0.45, whine: 0 },     // big slow chug
+  sportbike: { wave: "sawtooth", base: 60, span: 210, beat: 1,    lp: 900, lpSpan: 2800, q: 1.5, rasp: 0.2,  whine: 3600 },  // screaming twin
+  motorbike: { wave: "sawtooth", base: 28, span: 75,  beat: 0.5,  lp: 380, lpSpan: 900,  q: 2,   rasp: 0.4,  whine: 0 },     // old V-twin potato-potato
+};
+
 export class Sfx {
   /** hrtf: true for proper 3D on headphones (desktop); phones use cheaper equal-power panning. */
   constructor({ hrtf = true } = {}) {
@@ -49,6 +62,25 @@ export class Sfx {
     this.listener = { x: 0, y: 0, z: 0 };
     this._loops = new Map(); // key → { src, gain, panner }
     this._space = "outdoor";
+    this.muted = false;      // Settings → Sound: everything off
+    this.volume = 1;         // Settings → Sound: master volume 0..1
+    this.musicOn = false;    // Settings → Sound: the horror score in zombie mode (off by default)
+    this._synth = {};        // name → generated AudioBuffer (buzz, …)
+  }
+
+  // ── Player settings ─────────────────────────────────────────────────────────
+  _masterLevel() { return this.muted ? 0 : 0.5 * this.volume; }
+  setMuted(m) {
+    this.muted = !!m;
+    if (this.master) this.master.gain.setTargetAtTime(this._masterLevel(), this.ctx.currentTime, 0.05);
+  }
+  setVolume(v) {
+    this.volume = Math.max(0, Math.min(1, v));
+    if (this.master) this.master.gain.setTargetAtTime(this._masterLevel(), this.ctx.currentTime, 0.05);
+  }
+  setMusicEnabled(on) {
+    this.musicOn = !!on;
+    if (this.musicBus) this.musicBus.gain.setTargetAtTime(on ? 1 : 0, this.ctx.currentTime, 0.6);
   }
 
   /** Starts downloading the samples (call at boot; decoding waits for unlock()). */
@@ -104,7 +136,11 @@ export class Sfx {
     // Master: a soft-clip limiter so stacked gunfire and roars never crackle.
     // (A DynamicsCompressorNode would flatten the gunshot transients.)
     this.master = ctx.createGain();
-    this.master.gain.value = 0.5;
+    this.master.gain.value = this._masterLevel();
+    // The music has its own fader (Settings → horror music), under the master
+    this.musicBus = ctx.createGain();
+    this.musicBus.gain.value = this.musicOn ? 1 : 0;
+    this.musicBus.connect(this.master);
     const pre = ctx.createGain();
     pre.gain.value = 0.5;
     const limiter = ctx.createWaveShaper();
@@ -287,12 +323,13 @@ export class Sfx {
    */
   loop(key, group, at, vol, { ref = 3, wet = 0.2 } = {}) {
     const ctx = this.ctx;
-    if (!ctx || !this.has(group)) return;
+    const synth = typeof group === "string" && group.startsWith("synth:") ? this._synthBuffer(group.slice(6)) : null;
+    if (!ctx || (!synth && !this.has(group))) return;
     let l = this._loops.get(key);
     if (!l) {
       if (vol <= 0) return;
       const src = ctx.createBufferSource();
-      src.buffer = this.buffers[group][0];
+      src.buffer = synth ?? this.buffers[group][0];
       src.loop = true;
       const gain = ctx.createGain();
       gain.gain.value = 0;
@@ -1037,10 +1074,158 @@ export class Sfx {
     bp.Q.value = 1.2;
     const raspGain = ctx.createGain();
     raspGain.gain.value = 0.35;
+    e.raspGain = raspGain;
     rasp.connect(bp).connect(raspGain).connect(amp);
+    // Turbo / intake whine
+    e.whine = ctx.createOscillator();
+    e.whine.type = "sine";
+    e.whine.frequency.value = 2400;
+    e.whineGain = ctx.createGain();
+    e.whineGain.gain.value = 0;
+    e.whine.connect(e.whineGain).connect(e.panner);
     e.osc.start();
     e.pulse.start();
+    e.whine.start();
     rasp.start();
+  }
+
+  // ── Driving: tyres, wind, brakes ────────────────────────────────────────────
+
+  /**
+   * Tyres sliding (a skid, a hard stop): a squeal on asphalt, a rough scrub on
+   * dirt; a tractor's big tyres rumble instead. amount 0..1, at: where.
+   */
+  setSkid(amount, at = null, kind = "thar", dirt = false) {
+    if (!this.ctx) return;
+    if (!this.skid) {
+      if (amount <= 0.02) return;
+      const ctx = this.ctx;
+      const s = this.skid = { last: -1 };
+      const src = this._loopNoise(1.7);
+      s.bp = ctx.createBiquadFilter(); s.bp.type = "bandpass"; s.bp.Q.value = 6;
+      s.peak = ctx.createBiquadFilter(); s.peak.type = "peaking"; s.peak.gain.value = 14; s.peak.Q.value = 18;
+      s.gain = ctx.createGain(); s.gain.gain.value = 0;
+      s.panner = ctx.createPanner();
+      s.panner.panningModel = this.hrtf ? "HRTF" : "equalpower";
+      s.panner.distanceModel = "inverse";
+      s.panner.refDistance = 6;
+      src.connect(s.bp).connect(s.peak).connect(s.gain).connect(s.panner).connect(this.master);
+      src.start();
+    }
+    const s = this.skid, t = this.ctx.currentTime, p = at ?? this.listener;
+    if (s.panner.positionX) { s.panner.positionX.setTargetAtTime(p.x, t, 0.05); s.panner.positionY.setTargetAtTime(p.y, t, 0.05); s.panner.positionZ.setTargetAtTime(p.z, t, 0.05); }
+    else s.panner.setPosition(p.x, p.y, p.z);
+    const tractor = kind === "tractor", bike = kind === "sportbike" || kind === "motorbike";
+    const f = dirt ? 700 : tractor ? 380 : bike ? 2600 : 1900;
+    s.bp.frequency.setTargetAtTime(f * (0.9 + amount * 0.25), t, 0.05);
+    s.peak.frequency.setTargetAtTime(f * 1.02, t, 0.05);
+    s.bp.Q.setTargetAtTime(dirt || tractor ? 1.2 : 6, t, 0.1);
+    const q = Math.round(amount * 30) / 30;
+    if (q !== s.last) { s.last = q; s.gain.gain.setTargetAtTime(q * (dirt ? 0.25 : 0.32), t, 0.06); }
+  }
+
+  /** Air brakes letting go (the tractor and big vehicles coming to a stop). */
+  brakeHiss(at = null) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    this._withAt(at, { ref: 6, wet: 0.2 }, () => {
+      this._noise(t, 0.7, "highpass", 5200, 2600, 0.35);
+      this._noise(t + 0.05, 0.4, "bandpass", 3000, 1800, 0.15);
+    });
+  }
+
+  /** The wind tearing past at speed: 0..1. Cheap to call every frame. */
+  setSpeedRush(x) {
+    if (!this.ctx) return;
+    if (!this.rush) {
+      if (x <= 0.01) return;
+      const ctx = this.ctx;
+      const r = this.rush = { last: -1 };
+      const src = this._loopNoise(2.3);
+      r.hp = ctx.createBiquadFilter(); r.hp.type = "highpass"; r.hp.frequency.value = 400;
+      r.bp = ctx.createBiquadFilter(); r.bp.type = "bandpass"; r.bp.Q.value = 0.7; r.bp.frequency.value = 900;
+      r.gain = ctx.createGain(); r.gain.gain.value = 0;
+      src.connect(r.hp).connect(r.bp).connect(r.gain).connect(this.master);
+      src.start();
+    }
+    const r = this.rush, t = this.ctx.currentTime, q = Math.round(x * 40) / 40;
+    if (q === r.last) return;
+    r.last = q;
+    r.gain.gain.setTargetAtTime(q * q * 0.32, t, 0.2);
+    r.bp.frequency.setTargetAtTime(700 + q * 2200, t, 0.2);
+  }
+
+  // ── Low health: breathing ───────────────────────────────────────────────────
+
+  /** One heavy, ragged breath (in, then out). vol 0..1; faster = shorter. */
+  breath(vol = 0.5, rate = 1) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime, inD = 0.55 / rate, outD = 0.75 / rate;
+    this._noise(t, inD, "bandpass", 900, 1700, 0.22 * vol, 0.8);
+    this._noise(t + inD + 0.05, outD, "bandpass", 1300, 600, 0.3 * vol, 0.7);
+    this._noise(t + inD + 0.05, outD * 0.8, "lowpass", 500, 200, 0.18 * vol, 0.5);
+  }
+
+  /** A heavier heartbeat: lub-dub, a body thump under the tone. */
+  heartbeatHeavy(vol = 0.5) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    this._sweep(t, 70, 40, 0.16, vol, "sine");
+    this._noise(t, 0.12, "lowpass", 160, 60, vol * 0.7);
+    this._sweep(t + 0.24, 60, 36, 0.2, vol * 0.75, "sine");
+    this._noise(t + 0.24, 0.14, "lowpass", 140, 50, vol * 0.5);
+  }
+
+  // ── Wreckage ────────────────────────────────────────────────────────────────
+
+  /** A power pole snapping and coming down, and the wires whipping. */
+  poleCrash(at) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    this._withAt(at, { ref: 10, wet: 0.35 }, () => {
+      this._noise(t, 0.25, "lowpass", 1800, 400, 1.0);              // the crack
+      this._noise(t + 0.9, 0.6, "lowpass", 600, 80, 1.1);            // it hits the ground
+      this._sweep(t + 0.9, 90, 30, 0.6, 0.8);
+      for (let i = 0; i < 5; i++) this._noise(t + 0.2 + i * 0.12, 0.08, "highpass", 4000, 2500, 0.35); // wires snapping
+    });
+  }
+
+  /** Live wires on the ground: a crack and a fizz. */
+  zap(at, vol = 1) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    this._withAt(at, { ref: 5, wet: 0.2 }, () => {
+      this._noise(t, 0.06, "highpass", 6000, 3000, 0.5 * vol);
+      this._sweep(t, 1800, 300, 0.08, 0.18 * vol, "square");
+      this._noise(t + 0.04, 0.25, "bandpass", 2500, 900, 0.2 * vol);
+    });
+  }
+
+  /** A stall / stand smashed by a vehicle: splintering wood, a tarp, things scattering. */
+  woodCrash(at, vol = 1) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    this.play("door_bang", { at, vol: 1.1 * vol, rate: 0.6, ref: 8, wet: 0.35 });
+    this._withAt(at, { ref: 8, wet: 0.3 }, () => {
+      for (let i = 0; i < 6; i++) this._noise(t + i * 0.05 + Math.random() * 0.04, 0.12, "bandpass", 1400 + Math.random() * 1600, 500, 0.45 * vol);
+      this._noise(t, 0.5, "lowpass", 900, 120, 0.6 * vol);
+    });
+  }
+
+  /** Generated loop buffers: "buzz" is mains hum with crackle (live wires). */
+  _synthBuffer(name) {
+    if (this._synth[name] || !this.ctx) return this._synth[name] ?? null;
+    const ctx = this.ctx, sr = ctx.sampleRate, n = Math.floor(sr * 2);
+    const buf = ctx.createBuffer(1, n, sr), d = buf.getChannelData(0);
+    if (name === "buzz") {
+      for (let i = 0; i < n; i++) {
+        const tt = i / sr;
+        const hum = Math.sin(2 * Math.PI * 50 * tt) * 0.35 + Math.sin(2 * Math.PI * 100 * tt) * 0.25 + Math.sin(2 * Math.PI * 150 * tt) * 0.12;
+        const crackle = Math.random() < 0.0016 ? (Math.random() * 2 - 1) * 2.5 : 0;
+        d[i] = Math.tanh(hum * 1.6 + crackle + (Math.random() * 2 - 1) * 0.05);
+      }
+    }
+    return this._synth[name] = buf;
   }
 
   /**
@@ -1048,13 +1233,25 @@ export class Sfx {
    * is (null = you're driving it). tone: pitch scale (1 the rickshaw's
    * two-stroke, ~0.7 a jeep's diesel). Cheap to call every frame.
    */
-  setRickshaw(vol, rpm, at = null, tone = 1) {
+  setRickshaw(vol, rpm, at = null, tone = 1, kind = "rickshaw") {
     if (!this.ctx) return;
     if (!this.engine) {
       if (vol <= 0) return;
       this._startEngine();
     }
     const e = this.engine, l = e.last, t = this.ctx.currentTime;
+    const P = ENGINE[kind] ?? ENGINE.rickshaw;
+    if (P !== e.profile) {
+      // Another kind of engine: its own wave, beat and filter
+      e.profile = P;
+      e.osc.type = P.wave;
+      e.lp.Q.setTargetAtTime(P.q, t, 0.1);
+      e.raspGain.gain.setTargetAtTime(P.rasp, t, 0.1);
+      l.rpm = -1;
+    }
+    // A turbo / intake whine that only comes in high in the revs (the Thar, the sports bike)
+    e.whine.frequency.setTargetAtTime(P.whine * (0.6 + rpm * 0.9), t, 0.1);
+    e.whineGain.gain.setTargetAtTime(P.whine ? vol * Math.max(0, rpm - 0.45) * 0.05 : 0, t, 0.15);
     const p = at ?? this.listener;
     if (e.panner.positionX) {
       e.panner.positionX.setTargetAtTime(p.x, t, 0.05);
@@ -1068,9 +1265,9 @@ export class Sfx {
     if (q(rpm) !== l.rpm || tone !== l.tone) {
       l.rpm = q(rpm);
       l.tone = tone;
-      e.osc.frequency.setTargetAtTime((38 + l.rpm * 70) * tone, t, 0.12);
-      e.pulse.frequency.setTargetAtTime((19 + l.rpm * 35) * tone, t, 0.12);
-      e.lp.frequency.setTargetAtTime((450 + l.rpm * 900) * tone, t, 0.12);
+      e.osc.frequency.setTargetAtTime((P.base + l.rpm * P.span) * tone, t, 0.12);
+      e.pulse.frequency.setTargetAtTime((P.base + l.rpm * P.span) * P.beat * tone, t, 0.12);
+      e.lp.frequency.setTargetAtTime((P.lp + l.rpm * P.lpSpan) * tone, t, 0.12);
     }
   }
 

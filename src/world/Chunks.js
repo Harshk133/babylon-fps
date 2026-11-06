@@ -77,9 +77,12 @@ export function splitInstanced(mesh, cell = 120) {
   const out = [];
   for (const list of groups.values()) {
     const m = new THREE.InstancedMesh(mesh.geometry, mesh.material, list.length);
+    // Where each original instance went (so a pole that falls can be hidden in its cell's mesh)
+    mesh.userData.splitTo ??= [];
     list.forEach((src, i) => {
       mesh.getMatrixAt(src, _m);
       m.setMatrixAt(i, _m);
+      mesh.userData.splitTo[src] = [m, i];
       if (mesh.instanceColor) { mesh.getColorAt(src, _c); m.setColorAt(i, _c); }
     });
     m.castShadow = mesh.castShadow;

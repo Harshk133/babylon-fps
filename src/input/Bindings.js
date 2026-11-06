@@ -25,6 +25,7 @@ export const ACTIONS = [
   { id: "cycleThrow", label: "Switch throwable",            key: "KeyQ",      group: "Combat" },
   { id: "heal",     label: "Heal (medkit / biscuit)",       key: "KeyH",      group: "Combat" },
   { id: "torch",    label: "Flashlight",                    key: "KeyN",      group: "Combat" },
+  { id: "grapple",  label: "Rope gun (fire / let go)",      key: "KeyU",      group: "Movement" },
   // Interact
   { id: "interact", label: "Pick up",                       key: "KeyE",      group: "Interact" },
   { id: "use",      label: "Doors, gates / kick a crate",   key: "KeyF",      group: "Interact" },

@@ -198,6 +198,7 @@ export class LootScreen {
     for (const [k, n] of Object.entries(inv.bag)) {
       if (n > 0) groups.Attachments.push(this._row({ src: `data-src="bag" data-kind="${k}"`, kind: k, name: ITEMS[k].name, sub: ATTACH_SLOT_NAMES[ATTACHMENTS[k].slot], qty: n > 1 ? `×${n}` : "" }));
     }
+    if (inv.grapples) groups.Utility.push(this._row({ src: `data-src="bag" data-kind="grapple"`, kind: "grapple", name: ITEMS.grapple.name, sub: "Aim and fire to reel yourself up", qty: "" }));
     if (inv.toolkits) groups.Utility.push(this._row({ src: `data-src="bag" data-kind="toolkit"`, kind: "toolkit", name: ITEMS.toolkit.name, sub: "K next to a vehicle", qty: `×${inv.toolkits}` }));
     if (inv.fuelCans) groups.Utility.push(this._row({ src: `data-src="bag" data-kind="fuel"`, kind: "fuel", name: ITEMS.fuel.name, sub: "T next to a vehicle", qty: `×${inv.fuelCans}` }));
 

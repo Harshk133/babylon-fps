@@ -70,6 +70,16 @@ export const CREDIT_GROUPS = [
     ],
   },
   {
+    title: "Ground textures · Poly Haven",
+    note: "Public domain (CC0) PBR textures from Poly Haven. Resized, re-encoded as WebP and their normal maps packed two to a texture for the game.",
+    items: [
+      { what: "Aerial Grass Rock", who: "Poly Haven", licence: "CC0 1.0", url: "https://polyhaven.com/a/aerial_grass_rock" },
+      { what: "Red Laterite Soil Stones", who: "Poly Haven", licence: "CC0 1.0", url: "https://polyhaven.com/a/red_laterite_soil_stones" },
+      { what: "Rocky Terrain 02", who: "Poly Haven", licence: "CC0 1.0", url: "https://polyhaven.com/a/rocky_terrain_02" },
+      { what: "Aerial Beach 01", who: "Poly Haven", licence: "CC0 1.0", url: "https://polyhaven.com/a/aerial_beach_01" },
+    ],
+  },
+  {
     title: "Kits, icons & fonts",
     items: [
       { what: "Building Kit, Furniture Kit (houses)", who: "Kenney", licence: "CC0 1.0", url: "https://kenney.nl/assets" },
@@ -80,7 +90,7 @@ export const CREDIT_GROUPS = [
   },
   {
     title: "Sound",
-    note: "Every recording is public domain. The clips were cut, layered, levelled and converted for the game. Rain, wind, engines and interface sounds are synthesized in code.",
+    note: "Every recording is public domain. The clips were cut, layered, levelled and converted for the game. The horror score, engines, tyre skids, brakes, wind, heartbeat, breathing, electric buzz, rain and interface sounds are synthesized live in code (made for the game).",
     items: [
       { what: "The Free Firearm Sound Library", who: "Ben Jaszczak, Brian Nelson, Kevin Heras, Matthew Nanney", licence: "CC0 1.0", url: "https://opengameart.org/content/the-free-firearm-sound-library" },
       { what: "Gun reload sounds", who: "SpringySpringo", licence: "CC0 1.0", url: "https://opengameart.org/content/gun-reload-sounds" },
@@ -126,5 +136,11 @@ export const DISCLAIMER = [
   { heading: "No real-money play", text: "There is no real-money purchase, betting or gambling in the game. Shops, bounties, crates and loot use in-game money and items only." },
   { heading: "Third-party content", text: "The game uses models, sounds, icons, fonts and software made by other people under the licences listed in Credits. Their authors keep all rights in their work. Changes made for the game are noted there. Listing an author does not mean they endorse this game." },
   { heading: "Content", text: "Contains fantasy violence against monsters and, in Battle Royale, other players, including unarmed kicks and punches, bounties on players and players returning as revenants. It's a game: nothing in it is meant to promote violence in real life." },
+  { heading: "Photosensitivity warning", text: "A small number of people may have seizures when exposed to flashing lights or patterns. This game has flashes (gunfire, explosions, lightning, electric sparks, screen effects) and fast motion. If you or anyone in your family has epilepsy, talk to a doctor before playing, and stop at once if you feel dizzy, see altered vision, twitch or feel disoriented." },
+  { heading: "Play responsibly", text: "Take breaks. Keep the volume at a safe level, especially with headphones. Don't play while driving or when you need to be aware of your surroundings." },
+  { heading: "Privacy", text: "The game has no accounts and asks for no personal information. Your settings, progress, look and keys stay in your own browser (local storage). In multiplayer, the callsign you choose, your position and actions in the game, and your chat messages are relayed to the other players in your room and are not stored by the game after you leave. Don't share personal information in your callsign or the chat. The web host and relay server may keep standard technical logs (such as IP addresses) as all websites do." },
+  { heading: "Chat and other players", text: "Chat and callsigns are written by players, not by the developer, who doesn't monitor them and isn't responsible for them. Be respectful: no harassment, hate, threats, spam or illegal content. Leave a room if anyone makes you uncomfortable." },
+  { heading: "Bots", text: "Battle royale rooms can be filled with computer-controlled players (bots) when that setting is on. They have player-like names and may chat; they are not real people." },
+  { heading: "No warranty", text: "The game is provided \"as is\", free of charge, without warranty of any kind. The developer is not liable for any loss or damage arising from playing it, to the extent the law allows." },
   { heading: "Rights holders", text: "If you believe something in this game uses your work without permission, contact the developer and it will be reviewed and, where appropriate, credited properly or removed." },
 ];

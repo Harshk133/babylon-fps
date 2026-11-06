@@ -1,4 +1,4 @@
-import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, FUEL_CAN, TOOLKIT, BISCUIT, GEAR } from "../combat/weapons.js";
+import { WEAPONS, WEAPON_ORDER, THROWABLES, THROWABLE_ORDER, FUEL_CAN, TOOLKIT, GRAPPLE, BISCUIT, GEAR } from "../combat/weapons.js";
 
 import { fmtMoney } from "../economy/Currency.js";
 
@@ -118,6 +118,15 @@ export class InventoryUI {
     kit.append(kitIcon, kitCount, this.kbd.repair = el("kbd", "hb-kbd", "K"));
     itemsRow.append(kit);
     this.kitSlot = { slot: kit, count: kitCount, cache: {} };
+    const rope = el("div", "hb-tslot hb-fuel");
+    rope.dataset.hb = "grapple";
+    const ropeIcon = el("img", "hb-ticon");
+    ropeIcon.src = this.icons.grapple;
+    ropeIcon.alt = GRAPPLE.name;
+    const ropeCount = el("span", "hb-count", "");
+    rope.append(ropeIcon, ropeCount, this.kbd.grapple = el("kbd", "hb-kbd", "U"));
+    itemsRow.append(rope);
+    this.ropeSlot = { slot: rope, cache: {} };
 
     const hints = el("div", "hb-hints no-throw");
     hints.innerHTML = `<span class="hb-hint-throw"><kbd>G</kbd> throw <kbd>Q</kbd> switch </span><kbd>Tab</kbd> inventory`;
@@ -173,6 +182,7 @@ export class InventoryUI {
     setClass(this.fuelSlot.slot, this.fuelSlot.cache, "empty", "empty", inv.fuelCans === 0);
     setText(this.kitSlot.count, this.kitSlot.cache, "n", `${inv.toolkits}`);
     setClass(this.kitSlot.slot, this.kitSlot.cache, "empty", "empty", inv.toolkits === 0);
+    setClass(this.ropeSlot.slot, this.ropeSlot.cache, "empty", "empty", !inv.grapples);
 
   }
 

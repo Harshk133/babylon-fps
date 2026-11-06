@@ -244,6 +244,9 @@ export class Crates {
     return out;
   }
 
+  /** Planks flying from a point (a smashed stall uses it too): { x, y, z } is the base. */
+  burstAt(at, dx = 0, dz = 0) { this._burst(at, dx, dz); }
+
   _burst(c, dx, dz) {
     const l = Math.hypot(dx, dz);
     const ux = l > 1e-4 ? dx / l : 0, uz = l > 1e-4 ? dz / l : 0;

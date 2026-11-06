@@ -39,6 +39,9 @@ import { Farmland, layoutFields } from "./world/Farmland.js";
 import { buildSea, buildBoats, waterUniforms } from "./world/Water.js";
 import { DustFX, DUST } from "./vehicles/DustFX.js";
 import { CrashFX, CRASH_KIND } from "./vehicles/CrashFX.js";
+import { SkidMarks } from "./vehicles/SkidMarks.js";
+import { PowerLines } from "./world/PowerLines.js";
+import { HorrorScore } from "./audio/HorrorScore.js";
 import { City } from "./world/City.js";
 import { Plots } from "./world/Plots.js";
 import { WorldChunks, splitInstanced } from "./world/Chunks.js";
@@ -77,7 +80,7 @@ import {
 import { ENEMY_GUNS, getLevel } from "./zombies/MonsterTypes.js";
 import {
   WEAPONS, WEAPON_ORDER, HEAD_HEIGHT, GRENADE, MOLOTOV, MEDKIT, BISCUIT, CASH, THROWABLES, THROWABLE_ORDER,
-  SMOKE, SMOKE_COLORS, GEAR, ATTACHMENTS, HELMET_MONSTER_SHARE, VEST_BLAST_SHARE, TOOLKIT,
+  SMOKE, SMOKE_COLORS, GEAR, ATTACHMENTS, HELMET_MONSTER_SHARE, VEST_BLAST_SHARE, TOOLKIT, GRAPPLE,
 } from "./combat/weapons.js";
 import { weaponStats } from "./items/ItemDefs.js";
 import { LootActions } from "./inventory/LootActions.js";
@@ -351,7 +354,11 @@ function armorAbsorb(amount, kind) {
   return Math.max(0, amount - Math.min(stopped, amount * 0.75));
 }
 
+// Zombie modes: health doesn't come back by itself any more (medkits, biscuits and
+// kill-streak heals only), so every hit counts. Flip this to bring the regen back.
+const PASSIVE_REGEN = false;
 function regenPlayerHealth(amount) {
+  if (!PASSIVE_REGEN) return;
   if (playerHealth > 0 && playerHealth < MAX_HEALTH && timeSinceHit > REGEN_DELAY) {
     playerHealth = Math.min(MAX_HEALTH, playerHealth + amount);
   }
@@ -723,6 +730,8 @@ function syncPostSize() {
 const effects = new Effects(scene);
 // Blood drops land on the terrain, or on the asphalt (drawn up to 10 cm over the levelled ground)
 effects.groundAt = (x, z) => groundHeight(x, z) + (roads && roads.distance(x, z) < ROAD_HALF ? 0.11 : 0);
+// Tyre marks lie on the same surface (the asphalt sits a little above the terrain)
+const skidMarks = new SkidMarks(scene, (x, z) => effects.groundAt(x, z));
 const screenBlood = new ScreenBlood();             // aqua drops on the screen when you're hit
 const _bleedAt = new THREE.Vector3();
 // HRTF 3D audio on desktop (headphones hear left / right / behind); phones pan cheaper.
@@ -857,40 +866,110 @@ function addCapsuleToBody(body, radius, height) {
 
 // ─── Ground ───────────────────────────────────────────────────────────────────
 const textureLoader = new THREE.TextureLoader();
-// Prefer the downsized copy from `npm run optimize-assets`, fall back to the original
-const grassTexture  = textureLoader.load("/texture/grass2.opt.jpg", undefined, undefined, () => {
-  textureLoader.load("/texture/grass2.jpg", img => { grassTexture.image = img.image; grassTexture.needsUpdate = true; });
-});
-grassTexture.wrapS = THREE.RepeatWrapping;
-grassTexture.wrapT = THREE.RepeatWrapping;
-// The terrain's UVs are world metres / 2, so the texture tiles every 2 m
-grassTexture.colorSpace  = THREE.SRGBColorSpace;
-grassTexture.anisotropy  = Math.min(renderer.capabilities.getMaxAnisotropy(), QUALITY.anisotropy);
-grassTexture.minFilter   = THREE.LinearMipmapLinearFilter;
-grassTexture.magFilter   = THREE.LinearFilter;
-grassTexture.generateMipmaps = true;
 
+// ── Ground: four Poly Haven (CC0) surfaces blended per pixel ─────────────────
+// grass (aerial_grass_rock), earth (red_laterite_soil_stones, the Deccan's red
+// soil), rock (rocky_terrain_02) and sand (aerial_beach_01): colour 1024²,
+// normals packed two to a texture (scripts/build-ground-textures.mjs).
+// Weights per pixel: rock on steep slopes; sand where the terrain's vertex
+// colour is the bright beach tint near the sea; earth wherever it leans brown
+// (fields, road shoulders, river mud, dry patches: the same signal the old
+// shader used) plus scattered dry patches from a large-scale noise; grass for
+// the rest. Each layer is sampled at two scales and blended with that noise
+// so the tiling doesn't show; the normals are applied in world space (the
+// terrain is mostly flat-ish), and Low skips the second scale and the normals.
+const GROUND_DIR = "/texture/ground/";
+const GROUND_FULL = QUALITY_NAME !== "low";
+function groundTex(name, srgb) {
+  const t = textureLoader.load(`${GROUND_DIR}${name}.webp`);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  t.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), QUALITY.anisotropy);
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  return t;
+}
+const groundMaps = {
+  grass: groundTex("grass", true), earth: groundTex("earth", true), rock: groundTex("rock", true), sand: groundTex("sand", true),
+  na: GROUND_FULL ? groundTex("normals_a", false) : null, nb: GROUND_FULL ? groundTex("normals_b", false) : null,
+};
 const planeMaterial = new THREE.MeshStandardMaterial({
-  map: grassTexture, roughness: 0.95, metalness: 0.02,
+  map: groundMaps.grass, roughness: 0.95, metalness: 0.02,
   polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
 });
-// Bare ground: where the terrain's vertex colour leans brown (red over green:
-// field soil, dirt shoulders, river mud, sand, dry patches) the grass
-// texture loses its green and keeps only its detail, at about the grass's
-// brightness, so the tint reads as earth instead of olive grass.
 planeMaterial.onBeforeCompile = shader => {
-  shader.fragmentShader = shader.fragmentShader.replace("#include <map_fragment>", `
-    #ifdef USE_MAP
-      vec4 sampledDiffuseColor = texture2D( map, vMapUv );
-      #ifdef USE_COLOR
-        float bare = smoothstep( 0.015, 0.11, ( vColor.r - vColor.g ) / max( vColor.r, 0.05 ) );
-        float lum = dot( sampledDiffuseColor.rgb, vec3( 0.3, 0.59, 0.11 ) );
-        sampledDiffuseColor.rgb = mix( sampledDiffuseColor.rgb, vec3( lum * 1.8 ), bare );
+  shader.uniforms.tEarth = { value: groundMaps.earth };
+  shader.uniforms.tRock = { value: groundMaps.rock };
+  shader.uniforms.tSand = { value: groundMaps.sand };
+  if (GROUND_FULL) { shader.uniforms.tNa = { value: groundMaps.na }; shader.uniforms.tNb = { value: groundMaps.nb }; }
+  shader.vertexShader = shader.vertexShader
+    .replace("#include <common>", "#include <common>\nvarying vec3 vGWorld;\nvarying vec3 vGNormal;")
+    .replace("#include <worldpos_vertex>", "#include <worldpos_vertex>\nvGWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvGNormal = normalize(mat3(modelMatrix) * objectNormal);");
+  shader.fragmentShader = shader.fragmentShader
+    .replace("#include <common>", `#include <common>
+      ${GROUND_FULL ? "#define GROUND_FULL" : ""}
+      varying vec3 vGWorld;
+      varying vec3 vGNormal;
+      uniform sampler2D tEarth, tRock, tSand;
+      #ifdef GROUND_FULL
+        uniform sampler2D tNa, tNb;
       #endif
-      diffuseColor *= sampledDiffuseColor;
-    #endif`);
+      vec4 gW;   // weights: grass, earth, rock, sand
+      float gHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float gNoise(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(gHash(i), gHash(i + vec2(1, 0)), f.x), mix(gHash(i + vec2(0, 1)), gHash(i + vec2(1, 1)), f.x), f.y);
+      }
+      // One layer at two scales (rotated against each other), mixed by a slow noise: no visible tiling
+      vec3 gLayer(sampler2D t, vec2 p, float s, float macro) {
+        vec3 a = texture2D(t, p * s).rgb;
+        #ifdef GROUND_FULL
+          vec2 q = mat2(0.8, -0.6, 0.6, 0.8) * p * s * 0.27 + 0.37;
+          a = mix(a, texture2D(t, q).rgb, 0.25 + 0.3 * macro);
+        #endif
+        return a;
+      }`)
+    // The vertex colour is a signal here (what kind of ground), and only a light tint
+    .replace("#include <color_fragment>", "")
+    .replace("#include <map_fragment>", `
+      vec2 gp = vGWorld.xz;
+      float macro = gNoise(gp * 0.045) * 0.65 + gNoise(gp * 0.17) * 0.35;
+      float slope = 1.0 - clamp(vGNormal.y, 0.0, 1.0);
+      #ifdef USE_COLOR
+        float bare = smoothstep(0.015, 0.11, (vColor.r - vColor.g) / max(vColor.r, 0.05));
+        float vlum = dot(vColor.rgb, vec3(0.3, 0.59, 0.11));
+      #else
+        float bare = 0.0, vlum = 1.0;
+      #endif
+      float rockW = smoothstep(0.2, 0.36, slope + (macro - 0.5) * 0.08);
+      float sandW = bare * smoothstep(0.62, 0.78, vlum) * (1.0 - smoothstep(${(SEA_Y + 2.5).toFixed(2)}, ${(SEA_Y + 4.5).toFixed(2)}, vGWorld.y));
+      float earthW = max(bare * (1.0 - sandW), smoothstep(0.66, 0.82, macro) * 0.55);
+      gW = vec4(1.0, earthW, rockW, sandW);
+      vec3 g = gLayer(map, gp, 0.29, macro);
+      vec3 e = gLayer(tEarth, gp, 0.24, macro);
+      vec3 r = gLayer(tRock, gp, 0.16, macro);
+      vec3 s = gLayer(tSand, gp, 0.2, macro);
+      // Grass: a little greener in hollows, yellower on dry crowns
+      g *= mix(vec3(0.92, 1.03, 0.9), vec3(1.08, 1.0, 0.82), macro);
+      vec3 col = mix(g, e, earthW);
+      col = mix(col, s, sandW);
+      col = mix(col, r, rockW);
+      // Height shading and hue from the vertex colour, lightly
+      col *= 0.72 + 0.34 * vlum;
+      diffuseColor.rgb *= col;`)
+    .replace("#include <roughnessmap_fragment>", "#include <roughnessmap_fragment>\nroughnessFactor *= mix(1.0, 0.82, gW.z) * mix(1.0, 0.9, gW.w);")
+    .replace("#include <normal_fragment_maps>", `#include <normal_fragment_maps>
+      #ifdef GROUND_FULL
+        vec4 na = texture2D(tNa, vGWorld.xz * 0.29), nb = texture2D(tNb, vGWorld.xz * 0.16);
+        vec2 ng = na.rg * 2.0 - 1.0, ne = na.ba * 2.0 - 1.0, nr = nb.rg * 2.0 - 1.0, ns = nb.ba * 2.0 - 1.0;
+        vec2 nxy = mix(mix(mix(ng, ne, gW.y), ns, gW.w), nr, gW.z);
+        // Normal map XY across the ground (X east-west, Y north-south), in world space
+        vec3 wn = normalize(vGNormal + vec3(nxy.x, 0.0, -nxy.y) * 0.75);
+        normal = normalize((viewMatrix * vec4(wn, 0.0)).xyz);
+      #endif`);
 };
-planeMaterial.customProgramCacheKey = () => "ground-bare";
+planeMaterial.customProgramCacheKey = () => `ground-pbr-${GROUND_FULL ? "full" : "lite"}`;
 
 // The rolling heightmap ground (world/Terrain.js) is built in loadWorld(),
 // once the houses are placed, because it flattens itself under them. This
@@ -1222,6 +1301,7 @@ function setKey(code, pressed, repeat) {
       case "pillionBack": pillionKey(-1); break;
       case "refuel": refuelVehicle(); break;
       case "repair": if (repair.on) stopRepair("Repair cancelled"); else startRepair(); break;
+      case "grapple": fireGrapple(); break;
     }
   } else if (act === "throw") {
     releaseThrow();
@@ -1337,6 +1417,7 @@ const touch = IS_TOUCH ? new TouchControls({
     else if (hb === "biscuit") useHeal("biscuit");
     else if (hb === "fuel") refuelVehicle();
     else if (hb === "toolkit") startRepair();
+    else if (hb === "grapple") fireGrapple();
   },
   pause: () => releaseLock(),
   unlock: () => sfx.unlock(),
@@ -1605,7 +1686,7 @@ function resetStamina() {
 const fall = { speed: 0, wasGround: true, exempt: false };
 /** After the physics step: landing hard hurts (not into deep water, on a vehicle or under a chute). */
 function updateFallDamage() {
-  if (drive.on || ride.on || brAirborne() || playerHealth <= 0) {
+  if (drive.on || ride.on || brAirborne() || playerHealth <= 0 || rope.on) {
     fall.speed = 0;
     fall.exempt = true;
     fall.wasGround = onGround;
@@ -1829,6 +1910,7 @@ function updateSunShadow() {
 const _torchAim = new THREE.Vector3();
 let stingerTimer = 25;
 let heartTimer = 0;
+let breathTimer = 0;
 let wetness = 0;
 let indoor = false;
 let caveDepth = 0;        // camera underground: 0 … 1 (eased)
@@ -1985,16 +2067,68 @@ function updateMood(delta) {
     stingerTimer = 18 + Math.random() * 30;
     if (env.darkness > 0.6 && playerHealth > 0) sfx.stinger();
   }
-  // Heartbeat when hurt
-  if (playerHealth > 0 && playerHealth < 35) {
+  // Hurt: a heavy heartbeat that quickens, and ragged breathing under it
+  if (playerHealth > 0 && playerHealth < 40) {
+    const hurt = (40 - playerHealth) / 40;   // 0 .. 1
     heartTimer -= delta;
     if (heartTimer <= 0) {
-      heartTimer = 0.55 + playerHealth / 60;
-      sfx.heartbeat(0.25 + (35 - playerHealth) / 70);
+      heartTimer = 0.95 - hurt * 0.5;
+      sfx.heartbeatHeavy(0.3 + hurt * 0.5);
     }
+    breathTimer -= delta;
+    if (breathTimer <= 0) {
+      breathTimer = 2.4 - hurt * 1.1;
+      sfx.breath(0.35 + hurt * 0.6, 1 + hurt * 0.6);
+    }
+  } else if (sprinting && stamina < 25) {
+    // Out of breath after a long sprint
+    breathTimer -= delta;
+    if (breathTimer <= 0) { breathTimer = 1.3; sfx.breath(0.3, 1.5); }
+  }
+  // The horror score (zombie modes, Settings → horror music): tighter while things hunt you
+  horrorScore.setActive(settings.get("music") && settings.get("sound") && !isBR() && !lobby?.open && playerHealth > 0);
+  if (horrorScore.active) {
+    const chase = zombieManager ? Math.min(1, zombieManager.chasingCount / 5) : 0;
+    horrorScore.setIntensity(chase * 0.7 + env.darkness * 0.2 + (playerHealth < 40 ? 0.25 : 0));
+    horrorScore.update();
   }
   gameHud.setWorld(env.timeLabel, env.phase, weather.label, torch.on, env.bloodMoon && env.darkness > 0.6);
   gameHud.setDarkness(env.darkness);
+}
+
+// ── Driving feel: tyres, brakes, wind and speed ──────────────────────────────
+// Tyres squeal (scrub on dirt) when they slide or lock up, big vehicles hiss
+// their brakes when they stop hard, and past ~half speed the wind roars, the
+// FOV opens up, the screen streaks (the freefall zoom blur) and the camera
+// trembles: the faster, the more.
+let driveThrill = 0;         // 0..1, smoothed
+let _brakeFrom = 0;          // speed when a hard stop began
+let _feelT = 0;
+const _skidAt = { x: 0, y: 0, z: 0 };
+function updateDriveFeel(car) {
+  const now = performance.now(), dt = Math.min(0.05, (now - (_feelT || now)) / 1000); _feelT = now;
+  let skid = 0, dirt = false;
+  if (car && car.driver !== null && !car.wrecked) {
+    const v = Math.abs(car.speed);
+    const braking = drive.car === car && v > 4 && ((keys.backward && car.speed > 0) || (keys.forward && car.speed < 0) || keys.jump);
+    skid = Math.min(1, car.skid / 3.5 + (braking ? Math.min(1, v / 14) * 0.7 : 0));
+    const surf = surfaceAt(car.x, car.z);
+    dirt = surf.grip < 0.85;
+    _skidAt.x = car.x; _skidAt.y = groundHeight(car.x, car.z) + 0.3; _skidAt.z = car.z;
+    if (skid > 0.25 && !car.spec.bike) skidMarks.mark(car, skid);
+    else skidMarks.lift(car);
+    // A hard stop: big vehicles let their air brakes go
+    if (braking && v > 7) _brakeFrom = Math.max(_brakeFrom, v);
+    else if (v < 1.2 && _brakeFrom > 7) {
+      if (car.kind === "tractor" || car.kind === "thar") sfx.brakeHiss(drive.car === car ? null : _skidAt);
+      _brakeFrom = 0;
+    } else if (!braking) _brakeFrom = Math.max(0, _brakeFrom - dt * 4);
+  }
+  sfx.setSkid(skid, drive.car === car ? null : _skidAt, car?.kind, dirt);
+  // Speed: how far into the top half of its range you are
+  const sp = drive.on ? THREE.MathUtils.smoothstep(Math.abs(drive.car.speed) / drive.car.spec.maxSpeed, 0.45, 1) : 0;
+  driveThrill += (sp - driveThrill) * (1 - Math.exp(-3 * dt));
+  sfx.setSpeedRush(driveThrill);
 }
 
 function rigValue(key) {
@@ -2106,8 +2240,14 @@ function placeCamera(yaw, rawPitch, delta) {
     camera.rotation.x += Math.sin(t * 0.9 + 1.7) * 0.025 * s;
     camera.rotation.y += Math.sin(t * 1.1 + 4.2) * 0.025 * s;
   }
+  // Road rumble at speed
+  if (driveThrill > 0.02) {
+    const t = clock.elapsedTime * 52;
+    camera.rotation.z += Math.sin(t * 1.7) * 0.0035 * driveThrill;
+    camera.rotation.x += Math.sin(t * 2.3 + 1.1) * 0.0028 * driveThrill;
+  }
 
-  const fov = rigValue("fov");
+  const fov = rigValue("fov") + driveThrill * 13;   // the world rushes at you when you go fast
   const near = fpBlend > 0.3 ? FP_NEAR : TP_NEAR;
   if (Math.abs(camera.fov - fov) > 0.01 || camera.near !== near) {
     camera.fov = fov;
@@ -2691,7 +2831,7 @@ function updatePickups(delta) {
     if (nearSwitch) addPrompt("light", nearSwitch.lightOn ? "Lights off" : "Lights on", "Switch", "bulb");
     nearShop = null;
     if (!drive.on) {
-      for (const s of shops) if (Math.hypot(s.front.x - p.x, s.front.z - p.z) < SHOP_RANGE) { nearShop = s; break; }
+      for (const s of shops) if (!s.broken && Math.hypot(s.front.x - p.x, s.front.z - p.z) < SHOP_RANGE) { nearShop = s; break; }
     }
     if (nearShop) addPrompt("shop", "Open shop", `Dukaan · ${fmtMoney(inventory.cash)}`, "shop");
     const car = drive.car ?? ride.car ?? nearestVehicle();
@@ -2758,7 +2898,7 @@ const _crateP = new THREE.Vector3();
 
 // Two or three things per crate: mostly supplies, now and then gear or a gun
 const CRATE_LOOT = [
-  ["ammo", 26], ["medkit", 8], ["biscuit", 12], ["grenade", 7], ["molotov", 5], ["cash", 10], ["fuel", 3], ["toolkit", 4],
+  ["ammo", 26], ["medkit", 8], ["biscuit", 12], ["grenade", 7], ["molotov", 5], ["cash", 10], ["fuel", 3], ["toolkit", 4], ["grapple", 1.2],
   ["helmet1", 4], ["vest1", 4], ["backpack1", 3], ["helmet2", 1.5], ["vest2", 1.5], ["backpack2", 1],
   ["reddot", 3], ["holo", 2], ["scope2x", 3], ["scope4x", 1.5], ["extmag", 3], ["grip", 2], ["compensator", 2], ["suppressor", 1],
   ["smg", 2.5], ["shotgun", 2.5], ["rifle", 1.5], ["sniper", 0.6],
@@ -2794,6 +2934,8 @@ function updateMelee(delta) {
     damageCrate(c.i, melee.move.dmg, melee.dx, melee.dz, melee.move.noise);
   }
   crateRespawns(delta);
+  stallRespawns(delta);
+  powerLines?.update(delta);
 }
 
 /** A blow, a bullet or a blast on crate i, from the direction (dx, dz). */
@@ -2839,6 +2981,84 @@ function spawnCrateLoot(c) {
 }
 
 /** The host (or a solo game) puts broken crates back after a while, out of sight. */
+// ── Wreckage: poles and stalls a vehicle runs into ───────────────────────────
+// Into a power pole at POLE_BREAK_SPEED or more: it snaps and topples away from
+// the hit (world/PowerLines.js), the wires come down live and shock anyone in
+// them. Into a dukaan at STALL_BREAK_SPEED: it bursts into planks and spills a
+// couple of things. Both are shared (pole { i, dx, dz }, stall { i }); the
+// battle royale stands them up again each match, a stall comes back after
+// STALL_RESPAWN s in the zombie modes.
+const POLE_BREAK_SPEED = 8;     // m/s into it
+const STALL_BREAK_SPEED = 6;
+const STALL_RESPAWN = 240;
+const SHOCK_DAMAGE = 7;         // per jolt (every SHOCK_EVERY s while you stand in it): ~12 HP/s, and each one throws you back
+const SHOCK_EVERY = 0.55;
+let shockT = 0, monsterShockT = 0;
+
+function knockPole(pole, dx, dz, car = null) {
+  if (!powerLines?.knock(pole, dx, dz)) return;
+  if (car) car.speed *= 0.55;   // it gave, but it took a lot out of you
+  net.send({ t: "pole", i: pole.index, dx: +dx.toFixed(2), dz: +dz.toFixed(2) });
+  makeNoise(pole.x, pole.z, 30, "explosion");
+}
+
+function smashStall(s, dx, dz, car = null) {
+  if (!shops.smash?.(s.index, performance.now() / 1000)) return;
+  if (car) car.speed *= 0.7;
+  stallFx(s, dx, dz);
+  net.send({ t: "stall", i: s.index, dx: +dx.toFixed(2), dz: +dz.toFixed(2) });
+  // What was on the counter goes flying
+  for (const kind of ["biscuit", Math.random() < 0.5 ? "cash" : "fuel"]) {
+    const a = Math.random() * Math.PI * 2;
+    const x = s.x + Math.cos(a) * 1.4, z = s.z + Math.sin(a) * 1.4;
+    if (net.inRoom) spawnShared(kind, x, z, pickupData(kind), groundHeight(x, z));
+    else pickups.spawn(kind, x, z, pickupData(kind), Infinity, null, groundHeight(x, z));
+  }
+  if (shopUI.open && nearShop === s) setShopOpen(false);
+}
+
+function stallFx(s, dx, dz) {
+  _vehAt.x = s.x; _vehAt.y = s.y + 1; _vehAt.z = s.z;
+  sfx.woodCrash(_vehAt);
+  for (let k = 0; k < 3; k++) crates?.burstAt({ x: s.x + (Math.random() - 0.5) * 1.6, y: s.y + 0.3, z: s.z + (Math.random() - 0.5) * 1.6 }, dx, dz);
+  for (let k = 0; k < 4; k++) effects.impact(_vecA.set(s.x, s.y + 0.8, s.z), dx + Math.random() - 0.5, 0.8, dz + Math.random() - 0.5, "dust", 10);
+  if (Math.hypot(s.x - camera.position.x, s.z - camera.position.z) < 25) cameraTrauma = Math.min(1, cameraTrauma + 0.3);
+}
+
+
+/** Live wires at (x, z): jolts for you (and, on the host, the monsters) while you're in them. */
+function shockAt(x, z, r, dt) {
+  const p = characterBody.position;
+  const inIt = playerHealth > 0 && !drive.on && !ride.on && Math.hypot(p.x - x, p.z - z) < r && p.y - FEET_OFFSET < groundHeight(p.x, p.z) + 0.6;
+  if (inIt && (shockT -= dt) <= 0) {
+    shockT = SHOCK_EVERY;
+    const k = Math.hypot(p.x - x, p.z - z) || 1;
+    dealDamageToPlayer(SHOCK_DAMAGE, (p.x - x) / k * 7, (p.z - z) / k * 7, 0.35, x, z, "raw");
+    sfx.zap(null, 1);
+    postFx.kick(0.18, 0x9fdcff);
+    cameraTrauma = Math.min(1, cameraTrauma + 0.25);
+  }
+  if (net.isClient || !zombieManager || (monsterShockT -= dt) > 0) return;
+  monsterShockT = SHOCK_EVERY;
+  for (const m of zombieManager.active) {
+    if (m.dying || m.def.flying) continue;
+    if (Math.hypot(m.body.position.x - x, m.body.position.z - z) < r) { m.killCause = "blast"; zombieManager.damage(m, SHOCK_DAMAGE * 2.2, 0, 0, null); }
+  }
+}
+
+/** Zombie modes: a smashed stall is rebuilt after a while, when nobody's watching. */
+let stallRespawnT = 0;
+function stallRespawns(delta) {
+  if (isBR() || net.isClient || !shops.restore || (stallRespawnT -= delta) > 0) return;
+  stallRespawnT = 3;
+  const now = performance.now() / 1000, p = characterBody.position;
+  for (const s of shops) {
+    if (!s.broken || now - s.brokenAt < STALL_RESPAWN || Math.hypot(s.x - p.x, s.z - p.z) < 50) continue;
+    shops.restore(s.index);
+    net.send({ t: "stall", i: s.index, r: 1 });
+  }
+}
+
 let crateRespawnT = 0;
 function crateRespawns(delta) {
   if (!crates || isBR() || net.isClient || (crateRespawnT -= delta) > 0) return;
@@ -3015,10 +3235,11 @@ const STARTER_LOOT = [
   ["helmet1", -3.5, 12], ["vest1", 3.5, 12], ["backpack1", 0, 14.5], ["reddot", -1.8, 14], ["grip", 1.8, 14],
   ["fuel", -12, -12], // next to the auto-rickshaw
   ["toolkit", -10.4, -12.6],
+  ["grapple", 4.5, 16.5], // try it on the houses round the spawn
 ];
 const WORLD_LOOT = {
   pistol: 1, smg: 2, shotgun: 3, rifle: 3, sniper: 3,
-  ammo: 14, grenade: 10, molotov: 10, medkit: 8, fuel: 6, toolkit: 5, biscuit: 12, cash: 14,
+  ammo: 14, grenade: 10, molotov: 10, medkit: 8, fuel: 6, toolkit: 5, grapple: 3, biscuit: 12, cash: 14,
   helmet1: 4, helmet2: 2, vest1: 4, vest2: 2, backpack1: 4, backpack2: 2,
   reddot: 3, scope4x: 2, compensator: 2, suppressor: 2, extmag: 3, grip: 2,
   holo: 2, scope2x: 3, scope6x: 1,
@@ -3042,7 +3263,7 @@ function isOpenGround(x, z) {
   return true;
 }
 
-const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag", "biscuit", "cash", "biscuit", "toolkit"];
+const HOUSE_LOOT = ["ammo", "medkit", "grenade", "molotov", "ammo", "shotgun", "helmet1", "vest1", "backpack1", "reddot", "extmag", "biscuit", "cash", "biscuit", "toolkit", "grapple"];
 // The water towers' roofs are a sniper's perch: optics and long guns up there
 const TOWER_LOOT = ["sniper", "scope4x", "ammo", "rifle", "scope6x", "medkit", "ammo", "scope8x", "grenade", "helmet2", "ammo", "biscuit"];
 const CAVE_LOOT = ["rifle", "ammo", "medkit", "sniper", "grenade", "ammo", "molotov", "helmet3", "vest3", "backpack3", "scope4x", "scope6x", "scope8x", "suppressor"];
@@ -3128,6 +3349,7 @@ itemIcons.smoke   = itemIcon("smoke",   { width: 64, height: 64, yaw: 0.4 });
 itemIcons.ammo    = itemIcon("ammo",    { width: 64, height: 64, yaw: 0.6, pitch: 0.35 });
 itemIcons.fuel    = itemIcon("fuel",    { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
 itemIcons.toolkit = itemIcon("toolkit", { width: 64, height: 64, yaw: 0.5, pitch: 0.3 });
+itemIcons.grapple = itemIcon("grapple", { width: 64, height: 64, yaw: 0.5, pitch: 0.3 });
 itemIcons.medkit  = itemIcon("medkit",  { width: 64, height: 64, yaw: 0.5, pitch: 0.2 });
 itemIcons.biscuit = itemIcon("biscuit", { width: 64, height: 64, yaw: 0.5, pitch: 0.35 });
 itemIcons.cash    = itemIcon("cash",    { width: 64, height: 64, yaw: 0.5, pitch: 0.45 });
@@ -3210,6 +3432,8 @@ function updatePostFx(realDt) {
     zone: isBR() && br.outside && playerHealth > 0 ? THREE.MathUtils.clamp(0.55 + br.outsideBy / 40, 0.55, 1) : 0,
     freefall: isBR() && br.flight === PHASE_FALL ? 1 : isBR() && br.flight === PHASE_CHUTE ? 0.25 : 0,
     ...brPostFx(),
+    // Flat out on the road: the freefall's zoom blur and wind streaks, gentler
+    ...(driveThrill > 0.02 ? { fallSpeed: Math.max(brPostFx().fallSpeed, driveThrill * 0.75) } : null),
     // Faster as health drops
     heartbeat: low ? 0.5 + 0.5 * Math.sin(performance.now() / 1000 * (6 + 6 * (1 - playerHealth / (MAX_HEALTH * 0.4)))) : 0,
   });
@@ -3326,7 +3550,7 @@ const lootScreen = new LootScreen({
   actions: lootActions,
   icons: itemIcons,
   cb: {
-    onUse: kind => { if (kind === "medkit" || kind === "biscuit") useHeal(kind); else if (kind === "fuel") refuelVehicle(); else if (kind === "toolkit") startRepair(); },
+    onUse: kind => { if (kind === "medkit" || kind === "biscuit") useHeal(kind); else if (kind === "fuel") refuelVehicle(); else if (kind === "toolkit") startRepair(); else if (kind === "grapple") { setInventoryOpen(false); } },
     onSelectThrowable: kind => { inventory.selectThrowable(kind); sfx.click(); },
   },
 });
@@ -4070,6 +4294,7 @@ let collegeGate = null;    // world/CollegeGate.js, placed in loadWorld()
 let cseBuilding = null;    // world/CseBuilding.js: the CSE department block behind the gate
 let collegeWorkshop = null; // world/CollegeWorkshop.js: the workshop hall, up the North Road
 let crates = null;          // world/Crates.js: breakable wooden crates with loot inside
+let powerLines = null;      // world/PowerLines.js: poles a vehicle knocks down, and the live wires
 let waterTowers = null;    // world/WaterTowers.js: { towers, lootSpots, blocks() }, built in loadWorld()
 let indiaModels = {};      // world/IndiaAssets.js: { rickshaw, thar, truck, … } (null where missing)
 let townLabels = [];       // town names for the world map
@@ -4417,13 +4642,17 @@ async function loadWorld() {
 
   loadMark("· caves built");
   // Power poles along the roads (after the terrain: they stand on it)
-  roads.buildPoles({
+  const poleList = roads.buildPoles({
     scene, world, material: staticMaterial, mapObstacles, groundAt: groundHeight,
     blocked: (x, z) => houses.blocks(x, z, 1.2) || houses.inYard(x, z) || caveBlocks(x, z, 2) || nearGate(x, z, 1)
       || nearParked(x, z, 2) || river.wet(x, z, 3) || farmland.blocks(x, z, 0.5) || city.blocks(x, z, 1) || plots.blocks(x, z, 0.5)
       || DEBRIS_SPOTS.some(([dx, dz]) => Math.hypot(dx - x, dz - z) < 4)
       || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2),
   });
+  if (poleList.length) {
+    powerLines = new PowerLines({ scene, world, poles: poleList, groundAt: groundHeight, effects, lightPool, sfx });
+    powerLines.onShock = shockAt;
+  }
 
   // Big trees stay out of houses (a scattered tree used to land on one)
   const keepClear = (list, pad) => list.filter(({ x, z }) => !houses.blocks(x, z, pad) && !caveBlocks(x, z, pad + 4)
@@ -4918,7 +5147,7 @@ function playerJoined(p) {
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
     if (net.isHost) {
-      net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state }, cse: cseBuilding?.openDoors(), crates: crates?.brokenList() });
+      net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state }, cse: cseBuilding?.openDoors(), crates: crates?.brokenList(), poles: powerLines?.state(), stalls: shops.brokenList?.() });
       brAdmitLate(p);
     }
     return;
@@ -4933,6 +5162,8 @@ function playerJoined(p) {
       gate: collegeGate && { ...collegeGate.state },
       cse: cseBuilding?.openDoors(),
       crates: crates?.brokenList(),
+      poles: powerLines?.state(),
+      stalls: shops.brokenList?.(),
     });
   }
 }
@@ -5249,6 +5480,8 @@ net.on("crate", msg => {
 });
 net.on("world", msg => {
   if (msg.crates) for (const i of msg.crates) crates?.break(i, 0, 0, performance.now() / 1000, false);
+  if (msg.poles) for (const [i, dx, dz] of msg.poles) powerLines?.setDown(i, dx, dz);
+  if (msg.stalls) for (const i of msg.stalls) shops.smash?.(i, performance.now() / 1000);
   if (msg.gate) for (const part of ["gate", "booth"]) collegeGate?.setState(part, msg.gate[part], true);
   if (msg.cse) for (const i of msg.cse) cseBuilding?.setDoor(i, true, true);
   msg.doors.forEach((o, i) => { if (houses.houses[i]) houses.setDoor(houses.houses[i], o); });
@@ -5538,6 +5771,7 @@ function vehicleSpawns(roads) {
 }
 
 let solidKind = 0;
+let solidHit = null;     // the mapObstacles entry a vehicle last ran into (a pole, a stall…)
 /** True if a circle at (x, z) overlaps anything solid on the obstacle list (or the map edge). self: a vehicle to ignore. */
 function solidAt(x, z, r, self = null) {
   const prevKind = solidKind;            // (what it hit, for the crash effects: only ever a real hit)
@@ -5551,7 +5785,7 @@ function solidAt(x, z, r, self = null) {
     const dx = x - o.x, dz = z - o.z;
     if (o.type === "circle") {
       const rr = (o.hit ?? o.r) + r;
-      if (dx * dx + dz * dz < rr * rr) { if (o.hit !== undefined) solidKind = CRASH_KIND.TREE; return true; }
+      if (dx * dx + dz * dz < rr * rr) { if (o.hit !== undefined) solidKind = CRASH_KIND.TREE; solidHit = o; return true; }
       continue;
     }
     if (Math.abs(dx) > o.w + o.d + r || Math.abs(dz) > o.w + o.d + r) continue;
@@ -5559,7 +5793,7 @@ function solidAt(x, z, r, self = null) {
     const c = Math.cos(o.rot), s = Math.sin(o.rot);
     const lx = dx * c - dz * s, lz = dx * s + dz * c;
     const qx = Math.max(Math.abs(lx) - o.w / 2, 0), qz = Math.max(Math.abs(lz) - o.d / 2, 0);
-    if (qx * qx + qz * qz < r * r) return true;
+    if (qx * qx + qz * qz < r * r) { solidHit = o; return true; }
   }
   // Other vehicles: a circle each is plenty for bumping (only checked while driving one)
   if (self) {
@@ -5901,6 +6135,216 @@ function updateMapPrebuild(dt) {
   if (worldMap.prebuild(IS_TOUCH ? 1 : 1.5)) mapPrebuildT = Infinity;
 }
 
+// ─── Rope gun (a grappling hook) ──────────────────────────────────────────────
+// U (rebindable) fires a hook along the crosshair to the first thing within
+// GRAPPLE.range m; it flies out, bites, and reels you in at GRAPPLE.speed m/s,
+// hand over hand (Soldier "grapple" pose), body clear of walls on the way.
+// Onto a roof / the ground: you land on it. Onto a wall: if there's a ledge
+// above (a roof edge, a water tower's rim), you climb over it (the climb clip);
+// if not, you hang a moment and drop. U again, jumping or a vehicle lets go.
+// Teammates see the rope: grap { a: [x, y, z] } / { c: 1 }.
+const rope = {
+  on: false, phase: "", t: 0, cd: 0, hangT: 0,
+  hook: new THREE.Vector3(), anchor: new THREE.Vector3(), normal: new THREE.Vector3(),
+  pos: new THREE.Vector3(), from: new THREE.Vector3(), mid: new THREE.Vector3(), to: new THREE.Vector3(), mantleT: 0,
+};
+const ROPE_MANTLE = 0.85;
+const ropeRayOpts = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
+const _rFrom = new CANNON.Vec3(), _rTo = new CANNON.Vec3(), _rRes = new CANNON.RaycastResult();
+const _ropeDir = new THREE.Vector3(), _ropeHand = new THREE.Vector3(), _ropeT = new THREE.Vector3();
+const ropeMat = new THREE.LineBasicMaterial({ color: 0xcdbb8e });
+function makeRopeLine() {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+  const l = new THREE.Line(g, ropeMat);
+  l.frustumCulled = false;
+  l.visible = false;
+  scene.add(l);
+  return l;
+}
+const ropeLine = makeRopeLine();
+const hookMesh = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.16, 6), new THREE.MeshStandardMaterial({ color: 0x7a7f86, metalness: 0.8, roughness: 0.35 }));
+hookMesh.visible = false;
+scene.add(hookMesh);
+const remoteRopes = new Map();   // player id → { line, anchor, t }
+
+function ropeMoving() { return rope.on && (rope.phase === "pull" || rope.phase === "mantle" || rope.phase === "hang"); }
+
+function setRopeLine(line, a, b) {
+  const arr = line.geometry.attributes.position.array;
+  arr[0] = a.x; arr[1] = a.y; arr[2] = a.z; arr[3] = b.x; arr[4] = b.y; arr[5] = b.z;
+  line.geometry.attributes.position.needsUpdate = true;
+  line.visible = true;
+}
+
+function ropeHand(out) {
+  if (soldier.b?.rHand) return soldier.b.rHand.getWorldPosition(out);
+  return out.set(characterBody.position.x, characterBody.position.y + 0.6, characterBody.position.z);
+}
+
+function fireGrapple() {
+  if (rope.on) { releaseRope(); return; }
+  if (!inventory.grapples) { inventoryUI.feed("No rope gun: find one in houses, crates or supply drops, or buy one at a dukaan", "info", "grapple"); return; }
+  if (rope.cd > 0 || playerHealth <= 0 || drive.on || ride.on || brAirborne() || climb.active || repair.on || swimming) return;
+  camera.getWorldDirection(_ropeDir);
+  // From the camera along the crosshair, starting past your own body
+  const start = camera.position.distanceTo(camPivot) + 0.6;
+  _rFrom.set(camera.position.x + _ropeDir.x * start, camera.position.y + _ropeDir.y * start, camera.position.z + _ropeDir.z * start);
+  _rTo.set(_rFrom.x + _ropeDir.x * GRAPPLE.range, _rFrom.y + _ropeDir.y * GRAPPLE.range, _rFrom.z + _ropeDir.z * GRAPPLE.range);
+  _rRes.reset();
+  rope.cd = GRAPPLE.cooldown;
+  sfx.throwWhoosh();
+  if (!world.raycastClosest(_rFrom, _rTo, ropeRayOpts, _rRes)) {
+    sfx.dryFire();
+    inventoryUI.feed(`Nothing to hook within ${GRAPPLE.range} m`, "info", "grapple");
+    return;
+  }
+  rope.anchor.set(_rRes.hitPointWorld.x, _rRes.hitPointWorld.y, _rRes.hitPointWorld.z);
+  rope.normal.set(_rRes.hitNormalWorld.x, _rRes.hitNormalWorld.y, _rRes.hitNormalWorld.z).normalize();
+  rope.on = true;
+  rope.phase = "fly";
+  rope.t = 0;
+  ropeHand(rope.hook);
+  cancelThrow();
+  input.aim = false;
+  playerAnim.gesture("grapple", 30);
+  sfx.play("pump", { vol: 0.9, rate: 1.3 });
+  net.send({ t: "grap", a: [+rope.anchor.x.toFixed(2), +rope.anchor.y.toFixed(2), +rope.anchor.z.toFixed(2)] });
+}
+
+function releaseRope() {
+  if (!rope.on) return;
+  rope.on = false;
+  rope.phase = "";
+  characterBody.collisionResponse = true;
+  soldier.stopGesture("grapple");
+  ropeLine.visible = false;
+  hookMesh.visible = false;
+  net.send({ t: "grap", c: 1 });
+  if (soldier.gesture?.name === "grapple") soldier.stopGesture();
+}
+
+/** The hook flying out, the rope drawn; every frame. */
+function updateRope(delta) {
+  rope.cd = Math.max(0, rope.cd - delta);
+  for (const [id, r] of remoteRopes) {
+    r.t += delta;
+    const p = remotePlayers.players.get(id);
+    if (!p || r.t > 10) { r.line.visible = false; remoteRopes.delete(id); scene.remove(r.line); continue; }
+    if (p.soldier?.b?.rHand) p.soldier.b.rHand.getWorldPosition(_ropeHand); else _ropeHand.copy(p.root.position).y += 1.6;
+    setRopeLine(r.line, _ropeHand, r.anchor);
+  }
+  if (!rope.on) return;
+  if (playerHealth <= 0 || drive.on || ride.on) { releaseRope(); return; }
+  ropeHand(_ropeHand);
+  if (rope.phase === "fly") {
+    const d = rope.hook.distanceTo(rope.anchor), step = GRAPPLE.hookSpeed * delta;
+    if (d <= step) {
+      rope.hook.copy(rope.anchor);
+      rope.phase = "pull";
+      characterBody.collisionResponse = false;
+      moveVelocity.set(0, 0, 0);
+      knockbackVel.set(0, 0, 0);
+      if (stance !== "stand") setStance("stand", true);
+      rope.pos.set(characterBody.position.x, characterBody.position.y - FEET_OFFSET, characterBody.position.z);
+      sfx.play("bounce", { at: rope.anchor, vol: 0.8, rate: 1.4 });
+      effects.impact(rope.anchor, rope.normal.x, rope.normal.y, rope.normal.z, "dust", 6);
+    } else {
+      rope.hook.addScaledVector(_ropeDir.subVectors(rope.anchor, rope.hook).normalize(), step);
+    }
+  }
+  if (rope.phase === "mantle") { ropeLine.visible = false; hookMesh.visible = false; return; }
+  setRopeLine(ropeLine, _ropeHand, rope.hook);
+  hookMesh.position.copy(rope.hook);
+  hookMesh.visible = true;
+}
+
+/** Reeling in (instead of walking): before the physics step; ropeAfterStep pins the body after it. */
+function updateRopeMove(delta) {
+  fall.speed = 0;
+  if (jumpQueued) { jumpQueued = false; releaseRope(); return; }
+  const top = rope.normal.y > 0.55;
+  if (rope.phase === "pull") {
+    // Where the feet go: on it (a roof, the ground), or hanging under the hands (a wall)
+    _ropeT.copy(rope.anchor).addScaledVector(rope.normal, top ? 0.05 : 0.45);
+    if (!top) _ropeT.y -= 1.95;
+    const d = rope.pos.distanceTo(_ropeT), step = GRAPPLE.speed * delta * Math.min(1, 0.35 + rope.t * 1.6);
+    rope.t += delta;
+    if (d > 0.01) rope.pos.addScaledVector(_ropeDir.subVectors(_ropeT, rope.pos).normalize(), Math.min(step, d));
+    const hx = rope.anchor.x - rope.pos.x, hz = rope.anchor.z - rope.pos.z;
+    if (hx * hx + hz * hz > 0.04) bodyYaw = Math.atan2(hx, hz);
+    characterRoot.rotation.y = bodyYaw;
+    if (d <= step + 0.02) ropeArrive(top);
+  } else if (rope.phase === "hang") {
+    rope.hangT -= delta;
+    if (rope.hangT <= 0) releaseRope();
+  } else if (rope.phase === "mantle") {
+    rope.mantleT += delta;
+    const k = Math.min(1, rope.mantleT / ROPE_MANTLE);
+    const { from, mid, to } = rope;
+    if (k < 0.6) {
+      const a = k / 0.6, up = 1 - (1 - a) * (1 - a);
+      rope.pos.set(from.x + (mid.x - from.x) * a, from.y + (mid.y - from.y) * up, from.z + (mid.z - from.z) * a);
+    } else {
+      const a = (k - 0.6) / 0.4;
+      rope.pos.set(mid.x + (to.x - mid.x) * a, mid.y + (to.y - mid.y) * a, mid.z + (to.z - mid.z) * a);
+    }
+    if (k >= 1) {
+      releaseRope();
+      moveVelocity.set(-rope.normal.x * 1.2, 0, -rope.normal.z * 1.2);
+      jumpGrace = 0.4;
+    }
+  }
+}
+
+/** At the hook: up on top, over the ledge, or hanging off a bare wall. */
+function ropeArrive(top) {
+  if (top) {
+    releaseRope();
+    sfx.footstep(footSurface(rope.pos.x, rope.pos.y, rope.pos.z), 0.8);
+    return;
+  }
+  // A ledge above the hook? Look down from a little over it, just past the wall's face
+  const n = rope.normal;
+  for (const up of [2.4, 1.2]) {
+    _rFrom.set(rope.anchor.x - n.x * 0.55, rope.anchor.y + up, rope.anchor.z - n.z * 0.55);
+    _rTo.set(_rFrom.x, rope.anchor.y - 0.6, _rFrom.z);
+    _rRes.reset();
+    if (world.raycastClosest(_rFrom, _rTo, ropeRayOpts, _rRes) && _rRes.hitNormalWorld.y > 0.6) {
+      const y = _rRes.hitPointWorld.y;
+      rope.phase = "mantle";
+      rope.mantleT = 0;
+      rope.from.copy(rope.pos);
+      rope.mid.set(rope.anchor.x + n.x * 0.25, y + 0.25, rope.anchor.z + n.z * 0.25);
+      rope.to.set(_rFrom.x - n.x * 0.35, y + 0.05, _rFrom.z - n.z * 0.35);
+      soldier.stopGesture("grapple");
+      playerAnim.gesture("climb", ROPE_MANTLE);
+      sfx.footstep(footSurface(rope.to.x, y, rope.to.z), 0.7);
+      return;
+    }
+  }
+  rope.phase = "hang";
+  rope.hangT = 0.7;
+}
+
+function ropeAfterStep() {
+  characterBody.position.set(rope.pos.x, rope.pos.y + FEET_OFFSET, rope.pos.z);
+  characterBody.velocity.set(0, 0, 0);
+}
+
+net.on("grap", msg => {
+  let r = remoteRopes.get(msg.from);
+  if (msg.c) {
+    if (r) { r.line.visible = false; scene.remove(r.line); remoteRopes.delete(msg.from); }
+    const s = remotePlayers.players.get(msg.from)?.soldier;
+    if (s?.gesture?.name === "grapple") s.stopGesture("grapple");
+    return;
+  }
+  if (!r) { r = { line: makeRopeLine(), anchor: new THREE.Vector3(), t: 0 }; remoteRopes.set(msg.from, r); }
+  r.anchor.set(msg.a[0], msg.a[1], msg.a[2]);
+  r.t = 0;
+});
+
 /** The spanner in your hand while you repair. */
 const _wrenchMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a8, metalness: 0.85, roughness: 0.35 });
 const _wrenchGrip = new THREE.MeshStandardMaterial({ color: 0xc4161c, roughness: 0.6 });
@@ -5981,6 +6425,11 @@ function vehicleHit(car, crash) {
   const s = THREE.MathUtils.clamp((crash - CRASH_MIN) / (CRASH_FULL - CRASH_MIN), 0.05, 1);
   vehicleCrashFx(car, c.x, c.z, c.nx, c.nz, c.vx, c.vz, s, kind);
   damageVehicle(car, s * VEH_CRASH_DAMAGE * (kind === CRASH_KIND.EDGE ? 0.4 : 1));
+  // Fast enough and it's not the end of the vehicle: it's the end of what it hit
+  const o = solidHit;
+  const dir = Math.sign(car.speed) || 1, fx = Math.sin(car.yaw) * dir, fz = Math.cos(car.yaw) * dir;
+  if (o?.pole && crash >= POLE_BREAK_SPEED) knockPole(o.pole, fx, fz, car);
+  else if (o?.stall && crash >= STALL_BREAK_SPEED) smashStall(o.stall, fx, fz, car);
   if (net.inRoom) net.send({ t: "vhit", i: car.index, x: +c.x.toFixed(1), z: +c.z.toFixed(1), n: [+c.nx.toFixed(2), +c.nz.toFixed(2)], v: [+c.vx.toFixed(1), +c.vz.toFixed(1)], k: kind, s: +s.toFixed(2) });
   return true;
 }
@@ -6140,7 +6589,9 @@ function updateVehicleFx() {
   const vol = car && car.driver !== null && car.fuel > 0 ? 1 : 0;
   if (car) { _engineAt.x = car.x; _engineAt.y = groundHeight(car.x, car.z) + 0.8; _engineAt.z = car.z; }
   sfx.setRickshaw(vol, car ? Math.min(1, Math.abs(car.speed) / car.spec.maxSpeed * 0.8 + car.throttle * 0.25) : 0,
-    drive.on ? null : _engineAt, car?.spec.tone ?? 1);
+    drive.on ? null : _engineAt, car?.spec.tone ?? 1, car?.kind);
+  updateDriveFeel(car);
+  skidMarks.update(clock.elapsedTime);
 
   const show = drive.on;
   if (show !== vehHud.shown) {
@@ -6231,6 +6682,14 @@ net.on("vfuel", msg => {
   // A teammate topping it up: you hear it from the vehicle
   if (msg.f > car.fuel + 1) sfx.refuel({ x: car.x, y: groundHeight(car.x, car.z) + 0.8, z: car.z });
   car.fuel = msg.f;
+});
+
+// Poles and stalls someone else's vehicle went through (see "Wreckage")
+net.on("pole", msg => { const p = powerLines?.poles[msg.i]; if (p) powerLines.knock(p, msg.dx, msg.dz); });
+net.on("stall", msg => {
+  const s = shops[msg.i];
+  if (s && shops.smash?.(msg.i, performance.now() / 1000)) stallFx(s, msg.dx ?? 0, msg.dz ?? 0);
+  if (msg.r && s?.broken) shops.restore(msg.i);
 });
 
 // A vehicle's health from whoever drove (or repaired) it
@@ -6666,6 +7125,8 @@ function brStartMatch(seed, ids, t) {
   lootClaims.clear();
   brSpawnLoot(seed);
   crates?.restoreAll(); // every crate whole again for the drop
+  powerLines?.restoreAll();
+  shops.restoreAll?.();
   brResetTwists();
   resetVehicles();
   brHud.hideResult();
@@ -6773,6 +7234,7 @@ function brDropLoot() {
   if (inventory.cash) items.push(["cash", { count: inventory.cash }]);
   if (inventory.fuelCans) items.push(["fuel", { count: inventory.fuelCans }]);
   if (inventory.toolkits) items.push(["toolkit", { count: inventory.toolkits }]);
+  if (inventory.grapples) items.push(["grapple", { count: inventory.grapples }]);
   for (const [k, n] of Object.entries(inventory.bag)) if (n > 0) items.push([k, { count: n }]);
   for (const piece of Object.values(inventory.gear)) if (piece) items.push([piece.id, { dur: piece.dur }]);
   spillLoot(items, p.x, p.y - FEET_OFFSET, p.z);
@@ -7264,7 +7726,7 @@ const SUPPLY_LOOT = [
   ["medkit", "medkit", "biscuit"],
   ["ammo"],
   ["grenade", "smoke", "molotov"],
-  ["toolkit", "medkit"],
+  ["toolkit", "medkit", "grapple"],
 ];
 
 /** "F6": the map grid square of (x, z) (WorldMap's letters west → east, numbers north → south). */
@@ -7728,6 +8190,15 @@ if (scopeSensEl) {
 // Graphics quality: applied at startup, so a change reloads the page
 // ── Settings: gameplay switches + key bindings (ui/SettingsPanel.js) ──────────
 const settingsPanel = new SettingsPanel({ settings, bindings, touch: IS_TOUCH });
+// Sound settings: everything on / off, the master volume, the horror score
+const horrorScore = new HorrorScore(sfx);
+function applySoundSettings() {
+  sfx.setMuted(!settings.get("sound"));
+  sfx.setVolume(settings.get("volume") ?? 1);
+  sfx.setMusicEnabled(!!settings.get("music"));
+}
+applySoundSettings();
+settings.onChange(name => { if (name === "sound" || name === "volume" || name === "music") applySoundSettings(); });
 for (const id of ["open-settings", "lobby-settings"]) {
   const b = document.getElementById(id);
   if (!b) continue;
@@ -7758,6 +8229,15 @@ function refreshKeyLabels() {
   }
 }
 bindings.onChange = refreshKeyLabels;
+// Dev server only: a handle for poking at the game from the console (never in a production build)
+if (import.meta.env.DEV) {
+  window.__dev = {
+    inventory, characterBody, vehicles, settings, sfx, horrorScore, skidMarks, camera,
+    get powerLines() { return powerLines; }, get shops() { return shops; }, get crates() { return crates; },
+    fireGrapple, knockPole, smashStall, toggleVehicle, startRepair, damageVehicle,
+    rope: () => ({ on: rope.on, phase: rope.phase }), health: () => playerHealth,
+  };
+}
 refreshKeyLabels();
 
 const qualityEl = document.getElementById("lobby-quality");
@@ -7897,6 +8377,8 @@ function animate() {
     jumpQueued = false;
   } else if (brFlying()) {
     brUpdateFlight(delta);
+  } else if (ropeMoving()) {
+    updateRopeMove(delta);
   } else if (climb.active) {
     updateClimb(delta);
   } else {
@@ -7911,6 +8393,7 @@ function animate() {
 
   checkGrounded();
   if (climb.active) climbAfterStep();
+  else if (ropeMoving()) ropeAfterStep();
   else snapCharacterToGround();
   updateFallDamage();
   updateStamina(delta);
@@ -7961,6 +8444,7 @@ function animate() {
   updateThrowAim(delta);
   updateMelee(delta);
   updateRepair(delta);
+  updateRope(delta);
   updateAutoDoors(delta);
   updateLastPos(delta);
   updateMapPrebuild(realDelta);

@@ -60,6 +60,8 @@ const ICONS = {
   supply: "delapouite/cargo-crate",
   parachute: "lorc/parachute",
   nemesis: "lorc/daemon-skull",
+  grapple: "lorc/grapple",
+  music: "delapouite/musical-notes",
   // Items (hotbar, inventory, pickups feed, shop)
   pistol: "skoll/colt-m1911",
   smg: "skoll/mp5",

@@ -335,9 +335,19 @@ export class Roads {
     poles.forEach((p, i) => {
       im.setMatrixAt(i, m.compose(p3.set(p.x, p.y - 0.1, p.z), q.setFromAxisAngle(up, p.yaw), one));
     });
+    poles.forEach((p, i) => { p.index = i; });
     drums.forEach((p, i) => {
+      p.drumIndex = i;
       dm.setMatrixAt(i, m.compose(p3.set(p.x, p.y - 0.1, p.z), q.setFromAxisAngle(up, p.yaw), one));
     });
+    // What a falling pole needs (world/PowerLines.js): its meshes, its geometry, the wires
+    poles.mesh = im;
+    poles.drums = dm;
+    poles.poleGeo = poleGeo;
+    poles.drumGeo = drumGeo;
+    poles.material = mat;
+    poles.armY = ARM_Y;
+    poles.height = POLE_H;
     dm.count = drums.length;
     for (const mesh of [im, dm]) {
       mesh.userData.chunk = true; // split per map cell by main.js (WorldChunks)
@@ -353,6 +363,9 @@ export class Roads {
     for (const p of poles) {
       const a = p.prev;
       if (!a || Math.hypot(p.x - a.x, p.z - a.z) > POLE_SPACING * 1.6) continue;
+      // This span's vertices (3 wires × SUB segments × 2 ends), from pole a to pole p
+      p.spanIn = { start: segs.length / 3, count: 3 * SUB * 2, from: a };
+      a.spanOut = p;
       for (const off of [-0.68, 0, 0.68]) {
         const ax = a.x + Math.cos(a.yaw) * off, az = a.z - Math.sin(a.yaw) * off, ay = a.y + ARM_Y + 0.18;
         const bx = p.x + Math.cos(p.yaw) * off, bz = p.z - Math.sin(p.yaw) * off, by = p.y + ARM_Y + 0.18;
@@ -370,6 +383,9 @@ export class Roads {
       const wires = new THREE.LineSegments(wg, new THREE.LineBasicMaterial({ color: 0x161615 }));
       wires.matrixAutoUpdate = false;
       scene.add(wires);
+      poles.wires = wires;
+      poles.wireSub = SUB;
+      poles.wireSag = WIRE_SAG;
     }
 
     // Colliders (cannon's Cylinder is Y-aligned already) and minimap dots
@@ -379,7 +395,9 @@ export class Roads {
       body.addShape(shape);
       body.position.set(p.x, p.y + POLE_H / 2 - 0.1, p.z);
       world.addBody(body);
-      mapObstacles?.push({ type: "circle", x: p.x, z: p.z, r: 0.25, pole: true });
+      p.body = body;
+      p.obstacle = { type: "circle", x: p.x, z: p.z, r: 0.25, pole: p };
+      mapObstacles?.push(p.obstacle);
     }
     return poles;
   }

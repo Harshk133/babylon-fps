@@ -82,7 +82,7 @@ const SEG = {
 };
 // Gestures with nothing in the hands: the gun goes on the back meanwhile
 // (throwing stows the gun itself: see _updateToss)
-const GUN_AWAY = new Set(["eat", "drink", "heal", "vault", "climb", "repair"]);
+const GUN_AWAY = new Set(["eat", "drink", "heal", "vault", "climb", "repair", "grapple"]);
 // Upper-body clip overlays (gesture → clip)
 const OVERLAY = { reload: "reload", eat: "drink", drink: "drink", heal: "drink" };
 const DEATHS = { front: "death_front", back: "death_back", right: "death_right", left: "death", head_front: "death_head_front", head_back: "death_head_back" };
@@ -1277,7 +1277,7 @@ export class Soldier {
    */
   _leftHandIK(dt, armed) {
     const b = this.b, g = this.gesture, sup = SUPPORT[this.currentGun];
-    const on = armed && sup && !this.swap && !this.toss && !(g && (OVERLAY[g.name] || g.name === "repair")) && this.sw.swim < 0.5 && !this.dead;
+    const on = armed && sup && !this.swap && !this.toss && !(g && (OVERLAY[g.name] || g.name === "repair" || g.name === "grapple")) && this.sw.swim < 0.5 && !this.dead;
     const st = this._ik ??= { w: 0, v: 0 };
     spring(st, "w", "v", on ? 1 : 0, 14, dt);
     const w = Math.min(1, st.w);
@@ -1620,6 +1620,7 @@ export class Soldier {
     // Repairing a vehicle (the "repair" gesture; repairStyle picks the pose)
     const rg = this.gesture;
     if (rg && rg.name === "repair") this._repairPose(rg, side, fwd);
+    if (rg && rg.name === "grapple") this._ropePose(rg, side, fwd);
     // On a bike the hands go last, onto whatever they hold (after the aim and the gun's own IK)
     if (riding) this._rideHands(side, fwd, armed);
     this._limitHead(riding ? RIDE_HEAD_MAX : HEAD_MAX);
@@ -1641,6 +1642,30 @@ const REPAIR_POSE = {
   tractor:  { bend: 0.2, look: -0.2, reach: 1.55, elbow: 0.45, rate: 5.5, twist: 0, lift: 0.25 },
   bike:     { bend: 0.5, look: 0.5, reach: 0.7, elbow: 0.95, rate: 10, twist: 0.4, lift: 0 },
   rickshaw: { bend: 0.7, look: 0.3, reach: 1.05, elbow: 0.7, rate: 8, twist: -0.25, lift: 0.05 },
+};
+
+/**
+ * Hauling yourself up a rope (the rope gun): both arms up over the head on the
+ * rope, hand over hand, knees drawn up and the legs swinging under you.
+ */
+Soldier.prototype._ropePose = function (g, side, fwd) {
+  const b = this.b;
+  const w = Math.max(0, Math.min(1, g.t / 0.2, (g.dur - g.t) / 0.2));
+  if (w <= 0) return;
+  const t = g.t * 7.5, hand = Math.sin(t), leg = Math.sin(g.t * 2.2);
+  // Arms high, reaching alternately
+  turnBone(b.rArm, side, -(2.55 + 0.25 * hand) * w);
+  turnBone(b.rFore, side, -(0.35 + 0.35 * Math.max(0, -hand)) * w);
+  turnBone(b.lArm, side, -(2.55 - 0.25 * hand) * w);
+  turnBone(b.lFore, side, -(0.35 + 0.35 * Math.max(0, hand)) * w);
+  // Leaning back a touch from the rope, head up to where it goes
+  turnBone(b.spine, side, -0.12 * w);
+  turnBone(b.neck, side, -0.35 * w);
+  // Knees up, legs swinging
+  turnBone(b.lUpLeg, side, -(0.55 + 0.15 * leg) * w);
+  turnBone(b.rUpLeg, side, -(0.4 - 0.15 * leg) * w);
+  turnBone(b.lLeg, side, (0.8 + 0.1 * leg) * w);
+  turnBone(b.rLeg, side, (0.65 - 0.1 * leg) * w);
 };
 
 Soldier.prototype._repairPose = function (g, side, fwd) {

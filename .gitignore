@@ -74,3 +74,6 @@ public/models/indian things/
 # Gear originals (Sketchfab downloads); only the optimized copies are committed
 public/models/gear/*.glb
 !public/models/gear/*.opt.glb
+
+# Poly Haven originals (the optimized .webp next to them are committed): node scripts/build-ground-textures.mjs
+public/texture/ground/src/
