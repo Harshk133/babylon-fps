@@ -2625,3 +2625,80 @@ svg.gi { fill: currentColor; stroke: none; }
 .hb-medicon-img { width: 26px; height: 26px; object-fit: contain; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8)); }
 .hb-slot .hb-icon { height: 30px; }
 
+
+/* ── Battle royale twists: Most Wanted chip + Revenge Run (ui/BrEdgeHud.js) ── */
+#br-edge {
+  position: fixed;
+  top: 150px;
+  left: 50%;
+  z-index: 129;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  font-family: "Teko", "Bahnschrift", system-ui, sans-serif;
+  color: #fff;
+  pointer-events: none;
+  user-select: none;
+}
+.bre-wanted, .bre-revenge { display: none; }
+.bre-wanted.on, .bre-revenge.on { display: flex; animation: prompt-in 0.25s cubic-bezier(.2, .9, .3, 1.2) both; }
+
+.bre-wanted {
+  align-items: center;
+  gap: 10px;
+  padding: 3px 14px 3px 6px;
+  background: linear-gradient(90deg, rgba(60, 4, 10, 0.88), rgba(20, 4, 6, 0.7));
+  border: 1px solid rgba(255, 48, 70, 0.6);
+  border-left: 4px solid #ff3046;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+}
+.bre-wanted.self { animation: bre-throb 1.2s ease-in-out infinite; border-color: #ff3046; }
+@keyframes bre-throb {
+  0%, 100% { box-shadow: 0 0 0 rgba(255, 48, 70, 0); }
+  50%      { box-shadow: 0 0 22px rgba(255, 48, 70, 0.75); }
+}
+.bre-ico svg { width: 26px; height: 26px; fill: #ff3046; filter: drop-shadow(0 0 4px rgba(255, 48, 70, 0.7)); }
+.bre-text { display: flex; flex-direction: column; line-height: 1; padding-top: 3px; }
+.bre-title { font-size: 21px; font-weight: 600; letter-spacing: 0.06em; white-space: nowrap; }
+.bre-sub {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+  color: rgba(255, 200, 205, 0.8); white-space: nowrap;
+}
+.bre-bounty {
+  margin-left: 6px;
+  padding: 2px 8px 0;
+  font-size: 22px; font-weight: 600;
+  color: #1a0f04;
+  background: linear-gradient(#ffe08a, #ffc23d);
+  border-radius: 3px;
+}
+
+.bre-revenge {
+  flex-direction: column;
+  align-items: center;
+  line-height: 1;
+  padding: 6px 26px 4px;
+  background: radial-gradient(ellipse at center, rgba(70, 10, 110, 0.85), rgba(20, 4, 36, 0.4) 70%, transparent);
+}
+.bre-rtitle { font-size: 18px; letter-spacing: 0.32em; color: #d9a6ff; text-shadow: 0 0 10px rgba(180, 90, 255, 0.9); }
+.bre-clock { font-size: 54px; font-weight: 600; letter-spacing: 0.04em; color: #f3e6ff; text-shadow: 0 0 18px rgba(170, 70, 255, 0.95); }
+.bre-rsub { font-family: "Segoe UI", system-ui, sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(230, 200, 255, 0.8); }
+.bre-revenge.urgent .bre-clock { color: #ff8ab0; animation: bre-tick 0.5s ease-in-out infinite alternate; }
+@keyframes bre-tick { from { transform: scale(1); } to { transform: scale(1.08); } }
+
+#revenge-vignette {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(110, 20, 190, 0.38) 85%, rgba(50, 0, 90, 0.7) 100%);
+}
+#revenge-vignette.on { opacity: 1; animation: bre-breathe 2.4s ease-in-out infinite; }
+@keyframes bre-breathe { 0%, 100% { opacity: 0.75; } 50% { opacity: 1; } }
+
+body.touch #br-edge { top: 128px; zoom: 0.72; }

@@ -5,6 +5,10 @@
 //
 // Audited 2026-10-31 from the files themselves (Sketchfab exports carry author /
 // licence / source in asset.extras) and the licence files next to them.
+// Re-checked 2026-11-06: the college workshop, the new CSE building and water
+// tower models, crash effects, wooden crates, the new HUD icons (lorc,
+// delapouite: already credited) and the battle royale twists add no
+// third-party assets.
 
 /** Where rights holders reach the developer (shown on the disclaimer when set). */
 export const LEGAL_CONTACT = "";
@@ -102,8 +106,16 @@ export const CREDIT_GROUPS = [
     ],
   },
   {
+    title: "Ideas and examples",
+    note: "Effects and interface pieces modelled on these examples and written for the game. Listing them does not mean their authors endorse this game.",
+    items: [
+      { what: "three.js examples: geometry cube (wooden crates), MD2 loader, post-processing, GPU particles", who: "three.js authors", licence: "MIT", url: "https://threejs.org/examples/" },
+      { what: "Circular Carousel and Celebration Cursor (ideas for the weapon wheel and confetti)", who: "React Bits", licence: "Design reference only", url: "https://reactbits.dev" },
+    ],
+  },
+  {
     title: "Made for this game",
-    note: "Built for the game and owned by its developer: the CSE building, the college gate, the water towers, the chaiwala, the city, villages, caves, terrain, roads, fields and procedural props, the stand-in vehicles, every shader and effect, and all the rider, mount and vehicle animation.",
+    note: "Built for the game and owned by its developer: the CSE building, the college workshop, the college gate, the water towers, the chaiwala, the city, villages, caves, terrain, roads, fields and procedural props, the wooden crates and their texture, the stand-in vehicles, every shader and effect (crash sparks, smoke, fire, blood, post-processing), the kick, punch, rider, mount and vehicle animation, and the game's own rules: Most Wanted bounties and Revenge Run.",
     items: [],
   },
 ];
@@ -112,8 +124,9 @@ export const CREDIT_GROUPS = [
 export const DISCLAIMER = [
   { heading: "A work of fiction", text: "This game and its world are fictional. Its towns, institutions, organisations, characters and events are invented or used in a fictional way. Any resemblance to real people, living or dead, or to real events is coincidental. Places that resemble real ones are a backdrop only and do not suggest any endorsement by them." },
   { heading: "Trademarks", text: "Vehicle, product, brand and company names or likenesses that appear in the game belong to their respective owners. They appear as generic everyday props in a fictional setting; their owners are not affiliated with, and do not sponsor or endorse, this game." },
-  { heading: "Banknotes", text: "Money in the game is a stylised in-game item for scoring and trading inside the game only. It is not legal tender and is not meant to reproduce or imitate real currency." },
+  { heading: "Rupees and banknotes", text: "The game counts its money in rupees (₹) for flavour. That money, the banknote props, bounties and every reward are in-game items only: they have no real value, can't be bought, sold, cashed out or exchanged for real money, and are not legal tender. The banknote prop is a low-detail stylised game asset, not a reproduction of real currency, and is not to be printed or copied. The Reserve Bank of India is not affiliated with, and does not endorse, this game." },
+  { heading: "No real-money play", text: "There is no real-money purchase, betting or gambling in the game. Shops, bounties, crates and loot use in-game money and items only." },
   { heading: "Third-party content", text: "The game uses models, sounds, icons, fonts and software made by other people under the licences listed in Credits. Their authors keep all rights in their work. Changes made for the game are noted there. Listing an author does not mean they endorse this game." },
-  { heading: "Content", text: "Contains fantasy violence against monsters and, in Battle Royale, other players. It's a game: nothing in it is meant to promote violence in real life." },
+  { heading: "Content", text: "Contains fantasy violence against monsters and, in Battle Royale, other players, including unarmed kicks and punches, bounties on players and players returning as revenants. It's a game: nothing in it is meant to promote violence in real life." },
   { heading: "Rights holders", text: "If you believe something in this game uses your work without permission, contact the developer and it will be reviewed and, where appropriate, credited properly or removed." },
 ];

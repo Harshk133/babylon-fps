@@ -64,6 +64,7 @@ import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } fro
 import { MonsterSync } from "./net/MonsterSync.js";
 import { MonsterAudio } from "./audio/MonsterAudio.js";
 import { BrHud } from "./br/BrHud.js";
+import { BrEdgeHud } from "./ui/BrEdgeHud.js";
 import { ZoneWall, createPlane, updatePlane, createParachute, setSkydivePose } from "./br/BrVisuals.js";
 import {
   PLANE, FREEFALL, CHUTE, BR_AUTO_START, BR_END_HOLD, BR_WARMUP_RESPAWN, BR_MAX_PLAYERS, BR_JOIN_CLOSE_AT,
@@ -2279,7 +2280,8 @@ function fireShot(def) {
     const victim = _shotResult.body.playerTarget;
     if (pvp && victim && !victim.local) {
       const head = _hitPoint.y - (_shotResult.body.position.y - FEET_OFFSET) > PVP_HEAD_Y;
-      const dmg = (PVP_DAMAGE[inventory.current] ?? 15) * (head ? PVP_HEADSHOT[inventory.current] ?? 1.5 : 1);
+      const dmg = (PVP_DAMAGE[inventory.current] ?? 15) * (head ? PVP_HEADSHOT[inventory.current] ?? 1.5 : 1)
+        * (br.mw === net.id ? MW_DAMAGE : 1); // the Most Wanted hits harder
       pvpDamage.set(victim.id, (pvpDamage.get(victim.id) ?? 0) + dmg);
       if (head) pvpHead.set(victim.id, true);
       effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", head ? 18 : def.pellets > 1 ? 4 : 9);
@@ -3737,11 +3739,12 @@ const worldMap = new WorldMap({
 const waypoints = new Waypoints(scene);
 
 /** x === null lifts the pin. id: "me" or a teammate's net id. */
-function setPin(id, x, z, share = false) {
+/** look: { color, label } overrides the pin's own (the battle royale's Most Wanted marker). */
+function setPin(id, x, z, share = false, look = null) {
   const p = x === null ? null : {
     x, z,
-    color: id === "me" ? (net.inRoom && !isBR() ? net.players.get(net.id)?.color ?? PIN_COLOR : PIN_COLOR) : net.players.get(id)?.color ?? "#ffffff",
-    label: id === "me" ? null : net.players.get(id)?.name ?? null,
+    color: look?.color ?? (id === "me" ? (net.inRoom && !isBR() ? net.players.get(net.id)?.color ?? PIN_COLOR : PIN_COLOR) : net.players.get(id)?.color ?? "#ffffff"),
+    label: look ? look.label ?? null : id === "me" ? null : net.players.get(id)?.name ?? null,
   };
   worldMap.setPin(id, p);
   waypoints.set(id, p);
@@ -6021,6 +6024,7 @@ function keepInBounds() {
 // message builds the same match everywhere. Each player owns their own health:
 // shooters send `pvp` damage to the victim, and the victim announces `elim`.
 const brHud = new BrHud();
+const brEdgeHud = new BrEdgeHud();
 const zoneWall = new ZoneWall(scene);
 const dropPlane = createPlane();
 scene.add(dropPlane);
@@ -6065,6 +6069,18 @@ const br = {
   atkId: null, atkW: "", atkHs: false, atkAt: -99, // who hurt you last (kill credit)
   netTimer: 0,
   hudTimer: 0,
+  // Most Wanted (see "Battle royale twists")
+  kills: new Map(),      // id → kills this match
+  mw: null,              // the Most Wanted's id (the host picks, "br" carries it)
+  mwKills: 0,
+  mwPing: 0,             // s to the next reveal of where they are
+  mwPos: null,           // { x, z }: their last revealed spot
+  mwTimer: 0,            // host: s to the next pick
+  // Revenge Run
+  revUsed: new Set(),    // host: ids that have had their second life this match
+  revenants: new Set(),  // ids out on a Revenge Run right now
+  rev: null,             // yours: { wait, t, dropped }
+  fading: false,         // your revenge clock ran out: this death is "faded"
 };
 const _planePos = { x: 0, y: 0, z: 0 };
 const _spawn = { x: 0, z: 0 };
@@ -6169,7 +6185,7 @@ const bots = new Bots({
 });
 const _lootSpot = new THREE.Vector3();
 const _specIds = [];
-const ELIM_VERB = { zone: "ZONE", self: "SELF", grenade: "FRAG", molotov: "BURNED", rickshaw: "RUN OVER" };
+const ELIM_VERB = { zone: "ZONE", self: "SELF", grenade: "FRAG", molotov: "BURNED", rickshaw: "RUN OVER", fade: "FADED" };
 
 function brAirborne() { return isBR() && (br.ghost || br.flight !== PHASE_GROUND); }
 function brFlying() { return brAirborne(); }
@@ -6290,6 +6306,7 @@ function brEnterWarmup() {
   resetVehicles();
   killsThisLife = 0;
   progress.resetRun();
+  brResetTwists();
   if (net.isHost) bots.onWarmup();
 }
 
@@ -6326,6 +6343,7 @@ function brStartMatch(seed, ids, t) {
   lootClaims.clear();
   brSpawnLoot(seed);
   crates?.restoreAll(); // every crate whole again for the drop
+  brResetTwists();
   resetVehicles();
   brHud.hideResult();
 
@@ -6627,13 +6645,16 @@ function brZoneDamage(delta) {
 
 // ── Eliminations & results ───────────────────────────────────────────────────
 function brOnLocalDeath() {
-  const recent = br.atkId !== null && clock.elapsedTime - br.atkAt < 10;
+  // A revenant whose clock ran out fades: nobody gets the kill
+  const recent = !br.fading && br.atkId !== null && clock.elapsedTime - br.atkAt < 10;
   const msg = {
     t: "elim", v: net.id,
     k: recent ? br.atkId : null,
-    w: recent ? br.atkW : br.outside ? "zone" : "self",
+    w: br.fading ? "fade" : recent ? br.atkW : br.outside ? "zone" : "self",
     hs: recent && br.atkHs ? 1 : 0,
   };
+  br.fading = false;
+  br.rev = null;
   if (br.state === "match" && br.inMatch) {
     br.placement = br.alive.size;
     brDropLoot();
@@ -6658,11 +6679,29 @@ function brHandleElim({ v, k, w, hs }) {
     showHitMarker(!!hs, true);
     sfx.kill();
     postFx.shockwave(0.5, 0.5, hs ? 0.8 : 0.55, hs ? 0xffd27a : 0xffffff, 1.3, 0.6);
+    // A revenant's kill: back for good
+    if (br.rev?.dropped && br.state === "match") brReborn();
   }
   if (br.state !== "match" || !br.alive.has(v)) return;
+  // Most Wanted: count the kill; the wanted one going down pays their killer the bounty
+  if (k !== null && k !== undefined && k !== v) br.kills.set(k, (br.kills.get(k) ?? 0) + 1);
+  if (br.mw === v) {
+    if (k === net.id) brClaimBounty(v);
+    else if (kName) inventoryUI.feed(`${kName} claimed the bounty on ${vName}`, "info");
+    brSetMostWanted(null, 0);
+  }
   br.alive.delete(v);
+  br.revenants.delete(v);
   const vKey = v === net.id ? net.key : net.players.get(v)?.k;
   if (vKey) br.outKeys.add(vKey);
+  // Revenge Run: the host gives every person (not a bot) one second life a match,
+  // while at least two others are still standing
+  if (net.isHost && !isBotId(v) && w !== "fade" && !br.revUsed.has(v) && br.alive.size >= 2) {
+    br.revUsed.add(v);
+    if (vKey) br.outKeys.delete(vKey);
+    net.send({ t: "brrev", id: v });
+    brOnRevenge(v);
+  }
   if (v === net.id) {
     br.inMatch = false;
     postFx.kick(0.4, 0xff2a1a);
@@ -6673,13 +6712,200 @@ function brHandleElim({ v, k, w, hs }) {
       title: "ELIMINATED",
       sub: kName ? `by ${kName}` : w === "zone" ? "Caught outside the zone" : "",
       lines: [["PLACE", `#${place}`], ["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`], ["XP", `+${progress.runXp}`]],
-      foot: br.alive.size ? "Spectating in a moment…" : "",
+      foot: br.rev ? "REVENGE RUN · you drop back in a moment" : br.alive.size ? "Spectating in a moment…" : "",
       color: "#ff4b3a",
       duration: 4.5,
     });
   }
   if (br.spectating === v) br.spectating = null;
   brCheckWinner();
+}
+
+// ── Battle royale twists ─────────────────────────────────────────────────────
+// MOST WANTED: the match's top killer (MW_MIN_KILLS or more) is marked. Every
+// MW_PING s everyone else gets their spot as a red pin + pillar (a last-known
+// position, so it's a hunt, not a wallhack); they hit MW_DAMAGE harder, and
+// whoever takes them down claims the bounty: full health, armour repaired and
+// ₹ per kill they had. The host picks (it sees every elim) and "br" carries it.
+// REVENGE RUN: the first time a person is knocked out, they skydive back in as
+// a revenant with a pistol and REVENGE_TIME s. One kill and they're reborn for
+// the rest of the match; otherwise they fade. The host grants it (brrev); a
+// reborn revenant tells everyone (brreborn).
+const MW_MIN_KILLS = 2;
+const MW_PING = 10;
+const MW_DAMAGE = 1.15;
+const MW_BOUNTY = 1500;       // ₹ per kill on the wanted player's head
+const MW_COLOR = "#ff3046";
+const REVENGE_TIME = 75;
+const REVENGE_WAIT = 4.5;     // s of the eliminated screen before the drop
+const REVENGE_HP = 60;
+const _mwFix = { x: 0, z: 0 };
+const _edgeWanted = { self: false, name: "", bounty: "", dist: null, next: 0 };
+const _edgeRev = { t: 0, urgent: false };
+
+const mwBounty = kills => fmtRupees(Math.max(MW_MIN_KILLS, kills) * MW_BOUNTY);
+
+/** Where a player is right now (you, a person or a bot), or null. */
+function brPlayerPos(id) {
+  if (id === net.id) { _mwFix.x = characterBody.position.x; _mwFix.z = characterBody.position.z; return _mwFix; }
+  const p = remotePlayers.players.get(id)?.body?.position;
+  if (!p || p.y < -100) return null;
+  _mwFix.x = p.x; _mwFix.z = p.z;
+  return _mwFix;
+}
+
+/** Host: the alive player with the most kills (≥ MW_MIN_KILLS); a tie keeps the current one. */
+function brPickMostWanted() {
+  let best = null, bestK = MW_MIN_KILLS - 1;
+  for (const [id, k] of br.kills) {
+    if (!br.alive.has(id) || br.revenants.has(id)) continue;
+    if (k > bestK || (k === bestK && id === br.mw)) { best = id; bestK = k; }
+  }
+  if (best !== br.mw || (best !== null && bestK !== br.mwKills)) brSetMostWanted(best, best === null ? 0 : bestK);
+}
+
+function brSetMostWanted(id, kills) {
+  const changed = id !== br.mw;
+  br.mw = id;
+  br.mwKills = kills;
+  if (!changed) return;
+  br.mwPos = null;
+  br.mwPing = id === net.id ? MW_PING : 0.3; // a fix on them right away
+  setPin("wanted", null);
+  if (id === null || br.state !== "match") return;
+  if (id === net.id) {
+    gameHud.showBanner({ title: "MOST WANTED", sub: `Bounty ${mwBounty(kills)} on your head`, text: `Everyone sees where you are every ${MW_PING} s. You hit 15% harder. Stay alive.`, color: MW_COLOR, duration: 4.5 });
+    postFx.kick(0.3, 0xff3046);
+  } else {
+    inventoryUI.feed(`${brName(id)} is MOST WANTED · bounty ${mwBounty(kills)}`, "info");
+    gameHud.showBanner({ title: "MOST WANTED", sub: brName(id), text: "Hunt them down to claim the bounty", color: MW_COLOR, duration: 3 });
+  }
+  sfx.spotted();
+}
+
+function brClaimBounty(v) {
+  const kills = br.kills.get(v) ?? MW_MIN_KILLS;
+  const cash = Math.max(MW_MIN_KILLS, kills) * MW_BOUNTY;
+  playerHealth = MAX_HEALTH;
+  healthTrail = MAX_HEALTH;
+  for (const slot of ["helmet", "vest"]) {
+    const piece = inventory.gear[slot];
+    if (piece) inventory.equipGear(piece.id); // fresh durability
+  }
+  inventory.addCash(cash);
+  gameHud.showBanner({ title: "BOUNTY CLAIMED", sub: `+${fmtRupees(cash)}`, text: "Full health · armour repaired", color: "#ffc23d", duration: 4 });
+  postFx.kick(0.5, 0xffd27a);
+  postFx.shockwave(0.5, 0.5, 0.9, 0xffd27a, 1.4, 0.8);
+  sfx.levelCleared();
+  confetti.celebrate("level");
+}
+
+/** Everyone: player id is coming back for revenge. */
+function brOnRevenge(id) {
+  if (br.state !== "match") return;
+  br.alive.add(id);
+  br.revenants.add(id);
+  if (id === net.id) {
+    br.rev = { wait: REVENGE_WAIT, t: REVENGE_TIME, dropped: false };
+    brHud.setResultFoot("REVENGE RUN · you drop back in a moment");
+  } else {
+    inventoryUI.feed(`${brName(id)} is back for REVENGE`, "info");
+    chat.system(`${brName(id)} rose for a Revenge Run`);
+  }
+}
+
+/** Yours: the eliminated screen is over, drop back in over the zone. */
+function brRevengeDrop() {
+  const r = br.rev;
+  r.dropped = true;
+  brHud.hideResult();
+  br.spectating = null;
+  brResetPlayer(characterBody.position.x, characterBody.position.y, characterBody.position.z, true);
+  inventory.addWeapon("pistol", WEAPONS.pistol.magSize, WEAPONS.pistol.magSize * 3);
+  inventory.equip("pistol");
+  onWeaponChanged(false);
+  playerHealth = REVENGE_HP;
+  healthTrail = REVENGE_HP;
+  br.inMatch = true;
+  br.ghost = false;
+  brSkyDrop();
+  gameHud.showBanner({
+    title: "REVENGE RUN", sub: `${REVENGE_TIME} seconds`,
+    text: `One kill and you're reborn. ${IS_TOUCH ? "" : "Click to drop in."}`, color: "#b36bff", duration: 4.5,
+  });
+  postFx.glitch(0.6);
+  postFx.kick(0.35, 0xb36bff);
+}
+
+function brReborn() {
+  br.rev = null;
+  br.revenants.delete(net.id);
+  playerHealth = MAX_HEALTH;
+  healthTrail = MAX_HEALTH;
+  net.send({ t: "brreborn" });
+  gameHud.showBanner({ title: "REBORN", sub: "Revenge taken", text: "You're back in the match for good", color: "#b36bff", duration: 3.5 });
+  postFx.kick(0.55, 0xd9a6ff);
+  postFx.shockwave(0.5, 0.5, 1, 0xb36bff, 1.4, 0.9);
+  sfx.levelCleared();
+}
+
+/** Every frame of a match: the wanted marker, your revenge clock, the HUD. */
+function brUpdateTwists(delta) {
+  if (br.state !== "match") { brEdgeHud.hide(); return; }
+  if (net.isHost && (br.mwTimer -= delta) <= 0) { br.mwTimer = 0.5; brPickMostWanted(); }
+  // Most Wanted: reveal their spot every MW_PING s
+  let w = null;
+  if (br.mw !== null) {
+    br.mwPing -= delta;
+    if (br.mwPing <= 0) {
+      br.mwPing = MW_PING;
+      const at = brPlayerPos(br.mw);
+      if (br.mw === net.id) { sfx.spotted(); postFx.kick(0.12, 0xff3046); }
+      else if (at) {
+        br.mwPos ??= { x: 0, z: 0 };
+        br.mwPos.x = at.x; br.mwPos.z = at.z;
+        setPin("wanted", at.x, at.z, false, { color: MW_COLOR, label: `MOST WANTED ${mwBounty(br.mwKills)}` });
+        sfx.click();
+      }
+    }
+    w = _edgeWanted;
+    w.self = br.mw === net.id;
+    w.name = brName(br.mw);
+    w.bounty = mwBounty(br.mwKills);
+    w.dist = br.mwPos && !w.self ? Math.hypot(br.mwPos.x - characterBody.position.x, br.mwPos.z - characterBody.position.z) : null;
+    w.next = br.mwPing;
+  }
+  // Your Revenge Run
+  let rev = null;
+  const r = br.rev;
+  if (r) {
+    if (!r.dropped) {
+      r.wait -= delta;
+      if (r.wait <= 0) brRevengeDrop();
+    } else if (playerHealth > 0) {
+      if (br.flight === PHASE_GROUND) r.t -= delta; // the clock starts once you're down
+      if (r.t <= 0) {
+        br.fading = true;
+        dealDamageToPlayer(9999, 0, 0, 0.3, null, null, "raw");
+      }
+    }
+    if (r && r.dropped && br.rev) { _edgeRev.t = r.t; _edgeRev.urgent = r.t < 15; rev = _edgeRev; }
+  }
+  brEdgeHud.update(w, rev);
+}
+
+/** A match starting or ending: no wanted player, no revenants. */
+function brResetTwists() {
+  br.kills.clear();
+  br.revUsed.clear();
+  br.revenants.clear();
+  br.rev = null;
+  br.fading = false;
+  br.mw = null;
+  br.mwKills = 0;
+  br.mwPos = null;
+  setPin("wanted", null);
+  brEdgeHud.hide();
 }
 
 /** Host: one player left (or nobody, in a practice drop) ends the match. */
@@ -6694,6 +6920,7 @@ function brCheckWinner() {
 }
 
 function brShowEnd(w) {
+  brResetTwists();
   br.state = "end";
   br.endTimer = BR_END_HOLD;
   br.inMatch = false;
@@ -6759,6 +6986,7 @@ function brUpdate(delta) {
     // Out of the fight: follow somebody who's still in it
     if (brWatching() && !brHud.resultShown && (br.spectating === null || !br.alive.has(br.spectating))) brPickSpectate(1);
   }
+  brUpdateTwists(delta);
   if (br.state === "end") {
     br.endTimer = Math.max(0, br.endTimer - delta);
     brHud.setResultFoot(`Next match in ${Math.ceil(br.endTimer)}`);
@@ -6788,6 +7016,7 @@ function brNetTick(delta) {
   net.send({
     t: "br", s: br.state, seed: br.seed, tm: +br.t.toFixed(2), cd: +br.countdown.toFixed(1),
     et: +br.endTimer.toFixed(1), al: [...br.alive], hr: +env.hour.toFixed(3), wx: weather.state,
+    mw: br.mw, mk: br.mwKills, rv: [...br.revenants],
   });
 }
 
@@ -6863,6 +7092,12 @@ net.on("br", msg => {
     // Missed the start (or joined late): build the match from the seed
     if (br.state !== "match" || br.seed !== msg.seed) brStartMatch(msg.seed, msg.al, msg.tm);
     else if (Math.abs(br.t - msg.tm) > 0.4) br.t = msg.tm;
+    // The twists: who's wanted, who's out on a Revenge Run (late joiners catch up here)
+    if (msg.mw !== undefined && (msg.mw !== br.mw || msg.mk !== br.mwKills)) brSetMostWanted(msg.mw, msg.mk ?? 0);
+    if (msg.rv) {
+      br.revenants.clear();
+      for (const id of msg.rv) if (id !== net.id || br.rev) br.revenants.add(id);
+    }
   } else if (msg.s === "end") {
     if (br.state === "match") { br.state = "end"; br.inMatch = false; }
     br.endTimer = msg.et;
@@ -6877,6 +7112,12 @@ net.on("brend", msg => { if (isBR()) brShowEnd(msg.w ?? null); });
 net.on("brwarm", () => { if (isBR()) brEnterWarmup(); });
 // A late joiner was let into the running match (they build it themselves from the host's "br")
 net.on("brlate", msg => { if (isBR() && br.state === "match" && msg.id !== net.id) br.alive.add(msg.id); });
+// Revenge Run: the host gave someone (maybe us) a second life; a revenant got their kill
+net.on("brrev", msg => { if (isBR() && !net.isHost) brOnRevenge(msg.id); });
+net.on("brreborn", msg => {
+  if (!isBR() || !br.revenants.delete(msg.from)) return;
+  inventoryUI.feed(`${brName(msg.from)} took revenge and is REBORN`, "info");
+});
 // The host turned us away (the match is in its final few): wait outside and get in when it ends
 net.on("brfull", msg => {
   if (!isBR()) return;
