@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { NOISE_GLSL } from "./DivineArtifact.js";
+import { NOISE_GLSL } from "./Medallion.js";
 
 // Scenes 02-06 of the opening cinematic: the space it travels through. Each set
 // piece is a group that's only drawn while its shot is on (and a little either

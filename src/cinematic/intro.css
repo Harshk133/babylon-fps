@@ -42,3 +42,26 @@ body.cinematic-on #app > :not(#webgl) { visibility: hidden !important; }
   .cn-tagline { font-size: 12px; letter-spacing: 0.2em; }
   .cn-title-ui { top: 60%; }
 }
+
+/* The verses during the medallion (Sanskrit, then the English and its source) */
+.cn-verses { position: absolute; left: 0; right: 0; bottom: max(3vh, calc((100vh - 100vw / 2.39) / 2 - 7.5vh)); display: grid; pointer-events: none; }
+.cn-verse {
+  grid-area: 1 / 1; justify-self: center; align-self: end; max-width: min(92vw, 980px); padding: 0 16px; text-align: center;
+  opacity: 0; transform: translateY(8px); filter: blur(6px);
+  transition: opacity 1.4s ease, transform 2.2s cubic-bezier(.2, .7, .2, 1), filter 1.6s ease;
+}
+.cn-verse.on { opacity: 1; transform: none; filter: none; }
+.cn-verse::before {
+  content: ""; position: absolute; inset: -28px -60px -18px; z-index: -1; border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 60%, rgba(6, 4, 2, 0.72) 0%, rgba(6, 4, 2, 0.45) 45%, rgba(6, 4, 2, 0) 72%);
+}
+.cn-verse { position: relative; isolation: isolate; }
+.cn-sa {
+  margin: 0; font: 400 clamp(17px, 2.05vw, 30px)/1.55 "Tiro Devanagari Sanskrit", "Nirmala UI", "Mangal", serif;
+  letter-spacing: 0.02em;
+  background: linear-gradient(180deg, #fff1c9 0%, #e9be6c 48%, #a8722c 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.85)) drop-shadow(0 0 14px rgba(255, 170, 70, 0.25));
+}
+.cn-big .cn-sa { font-size: clamp(26px, 3.6vw, 54px); letter-spacing: 0.08em; }
+.cn-en { margin: 10px auto 0; max-width: 760px; font: italic 500 clamp(13px, 1.15vw, 17px)/1.45 "Cormorant Garamond", Georgia, serif; color: rgba(246, 228, 196, 0.86); text-shadow: 0 1px 8px rgba(0,0,0,0.9); }
+.cn-src { margin: 6px 0 0; font: 500 clamp(10px, 0.8vw, 12px) "Cormorant Garamond", Georgia, serif; letter-spacing: 0.32em; text-transform: uppercase; color: rgba(214, 170, 98, 0.8); }

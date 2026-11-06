@@ -16,8 +16,11 @@ Downloaded 2026-11-06. Changes: resized (Earth's day map to 4096×2048, the rest
 wide) and re-encoded as WebP by `node scripts/build-cinematic-assets.mjs` from the originals in
 `src/` (not committed).
 
-## Optional artwork
+## Bal Gopal artwork
 
-`krishna.webp` (not included): if you add commissioned or properly licensed artwork here, the intro
-shows it inside the artifact instead of the image it draws in code. Credit its artist in
-src/legal/credits.js.
+`krishna_open.webp`, `krishna_closed.webp`, `krishna_mask.png`: the devotional artwork of Lord
+Krishna with the universe in His mouth, by **@worldofluvan** (signature kept in the image),
+supplied by the developer. Make sure you have the artist's permission before publishing the game.
+Built with Blender's Python by `scripts/build-krishna-intro.py` from `src/krishna.jpg` (not
+committed): `_open` is the artwork re-encoded, `_closed` has the mouth closed in a gentle smile
+(skin diffused in, lips painted, chin lifted), `_mask` marks the mouth's inside and lips.

@@ -50,6 +50,10 @@ export class IntroAudio {
     if (until(T("drone_end"))) this._drone(T("start"), T("drone_end"));
     if (fresh("start")) this._dust(T("start"), 8);
     if (fresh("artifact")) this._bells(T("artifact"));
+    if (T("lock") >= now - 0.05) this._ratchets(Math.max(T("artifact"), now), T("lock"));
+    if (fresh("lock")) this._ghanta(T("lock"));
+    if (fresh("vision")) this._shankh(T("vision") + 0.2);
+    if (fresh("part")) this._whoosh(T("part"), 4.6, 0.45);
     if (fresh("flute")) this._flute(T("flute"));
     if (until(T("galaxy") + 6)) this._choir(T("vision"), T("galaxy") + 6);
     if (fresh("vision_through")) this._whoosh(T("vision_through"), 1.6, 0.5);
@@ -361,6 +365,100 @@ export class IntroAudio {
     g.gain.linearRampToValueAtTime(0.06, end - 6);
     g.gain.linearRampToValueAtTime(0, end);
     s.connect(bp).connect(g).connect(this.out);
+  }
+
+  /** The medallion's rings turning: heavy, muffled metal clicks, slowing to the lock. */
+  _ratchets(t, end) {
+    const ctx = this.ctx;
+    let at = t + 0.4, gap = 0.55;
+    while (at < end - 0.2) {
+      const s = this._noiseSrc(at, at + 0.12, 0.7);
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.frequency.value = 900 + Math.random() * 700;
+      bp.Q.value = 6;
+      const g = this._gain(0);
+      g.gain.setValueAtTime(0, at);
+      g.gain.linearRampToValueAtTime(0.05, at + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0005, at + 0.1);
+      s.connect(bp).connect(g).connect(this.out);
+      const o = this._osc("triangle", 110 + Math.random() * 30, at, at + 0.2);
+      const og = this._gain(0);
+      og.gain.setValueAtTime(0.06, at);
+      og.gain.exponentialRampToValueAtTime(0.0005, at + 0.16);
+      o.connect(og).connect(this.out);
+      at += gap * (0.8 + Math.random() * 0.4);
+      gap = Math.min(1.4, gap * 1.07);
+    }
+  }
+
+  /**
+   * A temple bell (ghanta) as the rings lock: a low strike with the slightly
+   * inharmonic partials of a cast bell, its hum ringing long after.
+   */
+  _ghanta(t) {
+    const ctx = this.ctx;
+    const base = f("S", -1);
+    for (const [ratio, v, dec] of [[0.5, 0.5, 11], [1, 1, 8], [1.19, 0.45, 6], [1.5, 0.35, 5], [2, 0.5, 4.5], [2.51, 0.22, 3], [2.66, 0.2, 2.6], [3.01, 0.16, 2], [4.1, 0.08, 1.2]]) {
+      const o = this._osc("sine", base * ratio, t, t + dec + 0.2);
+      o.detune.value = (Math.random() - 0.5) * 8;
+      const g = this._gain(0);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.11 * v, t + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dec);
+      o.connect(g).connect(this.out);
+    }
+    // the clapper's strike
+    const s = this._noiseSrc(t, t + 0.15, 1);
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass"; bp.frequency.value = 2400; bp.Q.value = 2;
+    const g = this._gain(0);
+    g.gain.setValueAtTime(0.09, t);
+    g.gain.exponentialRampToValueAtTime(0.0005, t + 0.12);
+    s.connect(bp).connect(g).connect(this.out);
+  }
+
+  /**
+   * A conch (shankh) as the mouth opens: a brassy, breathy horn on Sa that
+   * swells, holds and lifts a little at the end, the way it's sounded at aarti.
+   */
+  _shankh(t) {
+    const ctx = this.ctx;
+    const dur = 4.2;
+    const fr = f("S", 1);
+    const bus = this._gain(0);
+    bus.gain.setValueAtTime(0, t);
+    bus.gain.linearRampToValueAtTime(0.12, t + 0.7);
+    bus.gain.setValueAtTime(0.12, t + dur - 1.2);
+    bus.gain.linearRampToValueAtTime(0.15, t + dur - 0.5);
+    bus.gain.linearRampToValueAtTime(0, t + dur);
+    const f1 = ctx.createBiquadFilter(); f1.type = "bandpass"; f1.frequency.value = 650; f1.Q.value = 3;
+    const f2 = ctx.createBiquadFilter(); f2.type = "bandpass"; f2.frequency.value = 1500; f2.Q.value = 4;
+    const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
+    lp.frequency.setValueAtTime(900, t);
+    lp.frequency.linearRampToValueAtTime(3200, t + 0.9);
+    const sum = this._gain(1);
+    sum.connect(lp);
+    lp.connect(f1).connect(bus);
+    lp.connect(f2).connect(bus);
+    lp.connect(this._gain(0.35)).connect(bus);
+    bus.connect(this.out);
+    const vib = this._osc("sine", 4.6, t, t + dur + 0.2);
+    const vibG = this._gain(3);
+    vib.connect(vibG);
+    for (const [mul, d] of [[1, 0], [1, 6], [0.5, -4]]) {
+      const o = this._osc("sawtooth", fr * mul * 0.94, t, t + dur + 0.2);
+      o.frequency.exponentialRampToValueAtTime(fr * mul, t + 0.45);
+      o.frequency.setValueAtTime(fr * mul, t + dur - 0.9);
+      o.frequency.linearRampToValueAtTime(fr * mul * 1.03, t + dur - 0.2);
+      o.detune.value = d;
+      vibG.connect(o.frequency);
+      o.connect(sum);
+    }
+    const br = this._noiseSrc(t, t + dur, 1);
+    const bf = ctx.createBiquadFilter(); bf.type = "bandpass"; bf.frequency.value = 1800; bf.Q.value = 1.5;
+    const bg = this._gain(0.025);
+    br.connect(bf).connect(bg).connect(bus);
   }
 
   /** A reverse-swell into the title: noise and a rising tone. */

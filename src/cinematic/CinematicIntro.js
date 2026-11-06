@@ -1,14 +1,14 @@
 import * as THREE from "three";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import "./intro.css";
-import { DivineArtifact } from "./DivineArtifact.js";
+import { Medallion, MEDALLION } from "./Medallion.js";
 import { Cosmos } from "./Cosmos.js";
 import { WorldFlight } from "./WorldFlight.js";
 import { TitleReveal } from "./TitleReveal.js";
 import { IntroAudio } from "./IntroAudio.js";
 
-// The opening cinematic: one continuous journey from a divine artifact, into
-// the universe within it, out through a multiverse, a galaxy cluster and the
+// The opening cinematic: one continuous journey from an antique bronze
+// medallion holding Bal Gopal's image, into the universe within His mouth, out through a multiverse, a galaxy cluster and the
 // solar system, down onto India and, through the clouds, onto the game's own
 // map, ending on the title. The conductor: it owns the clock, the cues, every
 // camera move, the fades and the UI; main.js calls frame() each frame and
@@ -23,11 +23,23 @@ import { IntroAudio } from "./IntroAudio.js";
 export const AUTO_PLAY_INTRO = true;
 
 // The cue sheet (seconds): shots, transitions and the score's entries
+// (artifact .. vision_through follow Medallion.js's MEDALLION timing)
 export const CUES = {
-  start: 0, artifact: 1.5, flute: 3.2, vision: 12, vision_through: 19.2,
-  multiverse: 20.2, multiverse_through: 30, galaxy: 31, galaxy_through: 40.2,
-  solar: 41.2, earth_dive: 50.5, india: 51.5, drone_end: 60, world: 58.6, title: 80, end: 94,
+  start: 0, artifact: MEDALLION.EMERGE, flute: 3.2, lock: MEDALLION.LOCK, vision: MEDALLION.OPEN, part: MEDALLION.PART,
+  vision_through: MEDALLION.THROUGH,
+  multiverse: 24.2, multiverse_through: 34, galaxy: 35, galaxy_through: 44.2,
+  solar: 45.2, earth_dive: 54.5, india: 55.5, drone_end: 64, world: 62.6, title: 84, end: 98,
 };
+
+// Words on screen during the medallion: [from, to, Sanskrit, English, source]
+const VERSES = [
+  [6.6, 12.6, "यदा यदा हि धर्मस्य ग्लानिर्भवति भारत ।<br>अभ्युत्थानमधर्मस्य तदात्मानं सृजाम्यहम् ॥",
+    "Whenever dharma declines and adharma rises, O Bharata, I manifest Myself.", "Bhagavad Gita 4.7"],
+  [13.3, 16.2, "॥ जय श्री कृष्ण ॥", "", ""],
+  [16.8, 22.4, "सा तत्र ददृशे विश्वं जगत् स्थास्नु च खं दिशः ।<br>साद्रिद्वीपाब्धिभूगोलं सवाय्वग्नीन्दुतारकम् ॥",
+    "Within His mouth, Mother Yashoda beheld the whole universe: all that moves and all that is still, the sky, the oceans, the earth, the moon and the stars.",
+    "Srimad Bhagavatam 10.8.37"],
+];
 
 const ss = (x, a, b) => THREE.MathUtils.smoothstep(x, a, b);
 const lerp = THREE.MathUtils.lerp;
@@ -89,6 +101,10 @@ export class CinematicIntro {
       <div class="cn-fade"></div>
       <div class="cn-bar cn-top"></div><div class="cn-bar cn-bottom"></div>
       <div class="cn-vignette"></div>
+      <div class="cn-verses">${VERSES.map(([, , sa, en, src], i) => `
+        <div class="cn-verse${en ? "" : " cn-big"}" data-i="${i}">
+          <p class="cn-sa" lang="sa">${sa}</p>${en ? `<p class="cn-en">${en}</p><p class="cn-src">${src}</p>` : ""}
+        </div>`).join("")}</div>
       <div class="cn-title-ui">
         <p class="cn-tagline"></p>
       </div>
@@ -98,6 +114,15 @@ export class CinematicIntro {
         <button class="cn-skip" type="button">Skip intro <kbd>Esc</kbd></button>
       </div>`;
     document.body.append(ui);
+    this.verseEls = [...ui.querySelectorAll(".cn-verse")];
+    // Devanagari and a serif for the verses (system fonts until they arrive)
+    if (!document.getElementById("cn-fonts")) {
+      const l = document.createElement("link");
+      l.id = "cn-fonts";
+      l.rel = "stylesheet";
+      l.href = "https://fonts.googleapis.com/css2?family=Tiro+Devanagari+Sanskrit&family=Cormorant+Garamond:ital,wght@0,500;1,500&display=swap";
+      document.head.append(l);
+    }
     this.fadeEl = ui.querySelector(".cn-fade");
     this.soundEl = ui.querySelector(".cn-sound");
     this.titleUi = ui.querySelector(".cn-title-ui");
@@ -149,7 +174,7 @@ export class CinematicIntro {
     this.envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
     pmrem.dispose();
     this.cosmos = new Cosmos({ lite: this.lite });
-    this.artifact = new DivineArtifact({ envMap: this.envRT.texture, lite: this.lite });
+    this.artifact = new Medallion({ scene: this.cosmos.scene, envMap: this.envRT.texture, lite: this.lite });
     this.cosmos.scene.add(this.artifact.group);
     this.titleFx = new TitleReveal({ title: this.title, envMap: this.envRT.texture, lite: this.lite });
     this.flight = new WorldFlight({ world: this.world, path: this.flightPath, lite: this.lite });
@@ -209,6 +234,7 @@ export class CinematicIntro {
   finish(fade = 0.9) {
     if (this.mode === "finish") return;
     this.mode = "finish";
+    for (const v of this.verseEls) v.classList.remove("on");
     this.finishAt = performance.now() + fade * 1000;
     this.finishFade = fade;
     this.audio?.stop(fade + 0.4);
@@ -288,22 +314,18 @@ export class CinematicIntro {
     this._prevCam.copy(cam.position);
 
     if (t < CUES.multiverse) {
-      // 01-02: the artifact forms; the image appears; the universe opens within it; through it
-      const form = ss(t, CUES.artifact, 7.5), reveal = ss(t, 5, 10.5), vision = ss(t, CUES.vision, 18.2), glow = ss(t, 18.4, 19.6);
-      A.update(t, { form, reveal, vision, glow });
-      let z;
-      if (t < CUES.vision) z = lerp(19, 9.2, easeInOut(Math.min(1, t / CUES.vision)));
-      else z = lerp(9.2, 0.35, Math.pow(ss(t, CUES.vision, 19.7), 2.2));
-      const drift = 1 - ss(t, CUES.vision, 17);
-      cam.position.set(Math.sin(t * 0.12) * 0.6 * drift, 0.25 * drift + Math.sin(t * 0.09) * 0.2 * drift, z);
-      cam.up.set(0, 1, 0);
-      cam.lookAt(0, 0, 0);
-      fov = lerp(36, 64, ss(t, 15, 19.7));
-      const k = ss(t, 11, 18);
-      palette(C, "divine", "vision", k, ss(t, 2.5, 8) * (0.22 + 0.45 * k));
-      C.starUniforms.uAlpha.value = ss(t, 6, 13);
-      fadeBlack = 1 - ss(t, 0, 2.2);
-      flash = bell(t, 18.9, 19.7, 19.8, 20.6);
+      // 01-02: the medallion in the dark mechanism; Bal Gopal smiles; His mouth opens on
+      // the universe; the rings part and we go in (Medallion.js drives the camera)
+      A.update(t, cam);
+      fov = cam.fov;
+      // The cosmos behind stays dark until the universe pours out of the mouth
+      const k = ss(t, CUES.part + 1.5, CUES.vision_through);
+      palette(C, "divine", "vision", 1, 0.6 * k);
+      C.starUniforms.uAlpha.value = k;
+      fadeBlack = 1 - ss(t, 0, 0.8);
+      const th = CUES.vision_through;
+      flash = bell(t, th - 0.6, th + 0.15, th + 0.4, th + 1.3);
+      flashCol = "#fff0d2";
     } else if (t < CUES.galaxy) {
       // 03: the multiverse: faster and faster between universes, into the last one
       const k = (t - CUES.multiverse) / (CUES.galaxy - CUES.multiverse);
@@ -322,7 +344,9 @@ export class CinematicIntro {
       palette(C, "vision", "multi", ss(k, 0, 0.3), 0.7);
       C.starUniforms.uAlpha.value = 1;
       streak = ss(k, 0.15, 0.6);
-      flash = bell(t, 29.7, 30.4, 30.5, 31.3);
+      const mt = CUES.multiverse_through;
+      flash = bell(t, mt - 0.3, mt + 0.4, mt + 0.5, mt + 1.3);
+      if (!A.group.visible) A.dim();
     } else if (t < CUES.solar) {
       // 04: the galaxy cluster: across the cosmic web, then down into one spiral galaxy
       const k = (t - CUES.galaxy) / (CUES.solar - CUES.galaxy);
@@ -336,7 +360,8 @@ export class CinematicIntro {
       fov = lerp(55, 42, e);
       palette(C, "multi", "cluster", ss(k, 0, 0.25), 0.55);
       streak = (1 - ss(k, 0, 0.25)) * 0.8;
-      flash = bell(t, 39.8, 40.5, 40.6, 41.6);
+      const gt = CUES.galaxy_through;
+      flash = bell(t, gt - 0.4, gt + 0.3, gt + 0.4, gt + 1.4);
       flashCol = "#fff7e6";
     } else if (t < CUES.india) {
       // 05: in from the outer solar system: past Saturn, Jupiter and Mars, to Earth
@@ -386,6 +411,7 @@ export class CinematicIntro {
     C.update(t, this._camVel);
     // Letterbox for the cosmic shots
     this.ui.classList.toggle("bars", t > 0.5);
+    for (let i = 0; i < VERSES.length; i++) this.verseEls[i].classList.toggle("on", t >= VERSES[i][0] && t < VERSES[i][1]);
     if (flash > 0) this._fade(flash, flashCol);
     else this._fade(fadeBlack, "#000");
   }
