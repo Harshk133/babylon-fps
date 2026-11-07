@@ -158,6 +158,7 @@ export class Atmosphere {
     for (let i = 0; i < r.length; i++) r[i] = Math.random();
     mistGeo.setAttribute("aRand", new THREE.InstancedBufferAttribute(r, 4));
     mistGeo.instanceCount = mist;
+    this.mistCount = mist;
     this.mistMat = new THREE.ShaderMaterial({
       uniforms: {
         ...terrainUniforms,
@@ -280,5 +281,11 @@ export class Atmosphere {
     } else {
       this.light.intensity = 0;
     }
+  }
+
+  /** Share of the mist banks drawn (PerfManager tiers). */
+  setMistDensity(f) {
+    if (!this.mist) return;
+    this.mist.geometry.instanceCount = Math.round(this.mistCount * Math.max(0, Math.min(1, f)));
   }
 }

@@ -2730,3 +2730,26 @@ svg.gi { fill: currentColor; stroke: none; }
 @keyframes bre-breathe { 0%, 100% { opacity: 0.75; } 50% { opacity: 1; } }
 
 body.touch #br-edge { top: 128px; zoom: 0.72; }
+
+/* ── Hidden overlays cost nothing ──────────────────────────────────────────────
+   These screens fade with opacity, but an element at opacity 0 is still
+   composited every frame, its backdrop blur still evaluated and its endless
+   animations (the Play button's shine, the death screen's pulse) still ticking.
+   Once faded out they also go visibility: hidden (after the fade, so it looks the
+   same) and their animations pause. Measured: hiding the HUD DOM saved ~6 ms of
+   frame time on an Intel HD 530, part of it from these screens while unseen. */
+html #lobby:not(.visible), html #death-screen:not(.visible), html #legal:not(.open) {
+  visibility: hidden;
+}
+html #lobby { transition: opacity 0.35s ease, visibility 0s linear 0.35s; }
+html #lobby.visible { transition: opacity 0.35s ease, visibility 0s; }
+html #death-screen { transition: opacity 1.2s ease, visibility 0s linear 1.2s; }
+html #death-screen.visible { transition: opacity 1.2s ease, visibility 0s; }
+html #legal { transition: opacity 0.3s ease, visibility 0s linear 0.3s; }
+html #legal.open { transition: opacity 0.3s ease, visibility 0s; }
+#lobby:not(.visible) *, #lobby:not(.visible) *::after, #death-screen:not(.visible) *, #legal:not(.open) * {
+  animation-play-state: paused !important;
+}
+/* Film grain: PostFX draws its own when the grade pass is on, and on Low / phones
+   a full-screen blended layer over the canvas isn't worth 6 % opacity of noise */
+body.lite-hud #grain { display: none; }

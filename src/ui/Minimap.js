@@ -73,7 +73,7 @@ export class Minimap {
   /** px, pz: player position. yaw: camera yaw (forward = (sin yaw, cos yaw)). */
   update(now, px, pz, yaw) {
     if (now < this._next) return;
-    this._next = now + 1000 / REDRAW_HZ;
+    this._next = now + 1000 / (this.redrawHz ?? REDRAW_HZ);
 
     const ctx = this.ctx;
     const S = this.size;

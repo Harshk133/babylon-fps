@@ -1561,7 +1561,8 @@ export class Soldier {
       const across = _v4.set(want.z, 0, -want.x).normalize();   // level, across the aim (pitching about it raises the barrel)
       // A few passes: turning the spine also swings the gun round the chest, so one
       // pass leaves a remainder when the clip's gun is far off (strafing, firing)
-      for (let iter = 0; iter < 3; iter++) {
+      // (lite: one pass. A far soldier on its light mesh: the remainder can't be seen)
+      for (let iter = 0, n = this.lite ? 1 : 3; iter < n; iter++) {
         this.weapon.getWorldQuaternion(_q1);
         const cur = _v3.copy(this.barrel).applyQuaternion(_q1);
         const flat = Math.hypot(cur.x, cur.z);
@@ -1576,7 +1577,8 @@ export class Soldier {
       }
     }
 
-    this._leftHandIK(dt, armed);
+    // (lite: the clip's own hand. A few centimetres off the gun at 35 m+)
+    if (!this.lite) this._leftHandIK(dt, armed);
     side.copy(_xAxis).applyQuaternion(_q2);   // (the IK used these vectors)
     fwd.set(0, 0, 1).applyQuaternion(_q2);
 

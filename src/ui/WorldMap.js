@@ -349,7 +349,7 @@ export class WorldMap {
         // Height range of the playable land only (the edge ridges would wash it out)
         if (Math.hypot(x, z) < PLAY_RADIUS && v > SEA_Y + 0.5) { if (v < lo) lo = v; if (v > hi) hi = v; }
       }
-      if ((j & 7) === 7) yield;
+      yield;   // one row a step, so a time budget can actually hold
     }
     const span = Math.max(1, hi - lo);
     // Light from the upper left of the picture, a little above the horizon (classic hill shading)
@@ -406,7 +406,7 @@ export class WorldMap {
         d[o + 2] = Math.min(255, col[2] * m);
         d[o + 3] = 255;
       }
-      if ((j & 7) === 7) yield;
+      yield;   // one row a step, so a time budget can actually hold
     }
     g.putImageData(img, 0, 0);
     return cv;

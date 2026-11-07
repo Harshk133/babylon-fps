@@ -81,6 +81,7 @@ export class ZombieManager {
     playerRadius, getTargets, onPlayerHit, regenPlayerHealth,
     enemyFire, sfx, loadGLB,
   }) {
+    this.lodScale = 1;   // < 1: animation steps less often closer in (PerfManager CPU tiers)
     this.world = world;
     this.playerRadius = playerRadius;
     this.getTargets = getTargets;
@@ -976,6 +977,25 @@ export class ZombieManager {
     m.marker.scale.set(s, s, s);
   }
 
+  /**
+   * Draw each living monster between its last two physics steps
+   * (body.interpolatedPosition, which cannon fills in every world.step), so
+   * they move evenly at any frame rate instead of in 60 Hz stair-steps. Only the
+   * drawn x / z change: gameplay reads the body, and root.position.y (the
+   * ground under it) stays as _pinToGround set it. Call after update().
+   */
+  applyRenderInterp() {
+    for (const m of this.pool.active) {
+      if (m.dying) continue;
+      const b = m.body, ip = b.interpolatedPosition, p = b.position;
+      const dx = ip.x - p.x, dz = ip.z - p.z;
+      if (dx * dx + dz * dz > 4) continue;     // just spawned or moved: no stale blend
+      m.root.position.x = ip.x;
+      m.root.position.z = ip.z;
+      if (m.marker?.visible) { m.marker.position.x = ip.x; m.marker.position.z = ip.z; }
+    }
+  }
+
   update(delta) {
     const targets = this._targets = this.getTargets();
     if (!targets.length) return;
@@ -1082,7 +1102,7 @@ export class ZombieManager {
     for (const m of active) {
       if (m.dying || m.distXZ >= FAR_TIER) continue;
       m.animDt = (m.animDt ?? 0) + delta;
-      const every = m.distXZ < ANIM_NEAR || m.def.flying ? 1 : m.distXZ < ANIM_MID ? 2 : 3;
+      const every = m.distXZ < ANIM_NEAR * this.lodScale || m.def.flying ? 1 : m.distXZ < ANIM_MID * this.lodScale ? 2 : 3;
       if ((this._animFrame + m.netId) % every !== 0) continue;
       m.mixer.update(m.animDt);
       m.wMixer?.update(m.animDt);

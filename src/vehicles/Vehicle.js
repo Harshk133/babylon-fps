@@ -302,6 +302,7 @@ function spinWheel(r, w) {
   g.add(new THREE.Mesh(mergeGeometries(parts.map(p => p.toNonIndexed()), false), tyreMat));
   g.add(new THREE.Mesh(new THREE.CylinderGeometry(r * 0.55, r * 0.55, w + 0.02, 10).rotateZ(Math.PI / 2), rimMat));
   g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  mergeStaticMeshes(g, { flatten: true });   // tyre + rim: one draw call
   return g;
 }
 
@@ -337,14 +338,15 @@ export class Vehicle {
     // A bike's wheels come out of the model to turn on their own
     const B = S.bike;
     this.bikeWheels = B ? extractWheels(holder, B.wheels) : [];
-    mergeStaticMeshes(holder); // one draw call per material, not per part
+    // One draw call per material, not per part; plain colours share a few vertex-coloured materials
+    mergeStaticMeshes(holder, { flatten: true });
     // (in a frame that dips on the brakes and squats on the throttle: the suspension)
     this.chassis = new THREE.Group();
     this.chassis.add(holder);
     this.root.add(this.chassis);
     this.height = size.y * s;
     for (const w of this.bikeWheels) {
-      mergeStaticMeshes(w.group);
+      mergeStaticMeshes(w.group, { flatten: true });
       this.root.add(w.group);
     }
     if (B) {
@@ -371,19 +373,12 @@ export class Vehicle {
     // Lamps just glow; the beam is a shared spotlight lent out by main.js (aimHeadlight),
     // since every light in the scene costs every pixel, lit or not
     this.lampMat = new THREE.MeshStandardMaterial({ color: 0x444033, emissive: 0xfff0c8, emissiveIntensity: 0 });
-    const lampGeo = new THREE.SphereGeometry(0.085, 12, 8);
-    for (const p of S.lamps) {
-      const lamp = new THREE.Mesh(lampGeo, this.lampMat);
-      lamp.position.set(p[0], p[1], p[2] + 0.04);
-      this.root.add(lamp);
-    }
+    // All the lamps are one mesh, and all the tail lights another (one draw call each)
+    const lampGeos = S.lamps.map(p => new THREE.SphereGeometry(0.085, 12, 8).translate(p[0], p[1], p[2] + 0.04));
+    if (lampGeos.length) this.root.add(new THREE.Mesh(lampGeos.length > 1 ? mergeGeometries(lampGeos) : lampGeos[0], this.lampMat));
     this.tailMat = new THREE.MeshStandardMaterial({ color: 0x330000, emissive: 0xff2010, emissiveIntensity: 0 });
-    const tailGeo = new THREE.BoxGeometry(0.1, 0.06, 0.03);
-    for (const p of S.tails) {
-      const tail = new THREE.Mesh(tailGeo, this.tailMat);
-      tail.position.set(p[0], p[1], p[2]);
-      this.root.add(tail);
-    }
+    const tailGeos = S.tails.map(p => new THREE.BoxGeometry(0.1, 0.06, 0.03).translate(p[0], p[1], p[2]));
+    if (tailGeos.length) this.root.add(new THREE.Mesh(tailGeos.length > 1 ? mergeGeometries(tailGeos) : tailGeos[0], this.tailMat));
 
     this.body = new CANNON.Body({
       mass: 0, type: CANNON.Body.KINEMATIC, material,

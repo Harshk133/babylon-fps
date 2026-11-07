@@ -12,6 +12,7 @@ export const SETTING_DEFAULTS = {
   bots: false,          // battle royale bots in your room (anyone in the room turning them on brings them in)
   sound: true,          // every sound in the game
   volume: 0.9,          // master volume 0..1
+  fps: "auto",          // desktop frame rate: "auto" | "max" | "60" | "30" (phones use the touch settings' own)
 };
 
 export class Settings {
@@ -34,6 +35,8 @@ const TOGGLES = [
   { id: "sound", title: "Sound", text: "Every sound in the game. Off mutes it all." },
   { id: "volume", title: "Volume", text: "Master volume.", range: true },
   { id: "autoDoors", title: "Auto-open doors", text: "Doors swing open as you walk up to them and shut behind you. Off: press the use key." },
+  { id: "fps", title: "Frame rate", text: "Auto runs at your screen's rate and drops to an even half of it when the game can't keep up. Capped rates keep laptops cooler.", desktop: true,
+    choices: [["auto", "Auto"], ["max", "Unlimited"], ["60", "60"], ["30", "30"]] },
   { id: "bots", title: "Bots in Battle Royale", text: "AI players fill your room. If anyone in the room turns this on, everyone in it plays with bots. Takes effect in the warm-up." },
 ];
 
@@ -76,6 +79,8 @@ export class SettingsPanel {
     this.el.addEventListener("click", e => {
       const tab = e.target.closest("[data-tab]");
       if (tab) { this.tab(tab.dataset.tab); return; }
+      const ch = e.target.closest("[data-choice]");
+      if (ch) { this.settings.set(ch.dataset.choice, ch.dataset.val); this._render(); return; }
       const tog = e.target.closest("[data-toggle]");
       if (tog) { const id = tog.dataset.toggle; this.settings.set(id, !this.settings.get(id)); this._render(); return; }
       const bind = e.target.closest("[data-bind]");
@@ -137,6 +142,13 @@ export class SettingsPanel {
     }
     let html = "";
     for (const t of TOGGLES) {
+      if (t.desktop && this.touch) continue;
+      if (t.choices) {
+        const v = this.settings.get(t.id);
+        html += `<div class="st-toggle st-choice"><span class="st-ttext"><b>${t.title}</b><small>${t.text}</small></span>
+          <span class="st-seg">${t.choices.map(([val, label]) => `<button data-choice="${t.id}" data-val="${val}" class="${v === val ? "on" : ""}">${label}</button>`).join("")}</span></div>`;
+        continue;
+      }
       if (t.range) {
         const v = Math.round((this.settings.get(t.id) ?? 1) * 100);
         html += `<label class="st-toggle st-range"><span class="st-ttext"><b>${t.title}</b><small>${t.text}</small></span>

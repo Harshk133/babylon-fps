@@ -137,6 +137,7 @@ export class Grass {
     }
     geo.setAttribute("aRand", new THREE.InstancedBufferAttribute(rand, 4));
     geo.instanceCount = count;
+    this.count = count;
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         ...THREE.UniformsLib.fog,
@@ -160,6 +161,13 @@ export class Grass {
     this.mesh.visible = count > 0;
     scene.add(this.mesh);
     this._time = 0;
+  }
+
+  /** Share of the tufts drawn (PerfManager tiers): a prefix of randomly placed instances, so it thins evenly. */
+  setDensity(f) {
+    const n = Math.round(this.count * Math.max(0, Math.min(1, f)));
+    this.mesh.geometry.instanceCount = n;
+    this.mesh.visible = n > 0;
   }
 
   /** light: overall brightness colour from the day/night lights. wind: m/s. wet: 0..1 darkens. */

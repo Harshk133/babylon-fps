@@ -14,6 +14,28 @@ import { IS_TOUCH } from "./input/TouchControls.js";
 const KEY = "babylon-fps:quality";
 
 export const QUALITY_PRESETS = {
+  // For machines that struggle even on Low: under-native resolution, no shadows, the least overdraw
+  performance: {
+    label: "Performance",
+    antialias: false,
+    pixelRatioMax: 0.7,
+    pixelRatioMin: 0.5,
+    shadows: false,
+    shadowEvery: 0,
+    grass: 900,
+    pebbles: 40,
+    rain: 1200,
+    mist: 12,
+    terrainStep: 2,
+    mountainSegments: 64,
+    anisotropy: 1,
+    pointLights: 1,
+    fireLights: 1,
+    houseLights: 1,
+    wreckLight: false,
+    post: "off",
+    caveLights: 1,
+  },
   low: {
     label: "Low",
     antialias: false,
@@ -77,6 +99,29 @@ export const QUALITY_PRESETS = {
     post: "full",
     caveLights: 3,
   },
+  // Dedicated GPUs: sharper, denser, bigger shadow map (picked by hand; auto stops at High)
+  ultra: {
+    label: "Ultra",
+    antialias: true,
+    pixelRatioMax: 2,
+    pixelRatioMin: 0.75,
+    shadows: true,
+    shadowEvery: 1,
+    shadowMap: 2048,
+    grass: 18000,
+    pebbles: 360,
+    rain: 12000,
+    mist: 120,
+    terrainStep: 1,
+    mountainSegments: 256,
+    anisotropy: 16,
+    pointLights: 5,
+    fireLights: 3,
+    houseLights: 3,
+    wreckLight: true,
+    post: "full",
+    caveLights: 4,
+  },
 };
 
 // Phones: tile GPUs resolve MSAA on-chip, so antialiasing is close to free,
@@ -85,6 +130,30 @@ export const QUALITY_PRESETS = {
 // lit pixel, even at intensity 0) and overdraw (grass, rain, mist). So the
 // touch presets trade those for resolution, which is what you actually see.
 const TOUCH_TUNING = {
+  performance: {
+    pixelRatioMax: 1,
+    pixelRatioMin: 0.75,
+    grass: 700,
+    pebbles: 30,
+    rain: 800,
+    mist: 8,
+  },
+  ultra: {
+    antialias: true,
+    pixelRatioMax: 2,
+    pixelRatioMin: 1.25,
+    shadowEvery: 1,
+    shadowMap: 1024,
+    grass: 9000,
+    pebbles: 260,
+    rain: 6000,
+    mist: 60,
+    fireLights: 1,
+    houseLights: 1,
+    post: "grade",
+    caveLights: 2,
+    pointLights: 3,
+  },
   low: {
     pixelRatioMax: 1.25,
     pixelRatioMin: 0.85,
@@ -158,6 +227,10 @@ function queryGpuName() {
   }
 }
 
+const INTEGRATED = /intel|uhd|iris|hd graphics|mali|adreno|powervr|apple gpu|vega [0-9] |radeon\(tm\) graphics/;
+/** A desktop / laptop GPU that shares memory with the CPU (Intel HD / UHD / Iris, AMD APUs). */
+export const IS_IGPU = !IS_TOUCH && INTEGRATED.test(gpuName().toLowerCase());
+
 /** Best guess for this machine. */
 export function detectQuality() {
   const gpu = gpuName().toLowerCase();
@@ -165,7 +238,7 @@ export function detectQuality() {
   const cores = navigator.hardwareConcurrency ?? 4;
   if (/swiftshader|llvmpipe|software|microsoft basic/.test(gpu)) return "low";
   if (IS_TOUCH) return detectPhoneQuality(gpu, mem, cores);
-  const integrated = /intel|uhd|iris|hd graphics|mali|adreno|powervr|apple gpu|vega [0-9] |radeon\(tm\) graphics/.test(gpu);
+  const integrated = INTEGRATED.test(gpu);
   if (mem <= 4 || cores <= 4) return "low";
   if (integrated || mem <= 8) return "medium";
   return "high";
@@ -197,5 +270,10 @@ export function saveQuality(value) {
 const setting = savedQuality();
 export const QUALITY_NAME = QUALITY_PRESETS[setting] ? setting : detectQuality();
 export const QUALITY = QUALITY_PRESETS[QUALITY_NAME];
+// "Auto" on an integrated desktop GPU: no post-processing pass. Measured on an
+// Intel HD 530 at 1600×900, the grade pass and its half-float scene target cost
+// ~6.5 ms of GPU time a frame (about a third of the frame) for a look the
+// materials' own tone mapping mostly gives anyway. A preset picked by hand keeps it.
+if (!QUALITY_PRESETS[setting] && IS_IGPU && QUALITY.post !== "off") QUALITY.post = "off";
 /** What the lobby shows: "auto" or a preset name. */
 export const QUALITY_SETTING = QUALITY_PRESETS[setting] ? setting : "auto";

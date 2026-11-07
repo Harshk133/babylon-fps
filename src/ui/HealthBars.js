@@ -110,7 +110,7 @@ export class HealthBars {
       m.hbTrail += (hp - m.hbTrail) * k;
       const def = m.def;
       if (def.boss || (!def.healthBar && hp >= 0.999)) continue;
-      const p = m.body.position;
+      const p = m.root.position;   // the drawn spot (render-interpolated)
       const dx = p.x - viewer.x, dz = p.z - viewer.z;
       const d = Math.hypot(dx, dz);
       if (d > SHOW_RANGE) continue;

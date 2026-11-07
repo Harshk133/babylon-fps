@@ -44,6 +44,8 @@ export class Net {
     this.handlers = new Map();
     this.connected = false;
     this.ping = 0;
+    // Traffic counters (read by the ?perf=1 overlay; a few adds per message otherwise)
+    this.stats = { inMsgs: 0, inBytes: 0, outMsgs: 0, outBytes: 0, parseMs: 0 };
     this._pingTimer = null;
     this._pingSent = 0;   // when the unanswered ping went out (0: none outstanding)
     this.key = tabKey();
@@ -162,7 +164,11 @@ export class Net {
       };
       ws.onmessage = ev => {
         let msg;
+        const st = this.stats;
+        st.inMsgs++; st.inBytes += ev.data.length || 0;
+        const tp = performance.now();
         try { msg = JSON.parse(ev.data); } catch { return; }
+        st.parseMs += performance.now() - tp;
         switch (msg.t) {
           case "welcome":
             this.id = msg.id;
@@ -198,8 +204,11 @@ export class Net {
 
   /** to: player id, "host", or omitted for everyone else. Queued while reconnecting. */
   send(msg) {
-    if (this.connected && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
-    else if (this.reconnecting && !STREAMS.has(msg.t)) {
+    if (this.connected && this.ws?.readyState === WebSocket.OPEN) {
+      const text = JSON.stringify(msg);
+      this.stats.outMsgs++; this.stats.outBytes += text.length;
+      this.ws.send(text);
+    } else if (this.reconnecting && !STREAMS.has(msg.t)) {
       this._outbox.push(msg);
       if (this._outbox.length > OUTBOX_MAX) this._outbox.shift();
     }

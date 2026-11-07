@@ -15,6 +15,10 @@ const POS_SMOOTH  = 14;    // exp rate toward the latest (extrapolated) position
 const MAX_EXTRAP  = 0.25;  // seconds of dead reckoning between packets
 const TAG_HEIGHT  = 2.25;  // metres above the feet
 const PVP_TAG_RANGE = 45;  // battle royale: enemy names only show up close (and not through walls)
+const OFFSCREEN_NEAR = 12; // m: closer than this a soldier animates fully even out of view
+const _frustum = new THREE.Frustum();
+const _projView = new THREE.Matrix4();
+const _sphere = new THREE.Sphere(new THREE.Vector3(), 1.4);
 const LOD_FAR     = 35;    // m: past this a soldier draws its far mesh (~25% of the triangles)
 const ANIM_MID    = 40;    // m: past this its animation updates every other frame…
 const ANIM_FAR    = 80;    // …and past this every fourth (with the time it skipped)
@@ -61,6 +65,7 @@ export class RemotePlayers {
    */
   constructor({ scene, world, loader, effects, sfx, material, capsule, addCapsule }) {
     this.scene = scene;
+    this.lodScale = 1;   // < 1: far mesh and slower animation closer in (PerfManager CPU tiers)
     this.world = world;
     this.loader = loader;
     this.effects = effects;
@@ -283,6 +288,10 @@ export class RemotePlayers {
 
   update(delta, camera, feetOffset) {
     const k = 1 - Math.exp(-POS_SMOOTH * delta);
+    // What's on screen (soldiers out of view animate less often: see below)
+    camera.updateMatrixWorld();
+    _projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_projView);
     for (const p of this.players.values()) {
       if (!p.hasState) continue;
       // Dead reckoning between packets, then smooth toward it
@@ -318,12 +327,24 @@ export class RemotePlayers {
         }
         // Far away: the light mesh, and the animation stepped less often (with the time it skipped)
         const far = camera.position.distanceTo(p.root.position);
-        p.soldier.setDetail(far > LOD_FAR ? 1 : 0);
+        const distant = far > LOD_FAR * this.lodScale;
+        p.soldier.setDetail(distant ? 1 : 0);
+        p.soldier.lite = distant;     // fewer procedural passes on the light mesh (Soldier._procedural)
         p.animAcc = (p.animAcc ?? 0) + delta;
         p.animTick = ((p.animTick ?? 0) + 1) % 4;
-        const every = far > ANIM_FAR ? 4 : far > ANIM_MID ? 2 : 1;
+        let every = far > ANIM_FAR * this.lodScale ? 4 : far > ANIM_MID * this.lodScale ? 2 : 1;
+        // Out of view and not right beside you: every 4th frame at most (it can
+        // still throw a shadow into view, so it keeps moving, just less often)
+        if (every < 4 && far > OFFSCREEN_NEAR) {
+          _sphere.center.copy(p.root.position); _sphere.center.y += 0.9;
+          if (!_frustum.intersectsSphere(_sphere)) every = 4;
+        }
         if (p.animTick % every === 0 && p.root.visible) {
-          p.root.updateMatrixWorld(true);
+          // Only the root's own matrix: everything the animation reads brings its
+          // parents up to date itself, and the scene update does the rest once.
+          // (Refreshing the whole skeleton, gun and gear here was ~6 % of the main
+          // thread with 24 soldiers round you.)
+          p.root.updateWorldMatrix(true, false);
           const yaw = p.root.rotation.y;
           const sy = Math.sin(yaw), cy = Math.cos(yaw);
           p.soldier.update(p.animAcc, {

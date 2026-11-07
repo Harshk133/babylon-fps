@@ -107,6 +107,8 @@ import { ProgressUI } from "./ui/ProgressUI.js";
 import { TouchControls, IS_TOUCH, IS_NATIVE } from "./input/TouchControls.js";
 import { STANCES, setCapsuleStance } from "./player/Stance.js";
 import { PerfOverlay, PERF_ENABLED, BENCH_ENABLED } from "./debug/PerfOverlay.js";
+import { RenderInterp } from "./physics/RenderInterp.js";
+import { PerfManager } from "./render/PerfManager.js";
 import { StaticGridBroadphase } from "./physics/StaticGridBroadphase.js";
 import { Bots, isBotId } from "./br/Bots.js";
 
@@ -659,59 +661,33 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 // one program at a time; in a release build that stall is pure loading time
 renderer.debug.checkShaderErrors = import.meta.env.DEV;
 
-// ─── Dynamic resolution ───────────────────────────────────────────────────────
+// ─── Frame pacing, dynamic resolution, quality tiers (render/PerfManager.js) ───
 // Drops the render scale when frames run long and creeps back up when there's
-// headroom, so a heavy moment (big horde, explosions) costs sharpness, not FPS.
+// headroom, so a heavy moment (big horde, explosions) costs sharpness, not FPS;
+// caps the frame rate to an even divisor of the screen's refresh rate; and past
+// what resolution can fix, sheds work in tiers (applyPerfTiers).
 const MAX_PIXEL_RATIO = Math.min(window.devicePixelRatio, QUALITY.pixelRatioMax);
 const MIN_PIXEL_RATIO = Math.min(QUALITY.pixelRatioMin, MAX_PIXEL_RATIO);
-const perf = { ratio: MAX_PIXEL_RATIO, avg: 16.7, logic: 8, slow: 0, fast: 0, upWait: 3000, raisedAt: -1e9 };
-renderer.setPixelRatio(perf.ratio);
+renderer.setPixelRatio(MAX_PIXEL_RATIO);
+const perfMgr = new PerfManager({
+  touch: IS_TOUCH,
+  maxRatio: MAX_PIXEL_RATIO,
+  minRatio: MIN_PIXEL_RATIO,
+  canScale: () => postFx.canScale,
+  // With the grade pass, the scale changes inside its target for free; otherwise the canvas is resized
+  applyRatio: r => {
+    if (postFx.canScale) postFx.setScale(r / MAX_PIXEL_RATIO);
+    else { renderer.setPixelRatio(r); syncPostSize(); }
+  },
+  // A resize reallocates the canvas and targets: a visible hitch. Not while you are
+  // flat out on the road, where it would land mid-corner, again and again
+  resizeBlocked: () => driveThrill > 0.1,
+  setting: () => (touch ? touch.settings.fps : settings.get("fps")) || "auto",
+  playing: () => (isLocked() || bench.on) && !gamePaused(),
+});
+/** Frames per second the game is held to (0: every vsync). */
+function frameCap() { return perfMgr.cap; }
 
-/**
- * frameMs: time since the last frame. cpuMs: JavaScript spent on the frame,
- * game logic (physics, AI, animation) and issuing the draw calls. When that
- * eats most of the frame, the CPU is the limit (typical on phones, and on
- * integrated GPUs with many draw calls) and a lower resolution would only blur
- * the picture without making it any faster, so it stays sharp.
- *
- * With the grade pass (PostFX.canScale) a change only moves the viewport the
- * scene draws into, which is free. Without it (post "off", or bloom) every
- * change reallocates the canvas and the post-processing targets (a hitch), so
- * it backs off: a raise that gets taken back within 8 s doubles the wait
- * before the next try (up to a minute).
- */
-function updateDynamicResolution(frameMs, cpuMs) {
-  perf.avg += (Math.min(frameMs, 100) - perf.avg) * 0.05;
-  perf.logic += (Math.min(cpuMs, 100) - perf.logic) * 0.05;
-  const cpuBound = perf.logic > perf.avg * 0.6;
-  // Frame budget: 60 FPS, or 30 when a phone is capped there (a capped frame isn't a slow one)
-  const budget = 1000 / frameCap();
-  updateAutoFps(frameMs);
-  if (perf.avg > budget * 1.2 && !cpuBound) { perf.slow += frameMs; perf.fast = 0; }
-  else if (perf.avg < budget * 0.84) { perf.fast += frameMs; perf.slow = 0; }
-  else { perf.slow = 0; perf.fast = 0; }
-
-  let next = perf.ratio;
-  const now = performance.now();
-  if (perf.slow > 600) {
-    next = Math.max(MIN_PIXEL_RATIO, perf.ratio - 0.1);
-    if (next !== perf.ratio && now - perf.raisedAt < 8000) perf.upWait = Math.min(60000, perf.upWait * 2);
-  } else if (perf.fast > perf.upWait) {
-    next = Math.min(MAX_PIXEL_RATIO, perf.ratio + 0.05);
-    if (next !== perf.ratio) perf.raisedAt = now;
-  }
-  // A resize (no grade-pass scaling) reallocates the canvas and targets: a visible hitch.
-  // Not while you are flat out on the road, where it would land mid-corner, again and again
-  if (next !== perf.ratio && !postFx.canScale && driveThrill > 0.1) { perf.slow = perf.fast = 0; return; }
-  if (next !== perf.ratio) {
-    perf.ratio = next;
-    perf.slow = 0;
-    perf.fast = 0;
-    // With the grade pass, the scale changes inside its target for free; otherwise the canvas is resized
-    if (postFx.canScale) postFx.setScale(next / MAX_PIXEL_RATIO);
-    else { renderer.setPixelRatio(next); syncPostSize(); }
-  }
-}
 // Low: no shadow map at all. Medium: redrawn every other frame. High: every frame.
 renderer.shadowMap.enabled = QUALITY.shadows;
 // (PCFSoftShadowMap is gone from three r18x: it only warns and falls back, and
@@ -725,6 +701,8 @@ renderer.toneMappingExposure = 1.05;
 
 // Bloom + a colour grade that follows the game (src/render/PostFX.js)
 const postFx = new PostFX(renderer, { mode: QUALITY.post, samples: QUALITY.antialias ? 4 : 0 });
+// The DOM film grain only where nothing else does it and it's affordable (style.css: body.lite-hud)
+document.body.classList.toggle("lite-hud", postFx.enabled || QUALITY_NAME === "low" || QUALITY_NAME === "performance" || IS_TOUCH);
 const _postSize = new THREE.Vector2();
 function syncPostSize() {
   renderer.getDrawingBufferSize(_postSize);
@@ -992,7 +970,7 @@ scene.add(hemiLight, ambientLight);
 const sun = new THREE.DirectionalLight(0xffc48a, 2.4); // the moon at night
 sun.position.set(6, 12, 4);
 sun.castShadow = QUALITY.shadows;
-sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.mapSize.setScalar(QUALITY.shadowMap ?? 1024);
 sun.shadow.camera.near   = 1;
 sun.shadow.camera.far    = 60;
 sun.shadow.camera.left   = -SHADOW_FRUSTUM_SIZE;
@@ -1131,7 +1109,7 @@ const SCOPE_AIM_FOV = 32;        // a scoped gun's shoulder-aim FOV on the way i
 // magnification, the overlay draws the tube and reticle round the live view.
 // The reticle's centre is the screen centre, which is where every shot goes
 // (fireShot traces along the camera), sway included: it moves the camera.
-const scopeOverlay = new ScopeOverlay({ blur: !IS_TOUCH && QUALITY_NAME === "high" });
+const scopeOverlay = new ScopeOverlay({ blur: !IS_TOUCH && (QUALITY_NAME === "high" || QUALITY_NAME === "ultra") });
 let scopeShown = false;
 let rigDef = null;                  // the weapon stats the camera rig was set up for
 const SCOPE_SENS_KEY = "babylon-fps:scopeSens";
@@ -2172,10 +2150,11 @@ function updateThirdPersonCamera(delta) {
   // Critically-damped style follow: tight on XZ, softer on Y so jumps/steps don't jolt
   const kxz = 1 - Math.exp(-cameraRig.followXZ * delta);
   const ky  = 1 - Math.exp(-cameraRig.followY * delta);
-  camPivot.x += (characterBody.position.x - camPivot.x) * kxz;
-  camPivot.z += (characterBody.position.z - camPivot.z) * kxz;
+  // The drawn position, not the raw body: it moves evenly between physics steps
+  camPivot.x += (playerVis.x - camPivot.x) * kxz;
+  camPivot.z += (playerVis.z - camPivot.z) * kxz;
   stanceEye += (STANCES[stance].eye - stanceEye) * (1 - Math.exp(-10 * delta));
-  camPivot.y += (characterBody.position.y - FEET_OFFSET + stanceEye - camPivot.y) * ky;
+  camPivot.y += (playerVis.y - FEET_OFFSET + stanceEye - camPivot.y) * ky;
 
   recoilPitch *= Math.exp(-10 * delta);
   recoilYaw   *= Math.exp(-12 * delta);
@@ -5786,6 +5765,32 @@ function vehicleSpawns(roads) {
 let solidKind = 0;
 let solidHit = null;     // the mapObstacles entry a vehicle last ran into (a pole, a stall…)
 /** True if a circle at (x, z) overlaps anything solid on the obstacle list (or the map edge). self: a vehicle to ignore. */
+// mapObstacles in a grid for solidAt, which a moving vehicle asks several times
+// a frame (it used to scan all of them each time: ~8 % of the main thread while
+// driving). Filed by each obstacle's full size: the ones that shrink when
+// broken (stalls, poles) stay correct, a smaller test inside a larger cell
+// entry. Re-filed whenever the list changes (the college gate's lanes come
+// and go). Vehicles and crates aren't in it: solidAt skips them anyway.
+const OBSTACLE_REACH = 6;                 // m: the largest probe radius solidAt is asked about
+const obstacleGrid = new SpatialGrid(16, OBSTACLE_REACH);
+let obstacleGridLen = -1, obstacleGridLast = null;
+function obstaclesNear(x, z) {
+  const n = mapObstacles.length;
+  if (n !== obstacleGridLen || mapObstacles[n - 1] !== obstacleGridLast) {
+    obstacleGridLen = n;
+    obstacleGridLast = mapObstacles[n - 1];
+    obstacleGrid.clear();
+    for (const o of mapObstacles) {
+      if (o.vehicle || o.crate) continue;
+      const ext = o.type === "circle" ? Math.max(o.r ?? 0, o.hit ?? 0) : Math.hypot(o.w, o.d) / 2;
+      // The largest it has ever been (a stall smashed at the time of a re-file grows back)
+      o._gridExt = Math.max(o._gridExt ?? 0, ext);
+      obstacleGrid.insertCircle(o, o.x, o.z, o._gridExt);
+    }
+  }
+  return obstacleGrid.near(x, z);
+}
+
 function solidAt(x, z, r, self = null) {
   const prevKind = solidKind;            // (what it hit, for the crash effects: only ever a real hit)
   solidKind = CRASH_KIND.EDGE;
@@ -5793,7 +5798,9 @@ function solidAt(x, z, r, self = null) {
   if (seaDepth(x, z) > 0.7) return true; // nothing drives into the sea
   solidKind = CRASH_KIND.HARD;
   if (caves?.solidAt(x, z, r)) return true;
-  for (const o of mapObstacles) {
+  const near = r <= OBSTACLE_REACH ? obstaclesNear(x, z) : mapObstacles;
+  for (let i = 0; i < near.length; i++) {
+    const o = near[i];
     if (o.vehicle || o.crate) continue;   // (a vehicle smashes crates: smashCrates)
     const dx = x - o.x, dz = z - o.z;
     if (o.type === "circle") {
@@ -6140,13 +6147,30 @@ function updateRepair(delta) {
   inventoryUI.feed(`${car.spec.label} repaired${wasWrecked ? ": it runs again" : ""}`, "fuel", "toolkit");
 }
 
-// The big map's relief picture is built in the background, a sliver per frame, so the
-// first time you open the map mid-fight it's already there (it used to stall ~0.5 s)
+// The big map's relief picture is built in the background, so the first time
+// you open the map mid-fight it's already there (it used to stall ~0.5 s).
+// It takes a few seconds of CPU in all, so it only runs in the time a frame
+// leaves idle before the next one (requestIdleCallback), never inside one; where
+// that isn't available (Safari), a small slice per frame. Measured before: up to
+// 12 ms of every frame for the first minute on a low-end machine.
 let mapPrebuildT = 8;   // s of play before it starts
-function updateMapPrebuild(dt) {
-  if (worldMap.open || (mapPrebuildT -= dt) > 0) return;
-  if (worldMap.prebuild(IS_TOUCH ? 1 : 1.5)) mapPrebuildT = Infinity;
+let mapPrebuildIdle = false;
+const HAS_IDLE = typeof requestIdleCallback === "function";
+function mapPrebuildStep(deadline) {
+  mapPrebuildIdle = false;
+  if (worldMap.open || mapPrebuildT === Infinity) return;
+  // Leave a millisecond of the idle time for the browser; at most 4 ms at a go
+  const budget = Math.min(4, deadline.timeRemaining() - 1);
+  if (budget > 0.5 && worldMap.prebuild(budget)) mapPrebuildT = Infinity;
 }
+function updateMapPrebuild(dt) {
+  if (worldMap.open || mapPrebuildT === Infinity || (mapPrebuildT -= dt) > 0) return;
+  mapPrebuildFor += dt;
+  if (HAS_IDLE && !mapPrebuildIdle) { mapPrebuildIdle = true; requestIdleCallback(mapPrebuildStep, { timeout: 1000 }); }
+  // No idle time to be had (a CPU-bound device), or no requestIdleCallback: a thin slice per frame
+  if ((!HAS_IDLE || mapPrebuildFor > 45) && worldMap.prebuild(IS_TOUCH ? 0.5 : 0.8)) mapPrebuildT = Infinity;
+}
+let mapPrebuildFor = 0;
 
 // ─── Rope gun (a grappling hook) ──────────────────────────────────────────────
 // U (rebindable) fires a hook along the crosshair to the first thing within
@@ -8381,10 +8405,13 @@ const qualityEl = document.getElementById("lobby-quality");
 if (qualityEl) {
   qualityEl.value = QUALITY_SETTING;
   qualityEl.options[0].textContent = `Auto (${QUALITY_PRESETS[QUALITY_NAME].label} on this ${IS_TOUCH ? "device" : "PC"})`;
+  const opt = v => qualityEl.querySelector(`option[value="${v}"]`);
   if (IS_TOUCH) {
-    qualityEl.options[1].textContent = "Battery saver: older phones, cooler, longer battery";
-    qualityEl.options[2].textContent = "Balanced (recommended)";
-    qualityEl.options[3].textContent = "High: flagship phones";
+    opt("performance").textContent = "Performance: smoothest, simplest picture";
+    opt("low").textContent = "Battery saver: older phones, cooler, longer battery";
+    opt("medium").textContent = "Balanced (recommended)";
+    opt("high").textContent = "High: flagship phones";
+    opt("ultra").textContent = "Ultra: the newest flagships";
   }
   qualityEl.addEventListener("change", () => {
     saveQuality(qualityEl.value);
@@ -8394,6 +8421,37 @@ if (qualityEl) {
 
 // ─── Main Loop ────────────────────────────────────────────────────────────────
 let shadowFrame = 0;
+let shadowEvery = QUALITY.shadowEvery;   // 1: every frame; PerfManager tiers can stretch it
+
+/**
+ * What each PerfManager tier gives up. Only knobs that change no shader
+ * program (so no recompile hitch) and nothing gameplay depends on: no
+ * collider, no enemy, tracer, muzzle flash, smoke cover or pickup gets harder
+ * to see. Grass only ever thins (it can reveal a player, never hide one).
+ *   GPU 1: shadows redrawn every 2nd frame      CPU 1: soldiers / monsters animate less often a bit closer in
+ *   GPU 2: grass and mist ×0.6, draw range 205 m CPU 2: shadows every 2nd frame (half their draw calls), minimap 15 Hz
+ *   GPU 3: shadows every 4th frame, grass ×0.4  CPU 3: animation tiers closer still, far soldiers on the light mesh sooner
+ */
+function applyPerfTiers(gpu, cpu) {
+  if (QUALITY.shadowEvery > 0) {
+    const want = Math.max(QUALITY.shadowEvery, gpu >= 3 ? 4 : gpu >= 1 || cpu >= 2 ? 2 : 1);
+    if (want !== shadowEvery) {
+      shadowEvery = want;
+      renderer.shadowMap.autoUpdate = want === 1;
+      renderer.shadowMap.needsUpdate = true;
+    }
+  }
+  const dens = gpu >= 3 ? 0.4 : gpu >= 2 ? 0.6 : 1;
+  grass.setDensity(dens);
+  atmosphere.setMistDensity(dens);
+  chunks.range = gpu >= 2 ? 205 : 245;
+  const lod = cpu >= 3 ? 0.5 : cpu >= 1 ? 0.7 : 1;
+  remotePlayers.lodScale = lod;
+  if (zombieManager) zombieManager.lodScale = lod;
+  minimap.redrawHz = cpu >= 2 ? 15 : undefined;
+}
+perfMgr.onTier(applyPerfTiers);
+perfMgr.onTier((g, c) => { if (perfOverlay) perfOverlay.note = `tier g${g} c${c}`; if (PERF_ENABLED) console.log(`[perf] tier gpu ${g} cpu ${c}: ${perfMgr.tierReason}`); });
 
 /** Mountains + sky with a far camera, then the game scene on a fresh depth buffer. */
 function renderFrame() {
@@ -8409,47 +8467,11 @@ function renderFrame() {
 }
 
 let _animRunning = false;
-let prevFeetY = 0;
-let lastFrameAt = 0;
-
-// ─── Phone frame cap ──────────────────────────────────────────────────────────
-// "auto" aims for 60. If a phone can't hold it even at its lowest render
-// scale, it settles on a steady 30 (an even 33 ms beats a frame rate that
-// jumps between 35 and 60), and every so often tries 60 again, waiting longer
-// after each failed try so it doesn't flip-flop.
-const autoFps = { cap: 60, slowFor: 0, probeAt: 0, probing: false, wait: 30 };
-
-/** Frames per second the game is held to (desktop: 0 = no cap). */
-function frameCap() {
-  if (!touch) return 60;
-  const s = touch.settings.fps;
-  return s === "30" ? 30 : s === "60" ? 60 : autoFps.cap;
-}
-
-function updateAutoFps(frameMs) {
-  if (!touch || touch.settings.fps !== "auto" || !isLocked()) return;
-  const now = performance.now() / 1000;
-  if (autoFps.cap === 60) {
-    // Slow (under ~42 FPS) with the resolution already as low as it goes
-    const stuck = perf.avg > 24 && perf.ratio <= MIN_PIXEL_RATIO + 0.01;
-    autoFps.slowFor = stuck ? autoFps.slowFor + frameMs / 1000 : 0;
-    if (autoFps.slowFor > (autoFps.probing ? 4 : 6)) {
-      autoFps.cap = 30;
-      autoFps.slowFor = 0;
-      if (autoFps.probing) autoFps.wait = Math.min(240, autoFps.wait * 2); // a failed try: wait longer
-      autoFps.probing = false;
-      autoFps.probeAt = now + autoFps.wait;
-    } else if (autoFps.probing && now > autoFps.probeAt + 8) {
-      autoFps.probing = false;   // held 60 through the try: stay
-      autoFps.wait = 30;
-    }
-  } else if (now > autoFps.probeAt) {
-    autoFps.cap = 60;
-    autoFps.probing = true;
-    autoFps.probeAt = now;
-    perf.avg = 16.7;             // judge the try on fresh frames
-  }
-}
+// Fixed physics step and render interpolation (see animate)
+const PHYS_DT = 1 / 60;
+let physAlpha = 1;
+const playerInterp = new RenderInterp();
+const playerVis = new THREE.Vector3();    // the drawn body position (between the last two steps)
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 // Backgrounded (Android app or browser tab): pause and silence everything;
@@ -8486,13 +8508,10 @@ function animate() {
   if (!_animRunning) return;
   requestAnimationFrame(animate);
   const frameStart = performance.now();
-  if (touch) {
-    // Phones: at most 60 (or 30) frames a second. A 90/120 Hz screen would
-    // otherwise get twice the work, heat the phone and throttle it.
-    const minGap = 1000 / frameCap() - 2;
-    if (frameStart - lastFrameAt < minGap) return;
-    lastFrameAt = frameStart;
-  }
+  // The frame cap, as a whole divisor of the screen's refresh rate (even pacing).
+  // Phones: at most 60. A 90/120 Hz screen would otherwise get twice the work,
+  // heat the phone and throttle it.
+  if (!perfMgr.tick(frameStart)) return;
   perfOverlay?.beginFrame(frameStart);
   // Count every pass of the frame (backdrop, scene, post), not just the last one
   if (perfOverlay) { renderer.info.autoReset = false; renderer.info.reset(); }
@@ -8507,6 +8526,7 @@ function animate() {
   const delta = gamePaused() ? 0 : realDelta * timeScale;
 
   updateTouch();
+  perfOverlay?.mark("input");
   if (drive.on) {
     updateDriving(delta);
   } else if (ride.on) {
@@ -8524,9 +8544,12 @@ function animate() {
   }
   // Pose + collider before the step, so it pushes whatever it drives into
   updateVehicles(delta);
+  perfOverlay?.mark("move");
 
   // At most two catch-up steps: a slow frame must not make the next one slower too
-  world.step(1 / 60, delta, 2);
+  const stepsBefore = world.stepnumber;
+  world.step(PHYS_DT, delta, 2);
+  if (perfOverlay) { perfOverlay.steps(world.stepnumber - stepsBefore); perfOverlay.mark("physics"); }
 
   checkGrounded();
   if (climb.active) climbAfterStep();
@@ -8540,14 +8563,21 @@ function animate() {
   keepInBounds();
   keepOnCaveFloor(delta);
 
-  // The physics contact settles the body a centimetre or two up and down on
-  // alternate frames: averaging two frames cancels that in the visible
-  // character without lagging behind slopes (jumps and stairs pass through)
-  const feetY = characterBody.position.y - FEET_OFFSET;
-  const smoothY = Math.abs(feetY - prevFeetY) < 0.04 ? (feetY + prevFeetY) / 2 : feetY;
-  prevFeetY = feetY;
-  characterRoot.position.set(characterBody.position.x, smoothY, characterBody.position.z);
+  // What you see of yourself (and what the camera follows) is blended between
+  // the last two physics steps, so movement is even at any frame rate
+  // (physics/RenderInterp.js). Moves the game scripts frame by frame (driving,
+  // riding, climbing, the rope, the drop) are already smooth: drawn as they are.
+  physAlpha = world.accumulator / PHYS_DT;
+  if (drive.on || ride.on || climb.active || ropeMoving() || brAirborne() || window.__noInterp) {
+    playerInterp.snap();
+    playerVis.copy(characterBody.position);
+  } else {
+    playerInterp.record(characterBody.position, world.stepnumber - stepsBefore, 0.04);
+    playerInterp.at(physAlpha, playerVis);
+  }
+  characterRoot.position.set(playerVis.x, playerVis.y - FEET_OFFSET, playerVis.z);
   updateLocalRide(delta);
+  perfOverlay?.mark("postStep");
 
   houses?.update(delta, characterBody.position.x, characterBody.position.z);
   collegeGate?.update(delta);
@@ -8556,6 +8586,7 @@ function animate() {
   cseBuilding?.updateDoors(delta);
   houses?.cull(camera);
   checkOutfitClash(realDelta);
+  perfOverlay?.mark("world");
   if (isBR()) {
     brUpdate(delta);
   } else if (net.isClient) {
@@ -8564,19 +8595,24 @@ function animate() {
     regenPlayerHealth(5 * delta);
   } else {
     director?.update(delta);
-    if (zombieManager) zombieManager.update(delta);
+    if (zombieManager) { zombieManager.update(delta); if (!window.__noInterp) zombieManager.applyRenderInterp(); }
   }
   enemyFire.update(delta);
+  perfOverlay?.mark("ai");
   remotePlayers.update(delta, camera, FEET_OFFSET);
+  perfOverlay?.mark("remote");
   netTick(delta);
   updateSquad(delta);
+  perfOverlay?.mark("net");
 
   const watched = brWatchedPlayer();
   if (watched) updateSpectatorCamera(delta, watched);
   else updateThirdPersonCamera(realDelta);
   updateFocus(watched);
+  perfOverlay?.mark("camera");
   updateSoldier(delta);
   if (!watched) applyFirstPersonCamera();
+  perfOverlay?.mark("soldier");
   updateWeapon(delta);
   updateThrowAim(delta);
   updateMelee(delta);
@@ -8585,6 +8621,7 @@ function animate() {
   updateAutoDoors(delta);
   updateLastPos(delta);
   updateMapPrebuild(realDelta);
+  perfOverlay?.mark("weapons");
   crates?.update(delta);
   throwables.update(delta);
   if (zombieManager) fireFX.syncBodies(zombieManager.active, characterBody.position.x, characterBody.position.z);
@@ -8595,12 +8632,14 @@ function animate() {
   updateSmokeOverlay(smokeLight);
   updateAudio(delta);
   effects.update(delta);
+  perfOverlay?.mark("fx");
   updatePickups(delta);
   inventoryUI.update();
   syncGearModel();
   expireLootClaims();
   if (inventoryOpen) lootScreen.update(realDelta);
   else updateLobbyStage(realDelta);
+  perfOverlay?.mark("pickups");
 
   timeSinceHit += delta;
   cameraTrauma = Math.max(0, cameraTrauma - delta * 1.6);
@@ -8610,24 +8649,28 @@ function animate() {
   updateLevelHud();
   gameHud.update(delta);
   updateCombatHUD(delta);
+  perfOverlay?.mark("hud");
 
   minimap.update(performance.now(), focusPos.x, focusPos.z, watched ? watched.aimYaw : aimYaw);
   updatePins(performance.now());
   updateFightZones(performance.now());
   if (isBR()) brUpdateHud(delta);
+  perfOverlay?.mark("minimap");
 
   updateMood(delta);
   updateVehicleFx();
   updateSunShadow();
-  if (QUALITY.shadowEvery > 1 && ++shadowFrame % QUALITY.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
+  if (shadowEvery > 1 && ++shadowFrame % shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
+  perfOverlay?.mark("mood");
   perfOverlay?.markRender(performance.now());
   renderFrame();
-  updateDynamicResolution(frameMs, performance.now() - frameStart);
+  perfMgr.endFrame(frameMs, performance.now() - frameStart);
   if (perfOverlay) perfOverlay.endFrame(performance.now(), perfCounts());
 }
 
 // ─── Performance overlay + benchmark (?perf=1 / ?bench=1) ─────────────────────
 const perfOverlay = PERF_ENABLED ? new PerfOverlay(renderer) : null;
+if (perfOverlay) perfOverlay.net = net;
 const _perfCounts = {};
 function perfCounts() {
   const c = _perfCounts;
@@ -8639,20 +8682,122 @@ function perfCounts() {
   c.enemyBolts = enemyFire.bolts.reduce((n, b) => n + (b.active ? 1 : 0), 0);
   c.fires = throwables.fires.reduce((n, f) => n + (f.active ? 1 : 0), 0);
   c.pickups = pickups.active.length;
-  c.bodies = world.bodies.length;
-  c.quality = `${QUALITY_NAME} @ ${perf.ratio.toFixed(2)}× pixels`;
-  c.fpsCap = touch ? `${touch.settings.fps} → ${frameCap()}` : "none";
+  c.bodies = `${world.bodies.length} moving + ${world.broadphase.staticBodies?.length ?? 0} static`;
+  c.quality = `${QUALITY_NAME} @ ${perfMgr.ratio.toFixed(2)}× pixels`;
+  c.pacing = perfMgr.describe();
   return c;
 }
 
 /**
  * Scripted benchmark, the same on every device: noon, no levels, the player
- * can't die. 3 s warm-up, 10 s of looking around, 20 s of combat with 20
- * monsters chasing and the gun firing in bursts. Results go to the overlay,
- * the console ("BENCH_RESULT {…}") and window.__benchResult.
+ * can't die. ?bench=1: 3 s warm-up, 10 s of looking around, 20 s of combat with
+ * 20 monsters chasing and the gun firing in bursts (unchanged, so old results
+ * still compare). ?bench=full adds: crowd (24 soldiers running and shooting
+ * round you, through the same path as teammates and bots), fx (grenades,
+ * molotovs and smoke going off), town (the middle of Shivpur) and drive (a
+ * Thar flat out). ?bench=soak repeats those for 15 minutes and logs heap,
+ * geometries and textures every minute (leak check). Results go to the
+ * overlay, the console ("BENCH_RESULT {…}") and window.__benchResult.
  */
-const bench = { on: false, t0: 0, phase: "", spawned: false, results: {} };
-const BENCH_WARMUP = 3000, BENCH_EXPLORE = 10000, BENCH_COMBAT = 20000;
+const BENCH_MODE = new URLSearchParams(location.search).get("bench") ?? "";
+const bench = { on: false, t0: 0, phase: "", phaseAt: 0, i: -1, results: {}, soak: [], soakNext: 0, crowd: [], fxNext: 0 };
+const BENCH_WARMUP = 3000;
+const BENCH_SOAK_MS = 15 * 60 * 1000;
+
+function benchCrowd(on) {
+  if (on) {
+    for (let i = 0; i < 24; i++) {
+      const id = `bench:${i}`;
+      remotePlayers.add({ id, name: `Bench ${i}`, color: ["#e0383e", "#3e8ee0", "#3ee07a", "#e0c23e"][i % 4] });
+      bench.crowd.push(id);
+    }
+  } else {
+    for (const id of bench.crowd) remotePlayers.remove(id);
+    bench.crowd.length = 0;
+  }
+}
+const _benchState = { x: 0, y: 0, z: 0, vx: 0, vz: 0, by: 0, ay: 0, ap: 0, aim: true, fire: false, hp: 100, w: "rifle", sn: 0, g: 111 };
+const _benchShot = { f: [0, 0, 0], h: [0, 0, 0], w: "rifle", s: 0 };
+function benchCrowdStep(t) {
+  const px = characterBody.position.x, pz = characterBody.position.z;
+  for (let i = 0; i < bench.crowd.length; i++) {
+    const r = 8 + (i % 6) * 6, w = (i % 2 ? 1 : -1) * 5 / r;          // 5 m/s round a circle
+    const a = i * 0.9 + (t / 1000) * w;
+    const s = _benchState;
+    s.x = px + Math.sin(a) * r; s.z = pz + Math.cos(a) * r;
+    s.y = groundHeight(s.x, s.z) + FEET_OFFSET;
+    s.vx = Math.cos(a) * r * w; s.vz = -Math.sin(a) * r * w;
+    s.by = Math.atan2(s.vx, s.vz);
+    s.ay = Math.atan2(px - s.x, pz - s.z); s.ap = 0;
+    s.fire = ((t / 250 + i) | 0) % 3 === 0;
+    s.sn = i % 7 === 0 ? 1 : 0;
+    remotePlayers.applyState(bench.crowd[i], s);
+    // A few of them shoot past you: tracers, muzzle flashes, gunshots
+    if (s.fire && i % 4 === 0 && ((t / 16) | 0) % 6 === 0) {
+      _benchShot.f[0] = s.x; _benchShot.f[1] = s.y + 0.6; _benchShot.f[2] = s.z;
+      _benchShot.h[0] = px + Math.sin(a) * 3; _benchShot.h[1] = s.y; _benchShot.h[2] = pz + Math.cos(a) * 3;
+      remotePlayers.shot(bench.crowd[i], _benchShot);
+    }
+  }
+}
+const _benchFrom = new THREE.Vector3(), _benchVel = new THREE.Vector3();
+function benchFxStep(t) {
+  if (t < bench.fxNext) return;
+  bench.fxNext = t + 600;
+  const kinds = ["grenade", "molotov", "grenade", "smoke"];
+  const k = kinds[((t / 600) | 0) % kinds.length];
+  const a = Math.random() * Math.PI * 2, d = 9 + Math.random() * 9;
+  _benchFrom.set(characterBody.position.x, characterBody.position.y + 1, characterBody.position.z);
+  // A lob landing about d m away
+  _benchVel.set(Math.sin(a) * d / 1.2, 6, Math.cos(a) * d / 1.2);
+  throwables.throw(k, _benchFrom, _benchVel, "bench", ((t / 600) | 0) % 4);
+}
+function benchTeleport(x, z) {
+  characterBody.position.set(x, groundHeight(x, z) + FEET_OFFSET + 0.05, z);
+  characterBody.velocity.set(0, 0, 0);
+  playerInterp.snap();
+}
+
+const BENCH_PHASES = [
+  { name: "explore", ms: 10000, step() { aimYaw += 0.012; } },
+  { name: "combat", ms: 20000,
+    enter() {
+      // 20 monsters in a ring, all hunting the player
+      const types = ["walker", "runner", "walker", "listener"];
+      for (let i = 0; i < 20; i++) {
+        const a = (i / 20) * Math.PI * 2, r = 16 + (i % 4) * 5;
+        const m = zombieManager.spawn(types[i % types.length], characterBody.position.x + Math.sin(a) * r, characterBody.position.z + Math.cos(a) * r);
+        if (!m) continue;
+        m.target = localTarget;
+        m.state = "chase";
+        m.hasLOS = true;
+      }
+    },
+    step(t) { aimYaw += 0.008; input.fire = (t % 1000) < 600; },   // bursts: 0.6 s on, 0.4 s off
+    exit() { input.fire = false; for (const m of [...zombieManager.active]) zombieManager.pool.release(m); } },
+  { name: "crowd", ms: 15000, full: true,
+    enter() { benchCrowd(true); },
+    step(t) { aimYaw += 0.01; benchCrowdStep(t); input.fire = (t % 1000) < 400; },
+    exit() { input.fire = false; benchCrowd(false); } },
+  { name: "fx", ms: 12000, full: true,
+    enter() { bench.fxNext = 0; },
+    step(t) { aimYaw += 0.01; benchFxStep(t); input.fire = (t % 800) < 500; },
+    exit() { input.fire = false; } },
+  { name: "town", ms: 12000, full: true,
+    enter() { benchTeleport(CITY.x - 30, CITY.z); },
+    step() { aimYaw += 0.012; },
+    exit() { benchTeleport(0, 0); } },
+  { name: "drive", ms: 12000, full: true,
+    enter() {
+      const car = vehicles.find(v => v && v.kind === "thar" && !v.wrecked && !v.driver);
+      if (!car) return;
+      benchTeleport(car.x + 1.5, car.z);
+      if (!drive.on) toggleVehicle();
+    },
+    step(t) { keys.forward = true; keys.left = ((t / 2500) | 0) % 2 === 0; keys.right = !keys.left; },
+    exit() { keys.forward = keys.left = keys.right = false; if (drive.on) toggleVehicle(); benchTeleport(0, 0); } },
+];
+const benchPhases = BENCH_PHASES.filter(p => !p.full || BENCH_MODE === "full" || BENCH_MODE === "soak");
 
 function startBenchmark() {
   bench.on = true;
@@ -8663,8 +8808,7 @@ function startBenchmark() {
   env.hour = 12;
   env.paused = true;
   for (const m of [...zombieManager.active]) zombieManager.pool.release(m);
-  characterBody.position.set(0, groundHeight(0, 0) + FEET_OFFSET + 0.05, 0);
-  characterBody.velocity.set(0, 0, 0);
+  benchTeleport(0, 0);
   aimYaw = 0;
   aimPitch = -0.08;
 }
@@ -8674,47 +8818,54 @@ function benchStep(now) {
   playerHealth = MAX_HEALTH;
   inventory.weapons[inventory.current] && (inventory.weapons[inventory.current].ammo = 30);
   if (t < BENCH_WARMUP) { bench.phase = "warm-up"; aimYaw += 0.01; return; }
-  if (bench.phase === "warm-up") { bench.phase = "explore"; perfOverlay.reset(); }
-  if (t < BENCH_WARMUP + BENCH_EXPLORE) {
-    aimYaw += 0.012;                       // a slow look around
-    perfOverlay.extra.bench = "explore";
-    return;
-  }
-  if (bench.phase === "explore") {
-    bench.results.explore = perfOverlay.report().data;
-    perfOverlay.reset();
-    bench.phase = "combat";
-    // 20 monsters in a ring, all hunting the player
-    const types = ["walker", "runner", "walker", "listener"];
-    for (let i = 0; i < 20; i++) {
-      const a = (i / 20) * Math.PI * 2, r = 16 + (i % 4) * 5;
-      const m = zombieManager.spawn(types[i % types.length], Math.sin(a) * r, Math.cos(a) * r);
-      if (!m) continue;
-      m.target = localTarget;
-      m.state = "chase";
-      m.hasLOS = true;
+  let ph = benchPhases[bench.i];
+  if (!ph || now - bench.phaseAt >= ph.ms) {
+    if (ph) {
+      // A soak keeps the first pass's numbers per phase (later passes only feed the minute log)
+      if (!bench.results[ph.name]) bench.results[ph.name] = perfOverlay.report().data;
+      ph.exit?.();
     }
+    bench.i++;
+    // Soak: round and round the heavy phases (combat, crowd, fx, town, drive) until the time is up
+    if (bench.i >= benchPhases.length && BENCH_MODE === "soak" && t < BENCH_SOAK_MS) bench.i = 1;
+    ph = benchPhases[bench.i];
+    if (!ph) { benchFinish(); return; }
+    bench.phase = ph.name;
+    bench.phaseAt = now;
+    perfOverlay.reset();
+    ph.enter?.();
+    perfOverlay.extra.bench = ph.name;
   }
-  if (t < BENCH_WARMUP + BENCH_EXPLORE + BENCH_COMBAT) {
-    aimYaw += 0.008;
-    // Bursts: 0.6 s on, 0.4 s off
-    input.fire = (t % 1000) < 600;
-    perfOverlay.extra.bench = "combat";
-    return;
+  if (BENCH_MODE === "soak" && t >= bench.soakNext) {
+    bench.soakNext = t + 60000;
+    const info = renderer.info;
+    bench.soak.push({
+      min: Math.round(t / 60000), heapMB: performance.memory ? +(performance.memory.usedJSHeapSize / 1048576).toFixed(1) : null,
+      geometries: info.memory.geometries, textures: info.memory.textures, programs: info.programs?.length ?? 0,
+      monsters: zombieManager.active.length, pickups: pickups.active.length,
+    });
   }
-  input.fire = false;
-  bench.results.combat = perfOverlay.report().data;
+  ph.step(now - bench.phaseAt);
+}
+
+function benchFinish() {
   bench.on = false;
   env.paused = true;
   const summary = {
-    userAgent: navigator.userAgent, quality: QUALITY_NAME, pixelRatio: +perf.ratio.toFixed(2),
+    userAgent: navigator.userAgent, mode: BENCH_MODE, quality: QUALITY_NAME, post: QUALITY.post, pixelRatio: +perfMgr.ratio.toFixed(2),
+    gpuTier: perfMgr.gpuTier, cpuTier: perfMgr.cpuTier, refresh: perfMgr.refresh,
+    gpu: (() => { try { const gl = renderer.getContext(); const e = gl.getExtension("WEBGL_debug_renderer_info"); return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : ""; } catch { return ""; } })(),
     screen: `${innerWidth}×${innerHeight} @ dpr ${devicePixelRatio}`,
     ...Object.fromEntries(Object.entries(bench.results).map(([k, d]) => [k, {
-      fps: +d.fps.toFixed(1), frameAvg: +d.frame.avg.toFixed(2), p50: +d.frame.p50.toFixed(2), p95: +d.frame.p95.toFixed(2),
+      fps: +d.fps.toFixed(1), low1: +d.low1.toFixed(1), over33ms: d.framesOver33ms, substeps: +d.substepsPerFrame.toFixed(2),
+      sections: Object.fromEntries(Object.entries(d.sections).map(([n, v]) => [n, +v.avg.toFixed(2)])),
+      hitches: d.hitches,
+      frameAvg: +d.frame.avg.toFixed(2), p50: +d.frame.p50.toFixed(2), p95: +d.frame.p95.toFixed(2),
       p99: +d.frame.p99.toFixed(2), worst: +d.frame.max.toFixed(1), spikesOver50ms: d.spikesOver50ms,
       logicAvg: +d.logic.avg.toFixed(2), logicP95: +d.logic.p95.toFixed(2), submitAvg: +d.submit.avg.toFixed(2),
       gpuAvg: d.gpu ? +d.gpu.avg.toFixed(2) : null, calls: d.calls, triangles: d.triangles, heapMB: d.heapMB && +d.heapMB.toFixed(1),
     }])),
+    ...(bench.soak.length ? { soak: bench.soak } : {}),
   };
   window.__benchResult = summary;
   console.log("BENCH_RESULT " + JSON.stringify(summary));
@@ -8991,7 +9142,7 @@ async function boot() {
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, ride, pillionKey, keys, climb, queueJump() { jumpQueued = true; }, get touch() { return touch; }, get stamina() { return { stamina, cap: staminaCap(), exhausted }; }, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, get collegeWorkshop() { return collegeWorkshop; }, mapObstacles, get kills() { return killsThisLife; } }; // TEMP-DBG
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, ride, pillionKey, keys, climb, queueJump() { jumpQueued = true; }, get touch() { return touch; }, get stamina() { return { stamina, cap: staminaCap(), exhausted }; }, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, get collegeWorkshop() { return collegeWorkshop; }, mapObstacles, get kills() { return killsThisLife; }, scene, perfOverlay, backdrop, postFx, sun, characterRoot, perfMgr, world, get crates() { return crates; }, get bench() { return bench; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     if (BENCH_ENABLED) startBenchmark();

@@ -37,13 +37,17 @@ export class WorldChunks {
     return this.add(mesh, _v.x, _v.z, s.radius);
   }
 
+  /** Draw distance in m (PerfManager tiers shorten it; the default is RANGE). */
+  get range() { return this._range ?? RANGE; }
+  set range(m) { if (m !== this._range) { this._range = m; this._t = 0; } }
+
   update(delta, x, z, force = false) {
     this._t -= delta;
     if (this._t > 0 && !force) return;
     this._t = EVERY;
     let shown = 0;
     for (const it of this.items) {
-      const dx = it.x - x, dz = it.z - z, reach = RANGE + it.r;
+      const dx = it.x - x, dz = it.z - z, reach = this.range + it.r;
       const v = dx * dx + dz * dz < reach * reach;
       if (it.obj.visible !== v) it.obj.visible = v;
       if (v) shown++;
