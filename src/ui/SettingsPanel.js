@@ -9,7 +9,7 @@ import { ACTIONS, GROUPS, keyName } from "../input/Bindings.js";
 const KEY = "babylon-fps:settings";
 export const SETTING_DEFAULTS = {
   autoDoors: false,     // house and classroom doors open as you walk up and close behind you
-  bots: false,          // battle royale bots in your room (anyone in the room turning them on brings them in)
+  bots: true,           // battle royale bots in your room (anyone in the room turning them on brings them in)
   sound: true,          // every sound in the game
   volume: 0.9,          // master volume 0..1
   fps: "auto",          // desktop frame rate: "auto" | "max" | "60" | "30" (phones use the touch settings' own)
