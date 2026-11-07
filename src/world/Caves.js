@@ -37,7 +37,7 @@ import { GROUP_WORLD } from "../physicsGroups.js";
 const NETWORKS = [
   {
     name: "Hollow Ridge",
-    x: 120, z: 150, rot: 0.55,
+    x: -200, z: 150, rot: 5.1,   // (moved off the college campus's cricket ground)
     nodes: [
       [-52, 4, "m"], [-30, 0, "j"], [0, 0, "c", 11], [24, -6, "j"], [50, -14, "m"],
       [6, 24, "j"], [-6, 40, "c", 9], [-24, 62, "m"], [30, -36, "m"], [-30, 24, "j"],

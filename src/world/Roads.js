@@ -55,7 +55,7 @@ export class Roads {
         pts[i].s = s;
         pts[i].y = 0;
       }
-      return { name: def.name, closed: !!def.closed, pts, length: s };
+      return { name: def.name, closed: !!def.closed, pts, length: s, campus: !!def.campus };
     });
     // Grid of segments for fast nearest-road lookups
     this.grid = new Map();
@@ -308,6 +308,7 @@ export class Roads {
     const poles = [];
     const at = {};
     for (const r of this.roads) {
+      if (r.campus) continue;   // the college's own roads have lamp posts instead (Campus.js)
       let prev = null;
       for (let s = POLE_SPACING * 0.5; s < r.length - 4; s += POLE_SPACING) {
         this.pointAt(r, s, at);

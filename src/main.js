@@ -56,6 +56,8 @@ import { scatterRocks } from "./world/Rocks.js";
 import { COLLEGE_GATE, placeCollegeGate } from "./world/CollegeGate.js";
 import { CSE_BUILDING, placeCseBuilding, cseTint } from "./world/CseBuilding.js";
 import { COLLEGE_WORKSHOP, placeCollegeWorkshop, workshopTint } from "./world/CollegeWorkshop.js";
+import { Campus } from "./world/Campus.js";
+import { CAMPUS_ROADS, CRICKET } from "./world/CampusLayout.js";
 import { loadIndiaModels } from "./world/IndiaAssets.js";
 import { propSpots, placeIndiaProps } from "./world/IndiaProps.js";
 import { mergeStaticMeshes } from "./world/MergeStatic.js";
@@ -3291,7 +3293,7 @@ function spawnWorldLoot() {
     pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
   });
   // Shivpur's shops and rooftops, the building sites and the CSE building's classrooms
-  [...(city?.lootSpots ?? []), ...(plots?.lootSpots ?? []), ...(cseBuilding?.lootSpots ?? []), ...(collegeWorkshop?.lootSpots ?? [])].forEach((sp, i) => {
+  [...(city?.lootSpots ?? []), ...(plots?.lootSpots ?? []), ...(cseBuilding?.lootSpots ?? []), ...(collegeWorkshop?.lootSpots ?? []), ...(college?.lootSpots ?? [])].forEach((sp, i) => {
     if (lootRng() < 0.45) return;
     const kind = HOUSE_LOOT[(i * 7 + Math.floor(lootRng() * HOUSE_LOOT.length)) % HOUSE_LOOT.length];
     pickups.spawn(kind, sp.x, sp.z, pickupData(kind), Infinity, null, sp.y);
@@ -4296,6 +4298,7 @@ const chunks = new WorldChunks(); // world/Chunks.js: far static meshes aren't d
 let collegeGate = null;    // world/CollegeGate.js, placed in loadWorld()
 let cseBuilding = null;    // world/CseBuilding.js: the CSE department block behind the gate
 let collegeWorkshop = null; // world/CollegeWorkshop.js: the workshop hall, up the North Road
+let college = null;        // world/Campus.js: the rest of the college round the cricket ground
 let crates = null;          // world/Crates.js: breakable wooden crates with loot inside
 let powerLines = null;      // world/PowerLines.js: poles a vehicle knocks down, and the live wires
 let waterTowers = null;    // world/WaterTowers.js: { towers, lootSpots, blocks() }, built in loadWorld()
@@ -4415,7 +4418,9 @@ async function loadWorld() {
   const treeBScaleMax = CHARACTER_HEIGHT * TREE_B_HEIGHT_MUL[1] / TB.rawH;
 
   // ── Towns and roads (world/Towns.js, world/Roads.js): the same map for every player
-  roads = new Roads(ROAD_DEFS);
+  // The college's own roads (world/CampusLayout.js) join the network: they level the ground and show on the maps
+  roads = new Roads([...ROAD_DEFS, ...CAMPUS_ROADS]);
+  college = new Campus().layout();
   river = new River();
   // Where the rickshaws and Thars are parked, the dukaan stalls and the
   // Indian props stand (towns, trees, rocks and poles keep clear of them).
@@ -4435,7 +4440,7 @@ async function loadWorld() {
   const taken = [...parked.map(p => ({ x: p.x, z: p.z, r: VEHICLES[p.kind].length / 2 })), ...stalls.map(s => ({ x: s.x, z: s.z, r: 2.4 })), ...props, ...chaiSpots.map(c => ({ ...c, r: CHAIWALA_R })), ...campus];
   const towerSpots = india.waterTower ? waterTowerSpots(roads, (x, z, r) => caveBlocks(x, z, r + 4) || river.wet(x, z, r + 2)
     || Math.hypot(x, z) < 26 + r || Math.hypot(x, z) > shoreRadius(x, z) - 30 - r
-    || Math.hypot(x - COLLEGE_GATE.x, z - COLLEGE_GATE.z) < COLLEGE_GATE.clear + r
+    || Math.hypot(x - COLLEGE_GATE.x, z - COLLEGE_GATE.z) < COLLEGE_GATE.clear + r || college.area(x, z, r + 2)
     || DEBRIS_SPOTS.some(([dx, dz]) => Math.hypot(dx - x, dz - z) < 5 + r)
     || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2 + r)
     || taken.some(p => Math.hypot(p.x - x, p.z - z) < p.r + r + 2)) : [];
@@ -4468,7 +4473,8 @@ async function loadWorld() {
   };
   const town = layoutTowns({
     roads, rng: makeLCG(0x7095a1), halfSize: houseHalfSize,
-    blocked: (x, z, r) => caveBlocks(x, z, r) || river.wet(x, z, r + 1) || Math.hypot(x, z) > shoreRadius(x, z) - 28 - r || inCityBox(x, z, r + 6),
+    blocked: (x, z, r) => caveBlocks(x, z, r) || river.wet(x, z, r + 1) || Math.hypot(x, z) > shoreRadius(x, z) - 28 - r || inCityBox(x, z, r + 6)
+      || college.area(x, z, r),
     keepClear: [
       { x: 0, z: 0, r: 16 },                                   // spawn
       ...reserved.map(p => ({ x: p.x, z: p.z, r: p.r + 2.5 })), // parked vehicles, stalls, Indian props
@@ -4482,6 +4488,8 @@ async function loadWorld() {
   });
   loadMark("· towns laid out");
   const plateaus = town.plateaus;
+  // The college campus: one level, Ravencross's (its old east side)
+  plateaus.push(...college.pads(rawHeight(2, 128)));
   townLabels = town.labels;
   for (const h of town.houses) houses.add(h.x, h.z, h.rot, { type: h.kind, base: flatHeight(h.x, h.z, plateaus), tint: h.tint });
   for (const y of town.yards) houses.addCompound(y.x, y.z, y.rot, y.hw, y.hd, y.gateX, flatHeight(y.x, y.z, plateaus), y.tint);
@@ -4506,7 +4514,7 @@ async function loadWorld() {
   const landClear = (x, z, pad) => houses.blocks(x, z, pad + 2) || houses.inYard(x, z, -pad)
     || caveBlocks(x, z, pad + 4) || river.wet(x, z, pad) || nearParked(x, z, pad + 2)
     || Math.hypot(x - COLLEGE_GATE.x, z - COLLEGE_GATE.z) < COLLEGE_GATE.clear + pad
-    || Math.hypot(x, z) < 34 || Math.hypot(x, z) > shoreRadius(x, z) - 30 - pad
+    || Math.hypot(x, z) < 34 || Math.hypot(x, z) > shoreRadius(x, z) - 30 - pad || college.area(x, z, pad + 2)
     || DEBRIS_SPOTS.some(([dx, dz]) => Math.hypot(dx - x, dz - z) < 5 + pad) || city.inArea(x, z, pad);
   farmland = new Farmland(layoutFields({ rng: farmRng, roads, blocked: farmClear, count: 85 }));
   const shedPads = [];
@@ -4566,7 +4574,7 @@ async function loadWorld() {
     // the channel at the bridges); the ground sinks to the cave floors under the massifs
     modify: (x, z, h) => caveTerrain(x, z, roads.modify(x, z, river.modify(x, z, h))),
     // Field soil, river mud, road shoulders, then sand and wet sand down the beach
-    tint: (x, z, c) => { farmland.tint(x, z, c); plots.tint(x, z, c); city.tint(x, z, c); if (cseGltf) cseTint(x, z, c); if (workshopGltf) workshopTint(x, z, c); river.tint(x, z, c); roads.tint(x, z, c); beachTint(x, z, c); },
+    tint: (x, z, c) => { farmland.tint(x, z, c); plots.tint(x, z, c); city.tint(x, z, c); if (cseGltf) cseTint(x, z, c); if (workshopGltf) workshopTint(x, z, c); college.tint(x, z, c); river.tint(x, z, c); roads.tint(x, z, c); beachTint(x, z, c); },
     // No grass on roads, through floors, props, parked vehicles, rock, water or sand; trimmed in yards; crops in the fields
     grassMask: (x, z) => {
       if (houses.blocks(x, z, 1.5) || nearParked(x, z, 0.3)) return 0;
@@ -4574,7 +4582,7 @@ async function loadWorld() {
       const beach = THREE.MathUtils.smoothstep(shoreRadius(x, z) - Math.hypot(x, z), BEACH_SAND - 2, BEACH_SAND + 6);
       if (beach <= 0) return 0;
       for (const o of propBoxes) if (Math.hypot(x - o.x, z - o.z) < Math.hypot(o.w, o.d) / 2 + 1) return 0;
-      return (0.55 + fbmGrass(x, z) * 0.45) * caveGrass(x, z) * (houses.inYard(x, z) ? 0.3 : 1) * farmland.grass(x, z) * plots.grass(x, z) * beach;
+      return (0.55 + fbmGrass(x, z) * 0.45) * caveGrass(x, z) * (houses.inYard(x, z) ? 0.3 : 1) * farmland.grass(x, z) * plots.grass(x, z) * college.grass(x, z) * beach;
     },
   });
   loadMark("· terrain built");
@@ -4620,7 +4628,11 @@ async function loadWorld() {
     });
     townLabels.push({ name: COLLEGE_WORKSHOP.name, x: COLLEGE_WORKSHOP.x, z: COLLEGE_WORKSHOP.z });
   }
-  const nearGate = (x, z, pad) => !!collegeGate?.blocks(x, z, pad) || !!cseBuilding?.blocks(x, z, pad) || !!collegeWorkshop?.blocks(x, z, pad);
+  // The rest of the campus round the cricket ground (world/Campus.js)
+  college.build({ scene, world, material: staticMaterial, groundAt: groundHeight, roads, river, mapObstacles, navObstacles, chunks });
+  townLabels.push({ name: "Cricket Ground", x: CRICKET.x, z: CRICKET.z });
+  const nearGate = (x, z, pad) => !!collegeGate?.blocks(x, z, pad) || !!cseBuilding?.blocks(x, z, pad) || !!collegeWorkshop?.blocks(x, z, pad)
+    || college.blocks(x, z, pad);
 
   // Dukaan stalls and the Indian props (after the terrain too)
   shops = buildShops({ scene, world, material: staticMaterial, spots: stalls, groundAt: groundHeight, mapObstacles, navObstacles });
@@ -4659,7 +4671,7 @@ async function loadWorld() {
 
   // Big trees stay out of houses (a scattered tree used to land on one)
   const keepClear = (list, pad) => list.filter(({ x, z }) => !houses.blocks(x, z, pad) && !caveBlocks(x, z, pad + 4)
-    && !roads.onRoad(x, z, pad) && !houses.inYard(x, z) && !nearGate(x, z, pad) && !wetOrFarmed(x, z, pad));
+    && !roads.onRoad(x, z, pad) && !houses.inYard(x, z) && !nearGate(x, z, pad) && !wetOrFarmed(x, z, pad) && !college.area(x, z, pad));
   const treeAPositions = keepClear(scatterPositions(TREE_A_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 8), 5);
   const treeBPositions = keepClear(scatterPositions(TREE_B_COUNT, rng, SCATTER_RADIUS_MIN, SCATTER_RADIUS_MAX * 0.6, 7), 4);
 
@@ -4678,6 +4690,13 @@ async function loadWorld() {
     addTreeCollider(x, snapY, z, rotY, scale, 0.22, 4.0, 2.2, 5.0);
     deferredTrees.push({ kind: "b", x, y: snapY, z, rotY, scale });
   }
+  // The campus's own trees, where the picture has them (instanced: world/Campus.js)
+  {
+    const crng = makeLCG(0xc011e9e);
+    const spots = college.treeSpots(crng, (x, z) => !roads.onRoad(x, z, 0.8) && !river.wet(x, z, 2) && !nearParked(x, z, 3) && !nearObstacle(x, z, 2));
+    college.plantTrees({ scene, world, material: staticMaterial, spots, rng: crng, groundAt: groundHeight, mapObstacles });
+  }
+
 
   // Burning wrecks: a few charred debris piles, each pouring smoke (listed
   // first so the fires are kept clear of the forest)
@@ -4713,7 +4732,7 @@ async function loadWorld() {
   // Stones: boulders are solid and the same everywhere; pebbles follow the quality setting
   const keepOff = (x, z, pad) => Math.hypot(x, z) < 15 || houses.blocks(x, z, pad + 2) || nearObstacle(x, z, pad)
     || caveBlocks(x, z, pad + 2) || roads.onRoad(x, z, pad + 1) || houses.inYard(x, z) || nearGate(x, z, pad)
-    || nearParked(x, z, 3 + pad) || wetOrFarmed(x, z, pad)
+    || nearParked(x, z, 3 + pad) || wetOrFarmed(x, z, pad) || college.area(x, z, pad)
     || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 2 + pad)
     || fireSpots.some(f => Math.hypot(f.x - x, f.z - z) < 4 + pad);
   scatterRocks({
@@ -4730,7 +4749,7 @@ async function loadWorld() {
     ringMin: 14, ringMax: 420, mapObstacles,
     blocked: (x, z) => Math.hypot(x, z) < 12 || houses.blocks(x, z, 4) || nearObstacle(x, z, 3.5) || caveBlocks(x, z, 4)
       || roads.onRoad(x, z, 3) || houses.inYard(x, z, -3) || nearGate(x, z, 2)
-      || nearParked(x, z, 5) || wetOrFarmed(x, z, 2)
+      || nearParked(x, z, 5) || wetOrFarmed(x, z, 2) || college.area(x, z, 2)
       || STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 3)
       || fireSpots.some(s => Math.hypot(s.x - x, s.z - z) < 5),
   });
@@ -4746,7 +4765,7 @@ async function loadWorld() {
     const half = CRATE_SIZE / 2;
     const free = (x, z) => {
       if (Math.hypot(x, z) > shoreRadius(x, z) - 10 || solidAt(x, z, 0.7)) return false;
-      if (caveBlocks(x, z, 2) || roads.onRoad(x, z, 1.4) || nearGate(x, z, 1) || nearParked(x, z, 2.5) || wetOrFarmed(x, z, 0.8)) return false;
+      if (caveBlocks(x, z, 2) || roads.onRoad(x, z, 1.4) || nearGate(x, z, 1) || nearParked(x, z, 2.5) || wetOrFarmed(x, z, 0.8) || college.area(x, z)) return false;
       if (houses.blocks(x, z, 0.75) || city?.blocks(x, z, 1) || indiaBuildings?.blocks(x, z, 1) || plots?.blocks(x, z, 0.5)) return false;
       if (spots.some(s => Math.abs(s.x - x) < 1 && Math.abs(s.z - z) < 1)) return false;
       if (STARTER_LOOT.some(([, lx, lz]) => Math.hypot(lx - x, lz - z) < 1.6) || fireSpots.some(f => Math.hypot(f.x - x, f.z - z) < 3)) return false;
@@ -7287,6 +7306,7 @@ function brSpawnLoot(seed) {
   for (const sp of waterTowers?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   for (const sp of cseBuilding?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   for (const sp of collegeWorkshop?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
+  for (const sp of college?.lootSpots ?? []) spots.push({ x: sp.x, y: sp.y, z: sp.z });
   lootPlan(seed, spots, isOpenGround).forEach((it, i) => {
     pickups.spawn(it.kind, it.x, it.z, pickupData(it.kind), Infinity, `w${i}`, it.y ?? null);
   });
@@ -8929,7 +8949,7 @@ async function boot() {
       const c = cseBuilding ? cseBuilding.surfaceAt(x, z, h) : h;
       return collegeWorkshop ? collegeWorkshop.surfaceAt(x, z, c) : c;
     };
-    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z) && !cseBuilding?.blocks(x, z) && !collegeWorkshop?.blocks(x, z)
+    zombieManager.canSpawnAt = (x, z) => !houses.blocks(x, z) && !caveBlocks(x, z, 4) && !indiaBuildings?.blocks(x, z) && !cseBuilding?.blocks(x, z) && !collegeWorkshop?.blocks(x, z) && !college?.blocks(x, z, 1)
       && waterDepthAt(x, z) < 0.3 && Math.hypot(x, z) < shoreRadius(x, z) - 6 && !city?.blocks(x, z, 2);
     zombieManager.onDoorBang = (x, z) => {
       sfx.doorBang({ x, y: groundHeight(x, z) + 1.2, z });

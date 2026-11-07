@@ -38,7 +38,7 @@ export const PROP_SPOTS = [
   ["truck", "North Road", 6, 92, 1], ["truck", "Ring Road", 100, 60, 1], ["truck", "Ring Road", -92, -36, -1],
   // A panchayat office and a town building in each named town
   ["panchayat", "Highway", 26, -9, 1], ["townBuilding", "Highway", -52, -3, 1], ["townBuilding", "North Road", 6, -42, -1],
-  ["panchayat", "Ring Road", -22, 124, 1], ["townBuilding", "North Road", 2, 156, -1],
+  ["panchayat", "Ring Road", -40, 66, 1], ["townBuilding", "North Road", 2, 172, 1],
   ["panchayat", "Ring Road", 146, -56, 1], ["townBuilding", "Highway", 120, -21, -1],
   ["panchayat", "Ring Road", 8, -148, 1], ["townBuilding", "North Road", 30, -166, 1],
   ["panchayat", "Ring Road", -117, -12, 1], ["townBuilding", "Highway", -142, 14, 1],

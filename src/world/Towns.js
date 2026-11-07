@@ -24,7 +24,8 @@ export const ROAD_DEFS = [
   { name: "North Road", points: [[14, 470], [12, 380], [8, 300], [6, 232], [0, 170], [2, 128], [6, 70], [8, 20], [8, -6], [4, -60], [15, -110], [26, -150], [30, -232], [36, -300], [40, -380], [44, -470]] },
   {
     name: "Ring Road", closed: true,
-    points: [[2, 128], [50, 92], [115, 45], [150, -30], [125, -110], [26, -150], [-40, -120], [-75, -55], [-120, 8], [-110, 80], [-55, 120]],
+    // (it used to cross the North Road at Ravencross, through the college campus: now it runs south of it)
+    points: [[2, 48], [38, 47], [68, 33], [112, 26], [150, -30], [125, -110], [26, -150], [-40, -120], [-75, -55], [-120, 8], [-110, 80], [-72, 82], [-34, 60]],
   },
   {
     name: "Outer Ring", closed: true,
@@ -63,7 +64,7 @@ const COAST_KINDS = [["cabin", 0.6], ["bungalow", 0.4]];
  */
 export const TOWNS = [
   { name: "Crossroads", x: 0, z: 0, roads: [["Highway", 62], ["North Road", 62]], density: 0.75, yards: 0.35, clear: 24 },
-  { name: "Ravencross", x: 2, z: 128, roads: [["North Road", 52], ["Ring Road", 34]], density: 0.95, yards: 0.5 },
+  { name: "Ravencross", x: 2, z: 128, roads: [["North Road", 52]], density: 0.95, yards: 0.5 },   // (its east side is the college campus)
   { name: "Ashford", x: 150, z: -30, roads: [["Highway", 50], ["Ring Road", 30]], density: 0.95, yards: 0.5 },
   { name: "Mill Creek", x: 26, z: -150, roads: [["North Road", 44], ["Ring Road", 30]], density: 0.9, yards: 0.45 },
   { name: "Pine Hollow", x: -120, z: 8, roads: [["Highway", 50], ["Ring Road", 30]], density: 0.9, yards: 0.45 },
