@@ -41,7 +41,6 @@ import { DustFX, DUST } from "./vehicles/DustFX.js";
 import { CrashFX, CRASH_KIND } from "./vehicles/CrashFX.js";
 import { SkidMarks } from "./vehicles/SkidMarks.js";
 import { PowerLines } from "./world/PowerLines.js";
-import { HorrorScore } from "./audio/HorrorScore.js";
 import { City } from "./world/City.js";
 import { Plots } from "./world/Plots.js";
 import { WorldChunks, splitInstanced } from "./world/Chunks.js";
@@ -2090,22 +2089,14 @@ function updateMood(delta) {
     breathTimer -= delta;
     if (breathTimer <= 0) { breathTimer = 1.3; sfx.breath(0.3, 1.5); }
   }
-  // The horror score (zombie modes, Settings → horror music): tighter while things hunt you
-  horrorScore.setActive(settings.get("music") && settings.get("sound") && !isBR() && !lobby?.open && playerHealth > 0);
-  if (horrorScore.active) {
-    const chase = zombieManager ? Math.min(1, zombieManager.chasingCount / 5) : 0;
-    horrorScore.setIntensity(chase * 0.7 + env.darkness * 0.2 + (playerHealth < 40 ? 0.25 : 0));
-    horrorScore.update();
-  }
   gameHud.setWorld(env.timeLabel, env.phase, weather.label, torch.on, env.bloodMoon && env.darkness > 0.6);
   gameHud.setDarkness(env.darkness);
 }
 
 // ── Driving feel: tyres, brakes, wind and speed ──────────────────────────────
 // Tyres squeal (scrub on dirt) when they slide or lock up, big vehicles hiss
-// their brakes when they stop hard, and past ~half speed the wind roars, the
-// FOV opens up, the screen streaks (the freefall zoom blur) and the camera
-// trembles: the faster, the more.
+// their brakes when they stop hard, and near top speed the wind picks up, the
+// FOV opens a little and the camera hums with the road: kept subtle on purpose.
 let driveThrill = 0;         // 0..1, smoothed
 let _brakeFrom = 0;          // speed when a hard stop began
 let _feelT = 0;
@@ -2131,8 +2122,8 @@ function updateDriveFeel(car) {
   }
   sfx.setSkid(skid, drive.car === car ? null : _skidAt, car?.kind, dirt);
   // Speed: how far into the top half of its range you are
-  const sp = drive.on ? THREE.MathUtils.smoothstep(Math.abs(drive.car.speed) / drive.car.spec.maxSpeed, 0.45, 1) : 0;
-  driveThrill += (sp - driveThrill) * (1 - Math.exp(-3 * dt));
+  const sp = drive.on ? THREE.MathUtils.smoothstep(Math.abs(drive.car.speed) / drive.car.spec.maxSpeed, 0.6, 1) : 0;
+  driveThrill += (sp - driveThrill) * (1 - Math.exp(-1.5 * dt));
   sfx.setSpeedRush(driveThrill);
 }
 
@@ -2248,11 +2239,11 @@ function placeCamera(yaw, rawPitch, delta) {
   // Road rumble at speed
   if (driveThrill > 0.02) {
     const t = clock.elapsedTime * 52;
-    camera.rotation.z += Math.sin(t * 1.7) * 0.0035 * driveThrill;
-    camera.rotation.x += Math.sin(t * 2.3 + 1.1) * 0.0028 * driveThrill;
+    camera.rotation.z += Math.sin(t * 1.7) * 0.0012 * driveThrill;
+    camera.rotation.x += Math.sin(t * 2.3 + 1.1) * 0.001 * driveThrill;
   }
 
-  const fov = rigValue("fov") + driveThrill * 13;   // the world rushes at you when you go fast
+  const fov = rigValue("fov") + driveThrill * 4;    // a touch wider flat out
   const near = fpBlend > 0.3 ? FP_NEAR : TP_NEAR;
   if (Math.abs(camera.fov - fov) > 0.01 || camera.near !== near) {
     camera.fov = fov;
@@ -3437,8 +3428,8 @@ function updatePostFx(realDt) {
     zone: isBR() && br.outside && playerHealth > 0 ? THREE.MathUtils.clamp(0.55 + br.outsideBy / 40, 0.55, 1) : 0,
     freefall: isBR() && br.flight === PHASE_FALL ? 1 : isBR() && br.flight === PHASE_CHUTE ? 0.25 : 0,
     ...brPostFx(),
-    // Flat out on the road: the freefall's zoom blur and wind streaks, gentler
-    ...(driveThrill > 0.02 ? { fallSpeed: Math.max(_brFx.fallSpeed, driveThrill * 0.42) } : null),
+    // Flat out on the road: only a faint hint of the freefall's zoom blur
+    ...(driveThrill > 0.05 ? { fallSpeed: Math.max(_brFx.fallSpeed, driveThrill * 0.1) } : null),
     // Faster as health drops
     heartbeat: low ? 0.5 + 0.5 * Math.sin(performance.now() / 1000 * (6 + 6 * (1 - playerHealth / (MAX_HEALTH * 0.4)))) : 0,
   });
@@ -7157,7 +7148,7 @@ function brEnterWarmup() {
   br.outKeys.clear();
   br.route = null; br.circles = null;
   br.spectating = null; br.respawnTimer = 0; br.outside = false;
-  br.won = false; br.shrinking = false;
+  br.won = false; br.shrinking = false; br.siteTold = false;
   br.flight = PHASE_GROUND;
   myChute.visible = false;
   zoneWall.hide();
@@ -7225,13 +7216,31 @@ function brHostStart() {
   brStartMatch(seed, ids, 0);
 }
 
+/**
+ * Where a match's zone can end: places with buildings, cover and short sight
+ * lines for a close final fight, never an open field. Fixed points of the
+ * fixed map, so every client picks the same one from the seed.
+ */
+const BR_ZONE_SITES = [
+  { name: "the CSE Building", x: CSE_BUILDING.x, z: CSE_BUILDING.z },
+  { name: "the College Workshop", x: COLLEGE_WORKSHOP.x, z: COLLEGE_WORKSHOP.z },
+  { name: "the college's south blocks", x: 20, z: 132 },
+  { name: "the college's main building", x: 77, z: 84 },
+  { name: "the college's east blocks", x: 190, z: 183 },
+  { name: "Shivpur's market", x: CITY.x, z: CITY.z },
+  { name: "Ravencross", x: -14, z: 128 },
+  { name: "Ashford", x: 150, z: -30 },
+  { name: "Mill Creek", x: 26, z: -150 },
+  { name: "Pine Hollow", x: -120, z: 8 },
+];
+
 /** Everyone builds the match from the seed. ids: who's dropping; t: match time (late joiners). */
 function brStartMatch(seed, ids, t) {
   br.state = "match";
   br.seed = seed;
   br.t = t;
   br.route = planeRoute(seed);
-  br.circles = zoneCircles(seed);
+  br.circles = zoneCircles(seed, BR_ZONE_SITES);
   zoneAt(br.circles, t, br.zone);
   br.alive.clear();
   for (const id of ids) br.alive.add(id);
@@ -7239,7 +7248,7 @@ function brStartMatch(seed, ids, t) {
   br.started = ids.length;
   br.inMatch = br.alive.has(net.id);
   br.ghost = !br.inMatch;
-  br.spectating = null; br.placement = 0; br.zoneTick = 1; br.netTimer = 0; br.outside = false;
+  br.spectating = null; br.placement = 0; br.zoneTick = 1; br.netTimer = 0; br.outside = false; br.siteTold = false;
   killsThisLife = 0;
   progress.resetRun();
   throwables.clear();
@@ -8070,6 +8079,11 @@ function brUpdate(delta) {
     // The zone starts closing: a cold ring sweeps the screen
     if (br.zone.shrinking && !br.shrinking && br.t > 1) { postFx.shockwave(0.5, 0.5, 0.7, 0x4da3ff, 0.9, 1.2); postFx.kick(0.15, 0x4da3ff); }
     br.shrinking = br.zone.shrinking;
+    // Once it's down to the last few circles, say where it's going to end
+    if (br.zone.phase >= 3 && !br.siteTold && br.circles.site && br.t > 1) {
+      br.siteTold = true;
+      inventoryUI.feed(`Final zone: it closes on ${br.circles.site.name}`, "info");
+    }
     brUpdatePlane(delta);
     brZoneDamage(delta);
     // Out of the fight: follow somebody who's still in it
@@ -8315,15 +8329,13 @@ if (scopeSensEl) {
 // Graphics quality: applied at startup, so a change reloads the page
 // ── Settings: gameplay switches + key bindings (ui/SettingsPanel.js) ──────────
 const settingsPanel = new SettingsPanel({ settings, bindings, touch: IS_TOUCH });
-// Sound settings: everything on / off, the master volume, the horror score
-const horrorScore = new HorrorScore(sfx);
+// Sound settings: everything on / off and the master volume (there is no background music in any mode)
 function applySoundSettings() {
   sfx.setMuted(!settings.get("sound"));
   sfx.setVolume(settings.get("volume") ?? 1);
-  sfx.setMusicEnabled(!!settings.get("music"));
 }
 applySoundSettings();
-settings.onChange(name => { if (name === "sound" || name === "volume" || name === "music") applySoundSettings(); });
+settings.onChange(name => { if (name === "sound" || name === "volume") applySoundSettings(); });
 for (const id of ["open-settings", "lobby-settings"]) {
   const b = document.getElementById(id);
   if (!b) continue;
@@ -8357,7 +8369,7 @@ bindings.onChange = refreshKeyLabels;
 // Dev server only: a handle for poking at the game from the console (never in a production build)
 if (import.meta.env.DEV) {
   window.__dev = {
-    inventory, characterBody, vehicles, settings, sfx, horrorScore, skidMarks, camera,
+    inventory, characterBody, vehicles, settings, sfx, skidMarks, camera,
     get powerLines() { return powerLines; }, get shops() { return shops; }, get crates() { return crates; },
     fireGrapple, knockPole, smashStall, toggleVehicle, startRepair, damageVehicle,
     rope: () => ({ on: rope.on, phase: rope.phase }), health: () => playerHealth,

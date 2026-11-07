@@ -42,6 +42,9 @@ const GradeShader = {
     uFlashColor: { value: new THREE.Color(1, 1, 1) },
     uGrain: { value: 0 },
     uScan: { value: 0 },
+    uSharp: { value: 0 },   // unsharp mask (crisper detail, undoes the dynamic-resolution softness)
+    uLens: { value: 0 },    // a real lens: light falling off toward the corners, a hint of fringing at the edge
+    uSplit: { value: 0 },   // always-on filmic split tone: cool shadows, warm highlights
     // Battle royale
     uRadial: { value: 0 },  // skydive zoom blur
     uLines: { value: 0 },   // skydive wind streaks
@@ -84,6 +87,9 @@ const GradeShader = {
     uniform vec3 uFlashColor;
     uniform float uGrain;
     uniform float uScan;
+    uniform float uSharp;
+    uniform float uLens;
+    uniform float uSplit;
     uniform float uRadial;
     uniform float uLines;
     uniform float uStorm;
@@ -150,7 +156,7 @@ const GradeShader = {
       }
 
       // Chromatic aberration (stronger on shockwave rings), split sideways in a glitch
-      float ch = uChroma + ringGlow * 6.0;
+      float ch = uChroma + ringGlow * 6.0 + uLens * 0.9 * edge * edge;
       vec2 off = (uv - 0.5) * ch / uRes.y * 2.0 + vec2(uGlitch * 0.012 + uFeed * 0.0015, 0.0);
       vec3 col;
       if (uRadial > 0.001) {
@@ -177,6 +183,12 @@ const GradeShader = {
       } else {
         col = samp(uv);
       }
+      // Unsharp mask: the centre against its four neighbours (before tone mapping, in linear light)
+      if (uSharp > 0.001 && uRadial <= 0.001) {
+        vec2 px1 = 1.0 / uRes;
+        vec3 nb = samp(uv + vec2(px1.x, 0.0)) + samp(uv - vec2(px1.x, 0.0)) + samp(uv + vec2(0.0, px1.y)) + samp(uv - vec2(0.0, px1.y));
+        col = max(col + (col - nb * 0.25) * uSharp, 0.0);
+      }
 
       col = ACESFilmicToneMapping(col);
       col = sRGBTransferOETF(vec4(col, 1.0)).rgb;
@@ -192,6 +204,13 @@ const GradeShader = {
       vec3 bleach = mix(b1, b2, clamp(10.0 * (l - 0.45), 0.0, 1.0));
       col = mix(col, bleach, uBleach);
       col *= uTint;
+      // Filmic split tone, always a little: shadows lean cool, highlights warm (daylight on dust)
+      if (uSplit > 0.001) {
+        vec3 tone = mix(vec3(0.95, 1.0, 1.06), vec3(1.05, 1.0, 0.93), smoothstep(0.2, 0.8, l));
+        col = mix(col, col * tone, uSplit);
+      }
+      // Lens falloff: the corners get a little less light, like a real camera's
+      col *= 1.0 - uLens * 0.28 * smoothstep(0.35, 1.1, edge);
 
       // Final circle: teal shadows, warm highlights
       if (uShow > 0.001) {
@@ -308,7 +327,7 @@ export class PostFX {
     this.uniforms.uRes.value.copy(size);
 
     // Smoothed grade, chased toward the targets every frame
-    this.g = { sat: 1.06, contrast: 1.05, bleach: 0, chroma: 0, vig: 0, scan: 0, bloom: 0.4, red: 0 };
+    this.g = { sat: 1.0, contrast: 1.04, bleach: 0, chroma: 0, vig: 0, scan: 0, bloom: 0.4, red: 0 };
     this.tint = new THREE.Color(1, 1, 1);
     this.flash = 0;
     this.flashColor = new THREE.Color(1, 1, 1);
@@ -408,8 +427,8 @@ export class PostFX {
     const g = this.g;
 
     // Targets for this frame
-    let sat = 1.06, contrast = 1.05, bleach = 0, chroma = 0, vig = 0, scan = 0, red = 0, grainFeed = 0;
-    let bloom = 0.32 + s.darkness * 0.25;
+    let sat = 1.0, contrast = 1.04, bleach = 0, chroma = 0, vig = 0, scan = 0, red = 0, grainFeed = 0;
+    let bloom = 0.22 + s.darkness * 0.25;
     _c1.setRGB(1, 1, 1);
 
     // Night: cooler, bleached; a blood moon reddens it
@@ -548,6 +567,9 @@ export class PostFX {
     u.uFlashColor.value.copy(this.flashColor);
     u.uGrain.value = 0.02 + g.scan * 0.4 + grainFeed + this.glitchAmt * 0.06;
     u.uScan.value = g.scan;
+    u.uSharp.value = 0.35 * (1 - b.feed);
+    u.uLens.value = 1;
+    u.uSplit.value = 0.6 * (1 - b.feed);
     u.uRadial.value = b.radial;
     u.uLines.value = b.lines;
     u.uStorm.value = b.storm;

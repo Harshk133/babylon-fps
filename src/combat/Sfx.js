@@ -64,7 +64,6 @@ export class Sfx {
     this._space = "outdoor";
     this.muted = false;      // Settings → Sound: everything off
     this.volume = 1;         // Settings → Sound: master volume 0..1
-    this.musicOn = false;    // Settings → Sound: the horror score in zombie mode (off by default)
     this._synth = {};        // name → generated AudioBuffer (buzz, …)
   }
 
@@ -77,10 +76,6 @@ export class Sfx {
   setVolume(v) {
     this.volume = Math.max(0, Math.min(1, v));
     if (this.master) this.master.gain.setTargetAtTime(this._masterLevel(), this.ctx.currentTime, 0.05);
-  }
-  setMusicEnabled(on) {
-    this.musicOn = !!on;
-    if (this.musicBus) this.musicBus.gain.setTargetAtTime(on ? 1 : 0, this.ctx.currentTime, 0.6);
   }
 
   /** Starts downloading the samples (call at boot; decoding waits for unlock()). */
@@ -137,10 +132,6 @@ export class Sfx {
     // (A DynamicsCompressorNode would flatten the gunshot transients.)
     this.master = ctx.createGain();
     this.master.gain.value = this._masterLevel();
-    // The music has its own fader (Settings → horror music), under the master
-    this.musicBus = ctx.createGain();
-    this.musicBus.gain.value = this.musicOn ? 1 : 0;
-    this.musicBus.connect(this.master);
     const pre = ctx.createGain();
     pre.gain.value = 0.5;
     const limiter = ctx.createWaveShaper();
@@ -1103,7 +1094,7 @@ export class Sfx {
       const s = this.skid = { last: -1 };
       const src = this._loopNoise(1.7);
       s.bp = ctx.createBiquadFilter(); s.bp.type = "bandpass"; s.bp.Q.value = 6;
-      s.peak = ctx.createBiquadFilter(); s.peak.type = "peaking"; s.peak.gain.value = 14; s.peak.Q.value = 18;
+      s.peak = ctx.createBiquadFilter(); s.peak.type = "peaking"; s.peak.gain.value = 6; s.peak.Q.value = 6;
       s.gain = ctx.createGain(); s.gain.gain.value = 0;
       s.panner = ctx.createPanner();
       s.panner.panningModel = this.hrtf ? "HRTF" : "equalpower";
@@ -1121,7 +1112,7 @@ export class Sfx {
     s.peak.frequency.setTargetAtTime(f * 1.02, t, 0.05);
     s.bp.Q.setTargetAtTime(dirt || tractor ? 1.2 : 6, t, 0.1);
     const q = Math.round(amount * 30) / 30;
-    if (q !== s.last) { s.last = q; s.gain.gain.setTargetAtTime(q * (dirt ? 0.25 : 0.32), t, 0.06); }
+    if (q !== s.last) { s.last = q; s.gain.gain.setTargetAtTime(q * (dirt ? 0.16 : 0.18), t, 0.08); }
   }
 
   /** Air brakes letting go (the tractor and big vehicles coming to a stop). */
@@ -1142,8 +1133,8 @@ export class Sfx {
       const ctx = this.ctx;
       const r = this.rush = { last: -1 };
       const src = this._loopNoise(2.3);
-      r.hp = ctx.createBiquadFilter(); r.hp.type = "highpass"; r.hp.frequency.value = 400;
-      r.bp = ctx.createBiquadFilter(); r.bp.type = "bandpass"; r.bp.Q.value = 0.7; r.bp.frequency.value = 900;
+      r.hp = ctx.createBiquadFilter(); r.hp.type = "highpass"; r.hp.frequency.value = 120;
+      r.bp = ctx.createBiquadFilter(); r.bp.type = "lowpass"; r.bp.Q.value = 0.5; r.bp.frequency.value = 500;
       r.gain = ctx.createGain(); r.gain.gain.value = 0;
       src.connect(r.hp).connect(r.bp).connect(r.gain).connect(this.master);
       src.start();
@@ -1151,8 +1142,8 @@ export class Sfx {
     const r = this.rush, t = this.ctx.currentTime, q = Math.round(x * 40) / 40;
     if (q === r.last) return;
     r.last = q;
-    r.gain.gain.setTargetAtTime(q * q * 0.32, t, 0.2);
-    r.bp.frequency.setTargetAtTime(700 + q * 2200, t, 0.2);
+    r.gain.gain.setTargetAtTime(q * q * 0.09, t, 0.4);
+    r.bp.frequency.setTargetAtTime(450 + q * 650, t, 0.4);
   }
 
   // ── Low health: breathing ───────────────────────────────────────────────────
@@ -1251,7 +1242,7 @@ export class Sfx {
     }
     // A turbo / intake whine that only comes in high in the revs (the Thar, the sports bike)
     e.whine.frequency.setTargetAtTime(P.whine * (0.6 + rpm * 0.9), t, 0.1);
-    e.whineGain.gain.setTargetAtTime(P.whine ? vol * Math.max(0, rpm - 0.45) * 0.05 : 0, t, 0.15);
+    e.whineGain.gain.setTargetAtTime(P.whine ? vol * Math.max(0, rpm - 0.55) * 0.018 : 0, t, 0.25);
     const p = at ?? this.listener;
     if (e.panner.positionX) {
       e.panner.positionX.setTargetAtTime(p.x, t, 0.05);

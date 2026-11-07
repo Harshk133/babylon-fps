@@ -12,7 +12,6 @@ export const SETTING_DEFAULTS = {
   bots: false,          // battle royale bots in your room (anyone in the room turning them on brings them in)
   sound: true,          // every sound in the game
   volume: 0.9,          // master volume 0..1
-  music: false,         // the horror score in zombie mode
 };
 
 export class Settings {
@@ -34,7 +33,6 @@ export class Settings {
 const TOGGLES = [
   { id: "sound", title: "Sound", text: "Every sound in the game. Off mutes it all." },
   { id: "volume", title: "Volume", text: "Master volume.", range: true },
-  { id: "music", title: "Horror music (zombie modes)", text: "A live, ever-changing horror score in Solo and Co-op that tightens when monsters hunt you." },
   { id: "autoDoors", title: "Auto-open doors", text: "Doors swing open as you walk up to them and shut behind you. Off: press the use key." },
   { id: "bots", title: "Bots in Battle Royale", text: "AI players fill your room. If anyone in the room turns this on, everyone in it plays with bots. Takes effect in the warm-up." },
 ];

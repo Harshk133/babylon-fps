@@ -100,20 +100,45 @@ export function planeAt(route, t, out) {
 }
 
 /** Circle per phase boundary: circles[0] is the starting zone, circles[i+1] the end of phase i. */
-export function zoneCircles(seed) {
+/**
+ * The match's circles. sites: [{ name, x, z }] places worth a final fight
+ * (buildings, a town's houses, the city blocks: cover and short sight lines,
+ * not open fields). One is picked from the seed and every circle closes
+ * toward it: each sits fully inside the one before AND keeps the site inside,
+ * so the last circles land on it and the zone ends there. circles.site is
+ * the chosen one. Without sites it falls back to a random walk.
+ */
+export function zoneCircles(seed, sites = []) {
   const rng = makeRng(seed ^ 0x2073e);
   const circles = [{ x: 0, z: 0, r: ZONE_START_RADIUS }];
+  const site = sites.length ? sites[Math.floor(rng() * sites.length) % sites.length] : null;
   for (const p of ZONE_PHASES) {
     const prev = circles[circles.length - 1];
-    // The next circle always sits fully inside the current one
-    const room = Math.max(0, prev.r - p.radius) * 0.9;
-    const a = rng() * Math.PI * 2, d = Math.sqrt(rng()) * room;
-    let x = prev.x + Math.cos(a) * d, z = prev.z + Math.sin(a) * d;
-    // …and stays over the part of the map that has things on it
-    const far = Math.hypot(x, z), lim = 330;
-    if (far > lim) { x *= lim / far; z *= lim / far; }
+    const room = Math.max(0, prev.r - p.radius);   // how far the new centre may sit from the old one
+    let x, z;
+    if (site) {
+      // On the line from the site toward the old centre: at least far enough along to stay
+      // inside the old circle, at most so the site stays well inside the new one
+      const dx = prev.x - site.x, dz = prev.z - site.z, D = Math.hypot(dx, dz);
+      if (D < 1e-3) { x = site.x; z = site.z; }
+      else {
+        const kMin = Math.max(0, 1 - room / D), kMax = Math.max(kMin, Math.min(1, (p.radius * 0.6) / D));
+        const k = kMin + (kMax - kMin) * rng();
+        // A little sideways too, as long as both rules still hold
+        const side = (rng() - 0.5) * p.radius * 0.3;
+        x = site.x + dx * k - (dz / D) * side;
+        z = site.z + dz * k + (dx / D) * side;
+        if (Math.hypot(x - prev.x, z - prev.z) > room || Math.hypot(x - site.x, z - site.z) > p.radius) { x = site.x + dx * k; z = site.z + dz * k; }
+      }
+    } else {
+      const a = rng() * Math.PI * 2, d = Math.sqrt(rng()) * room * 0.9;
+      x = prev.x + Math.cos(a) * d; z = prev.z + Math.sin(a) * d;
+      const far = Math.hypot(x, z), lim = 330;
+      if (far > lim) { x *= lim / far; z *= lim / far; }
+    }
     circles.push({ x, z, r: p.radius });
   }
+  circles.site = site;
   return circles;
 }
 
