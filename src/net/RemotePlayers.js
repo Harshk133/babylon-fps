@@ -33,7 +33,7 @@ function angleDiff(a, b) {
   return d;
 }
 
-function drawTag(ctx, name, color, hpFrac, dead) {
+function drawTag(ctx, name, color, hpFrac, dead, knocked = false) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
   ctx.clearRect(0, 0, W, H);
   ctx.font = "800 40px 'Segoe UI', system-ui, sans-serif";
@@ -48,13 +48,14 @@ function drawTag(ctx, name, color, hpFrac, dead) {
   const bw = 220, bh = 12, bx = (W - bw) / 2, by = 70;
   ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
   ctx.fillRect(bx - 3, by - 3, bw + 6, bh + 6);
-  ctx.fillStyle = hpFrac > 0.35 ? color : "#ff4b3a";
+  ctx.fillStyle = hpFrac > 0.35 && !knocked ? color : "#ff4b3a";
   ctx.fillRect(bx, by, bw * Math.max(0, hpFrac), bh);
-  if (dead) {
+  if (dead || knocked) {
+    const word = knocked ? "KNOCKED" : "DOWN";
     ctx.font = "900 22px 'Segoe UI', system-ui, sans-serif";
     ctx.fillStyle = "#ff4b3a";
-    ctx.strokeText("DOWN", W / 2, 106);
-    ctx.fillText("DOWN", W / 2, 106);
+    ctx.strokeText(word, W / 2, 106);
+    ctx.fillText(word, W / 2, 106);
   }
 }
 
@@ -121,6 +122,7 @@ export class RemotePlayers {
       bodyYaw: 0, aimYaw: 0, aimPitch: 0, aim: false, fire: false, weapon: "smg",
       hp: 100, dead: false, vis: 1, kills: 0, phase: PHASE_GROUND, chute, skydive: 0,
       tagKey: "", stance: "stand",
+      mate: false, knocked: false,
       target: {
         id, pos: body.position, vel: { x: 0, z: 0 }, alive: false, vis: 1, local: false, name,
         aimOff: STANCES.stand.aimOff, eyeOff: STANCES.stand.eyeOff,
@@ -181,6 +183,16 @@ export class RemotePlayers {
   }
   get pvp() { return this._pvp; }
 
+  /** Duo / Squad: who's on your team (their name tags show, through walls too). */
+  setMates(isMate) {
+    for (const [id, p] of this.players) {
+      p.mate = isMate(id);
+      p.tag.material.depthTest = this._pvp && !p.mate;
+      p.tag.material.needsUpdate = true;
+      p.tagKey = "";
+    }
+  }
+
   /** Latest state packet from a teammate. */
   applyState(id, s) {
     const p = this.players.get(id);
@@ -198,6 +210,7 @@ export class RemotePlayers {
     p.hp = s.hp; p.vis = s.vis ?? 1; p.kills = s.k ?? 0;
     p.swim = !!s.swm; p.air = s.air ? 1 : 0;
     p.throwHold = s.th ?? null;   // the throwable they're holding ready, if any
+    p.knocked = !!s.kn;           // Duo / Squad: down but not out (hp is their bleed-out bar)
     if (s.av !== undefined && s.av !== p.avatarCode) this._build(p, s.av);
     if (s.w !== p.weapon) {
       // Empty hands means no guns at all (a battle royale drop, everything dropped): nothing goes on the back
@@ -265,12 +278,12 @@ export class RemotePlayers {
     this.onStep?.(p, p.root.position.x, feetY, p.root.position.z, vol);
   }
 
-  /** Minimap entries { x, z, yaw, color, dead } (reused array). */
-  mapList() {
+  /** Minimap entries { x, z, yaw, color, dead } (reused array). matesOnly: just your team (battle royale). */
+  mapList(matesOnly = false) {
     const out = (this._map ??= []);
     out.length = 0;
     for (const p of this.players.values()) {
-      if (!p.hasState) continue;
+      if (!p.hasState || (matesOnly && !p.mate)) continue;
       const e = (p.mapEntry ??= { x: 0, z: 0, yaw: 0, color: p.color, dead: false });
       e.x = p.body.position.x; e.z = p.body.position.z; e.yaw = p.root.rotation.y; e.dead = p.dead;
       out.push(e);
@@ -350,7 +363,7 @@ export class RemotePlayers {
           p.soldier.update(p.animAcc, {
             localForward: p.riding ? 0 : p.vx * sy + p.vz * cy,
             localRight: p.riding ? 0 : -p.vx * cy + p.vz * sy,
-            aiming: !p.dead && (p.aim || p.fire || p.stance === "prone"),
+            aiming: !p.dead && !p.knocked && (p.aim || p.fire || p.stance === "prone"),
             firing: p.fire,
             aimYawOffset: angleDiff(p.aimYaw, yaw),
             aimPitch: p.aimPitch,
@@ -364,20 +377,20 @@ export class RemotePlayers {
         }
       }
 
-      // Battle royale: no name tag or health bar over enemies
-      if (this._pvp) { p.tag.visible = false; continue; }
+      // Battle royale: no name tag or health bar over enemies, only over your own team
+      if (this._pvp && !p.mate) { p.tag.visible = false; continue; }
 
       // Name tag: readable size at any distance, redrawn only when it changes
-      const key = `${Math.round(p.hp / 5)}|${p.dead}`;
+      const key = `${Math.round(p.hp / 5)}|${p.dead}|${p.knocked}`;
       if (key !== p.tagKey) {
         p.tagKey = key;
-        drawTag(p.ctx, p.name, p.color, p.hp / 100, p.dead);
+        drawTag(p.ctx, p.name, p.color, p.hp / 100, p.dead, p.knocked);
         p.tex.needsUpdate = true;
       }
       p.tag.position.set(b.x, b.y - feetOffset + TAG_HEIGHT, b.z);
       const dist = camera.position.distanceTo(p.tag.position);
       // In PvP smoke hides enemies' names too (concealed: camera → tag passes through a cloud)
-      p.tag.visible = !inPlane && (!this._pvp || (dist < PVP_TAG_RANGE && !this.concealed?.(camera.position, p.tag.position)));
+      p.tag.visible = !inPlane && (!this._pvp || p.mate || (dist < PVP_TAG_RANGE && !this.concealed?.(camera.position, p.tag.position)));
       const s = THREE.MathUtils.clamp(dist * 0.055, 0.9, 5);
       p.tag.scale.set(s * 2.5, s, 1);
     }

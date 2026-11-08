@@ -5,6 +5,7 @@ import { PLANE, FREEFALL, CHUTE, PVP_DAMAGE, PVP_HEADSHOT, PVP_HEAD_Y, BR_GUN_RE
 import { PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "../net/RemotePlayers.js";
 import { STANCE_NAMES } from "../player/Stance.js";
 import { GROUP_WORLD, GROUP_PLAYER, GROUP_GLASS } from "../physicsGroups.js";
+import { TEAM, bleedTime } from "./Teams.js";
 
 // Battle royale bots: seven AI players in every match, so a lone player (or a
 // small room) still gets a real fight. The host simulates them; to everyone
@@ -28,7 +29,13 @@ import { GROUP_WORLD, GROUP_PLAYER, GROUP_GLASS } from "../physicsGroups.js";
 
 export const BOT_COUNT = 7;       // typical number (BOT_MIN..BOT_MAX per room)
 const BOT_MIN = 5, BOT_MAX = 8;
+// Duo / Squad rooms need enough bots to make several teams
+const BOT_RANGE = { 1: [BOT_MIN, BOT_MAX], 2: [10, 14], 4: [15, 19] };
 const BOT_PREFIX = "bot:";
+const CRAWL = 0.9;           // m/s, knocked
+const HELP_LOOK = 130;       // m: how far off a teammate in trouble gets noticed
+const FOLLOW_DIST = 20;      // m from its leader before it catches up
+const CALLOUT_GAP = 16;      // s between one bot's "Enemy ahead!"
 
 // Gamer tags of the sort people type (some get digits on the end)
 const NAMES = [
@@ -111,12 +118,14 @@ export class Bots {
   get count() { return this.list.length; }
   /** This machine runs the bots (or is about to: some haven't "joined" yet). */
   get hosting() { return this.list.length > 0 || this.pending.length > 0; }
+  get _range() { return BOT_RANGE[this.g.teamSize()] ?? BOT_RANGE[1]; }
 
   // ── Roster ──────────────────────────────────────────────────────────────
   /** Host: a handful of bots will drift into the room over the next few seconds. */
   spawnAll() {
     this.clear();
-    const n = BOT_MIN + ((Math.random() * (BOT_MAX - BOT_MIN + 1)) | 0);
+    const [lo, hi] = this._range;
+    const n = lo + ((Math.random() * (hi - lo + 1)) | 0);
     const now = this.g.now();
     for (let i = 0; i < n; i++) this._schedule(now + 0.8 + Math.random() * (i < 2 ? 4 : 14));
   }
@@ -188,7 +197,7 @@ export class Bots {
     if (br.state !== "match") return;
     const now = this.g.now();
     for (const b of this.list) {
-      if (b.id === by || b.dead || b.phase !== PHASE_GROUND || b.car || b.enemy) continue;
+      if (b.id === by || b.dead || b.knocked || b.phase !== PHASE_GROUND || b.car || b.enemy) continue;
       const d = Math.hypot(x - b.x, z - b.z);
       if (d > 110 || d < 3 || Math.random() < 0.15) continue;
       const a = Math.atan2(x - b.x, z - b.z);
@@ -233,6 +242,9 @@ export class Bots {
       target: null, car: null, carT: 0, stuckT: 0, lastX: 0, lastZ: 0, jumpAt: 0, drop: null,
       aiming: false, firing: 0, respawnT: 0,
       skip: new Map(), stuckN: 0, escapeT: 0, escX: 0, escZ: 0,
+      // Duo / Squad
+      knocked: false, knockN: 0, knockBy: null, knockW: "", knockHs: false, revivers: new Set(), wipeT: 0,
+      task: null, taskAnim: 0, card: null, leadId: null, calloutAt: -99,
     };
     this.list.push(b);
     this.byId.set(id, b);
@@ -267,6 +279,7 @@ export class Bots {
       const b = this._add(id, p.name, p.color, { x: p.body.position.x, y: p.body.position.y - this.g.feetOffset, z: p.body.position.z });
       this._nextId = Math.max(this._nextId, Number(id.slice(BOT_PREFIX.length)) + 1 || this._nextId);
       b.hp = p.hp; b.dead = p.dead; b.phase = p.phase;
+      b.knocked = !!p.knocked; b.knockN = b.knocked ? 1 : 0; b.stance = b.knocked ? 2 : b.stance;
       b.weapon = p.weapon && WEAPONS[p.weapon] ? p.weapon : null;
       if (b.weapon) b.guns[b.weapon] = { mag: WEAPONS[b.weapon].magSize, reserve: BR_GUN_RESERVE[b.weapon] ?? 30 };
       b.mode = b.dead ? "dead" : "loot";
@@ -280,13 +293,13 @@ export class Bots {
     const now = this.g.now();
     // Between matches people come and go: now and then one leaves, someone new turns up later
     for (const b of [...this.list]) {
-      if (this.list.length > BOT_MIN - 1 && Math.random() < 0.18) {
+      if (this.list.length > this._range[0] - 1 && Math.random() < 0.18) {
         if (b.chatty && Math.random() < 0.5) this.g.say(b.id, pick(SAY.bye));
         this._remove(b);
         if (Math.random() < 0.75) this._schedule(now + 3 + Math.random() * 16);
       }
     }
-    if (this.list.length + this.pending.length < BOT_MIN) this._schedule(now + 2 + Math.random() * 10);
+    for (let n = this.list.length + this.pending.length; n < this._range[0]; n++) this._schedule(now + 2 + Math.random() * 10);
     for (const b of this.list) {
       this._resetKit(b, true);
       const a = Math.random() * Math.PI * 2, r = 8 + Math.random() * 16;
@@ -301,12 +314,22 @@ export class Bots {
   onMatch() {
     const route = this.g.br.route;
     const spots = this.g.dropSpots();
+    const teamDrops = new Map(); // a team lands together: its first bot picks the spot
     for (const b of this.list) {
       b.said = 0;
       if (b.chatty && Math.random() < 0.18) this._say(b, "start", 0.5 + Math.random() * 4);
       this._resetKit(b, false);
       b.phase = PHASE_PLANE;
       b.mode = "plane";
+      b.leadId = this.g.leaderOf(b.id);
+      const teamId = this.g.teamOf(b.id);
+      const shared = teamId !== undefined ? teamDrops.get(teamId) : null;
+      if (shared) {
+        const a = Math.random() * Math.PI * 2;
+        b.drop = { x: shared.x + Math.cos(a) * 9, z: shared.z + Math.sin(a) * 9, along: shared.along };
+        b.jumpAt = shared.jumpAt + Math.random() * 0.8;
+        continue;
+      }
       // A spot near the route (most land close to it, a few go far)
       let best = null;
       for (let k = 0; k < 12; k++) {
@@ -322,12 +345,14 @@ export class Bots {
       b.drop = best;
       // Jump when the plane is this far short of the spot along the route
       b.jumpAt = Math.max(PLANE.jumpDelay + 0.5, (best.along - 55 - Math.random() * 40) / PLANE.speed);
+      if (teamId !== undefined) teamDrops.set(teamId, { x: best.x, z: best.z, along: best.along, jumpAt: b.jumpAt });
     }
   }
 
   _resetKit(b, warm) {
     if (b.car) this._leaveCar(b);
     b.hp = 100; b.dead = false; b.kills = 0;
+    b.knocked = false; b.knockN = 0; b.knockBy = null; b.revivers.clear(); b.task = null; b.card = null; b.leadId = null;
     b.guns = {}; b.weapon = null;
     b.gear = { helmet: 0, vest: 0, backpack: 0 }; b.armor = { helmet: 0, vest: 0 };
     b.throws = { grenade: 0, molotov: 0, smoke: 0 }; b.heals = { medkit: 0, biscuit: 0 };
@@ -376,6 +401,7 @@ export class Bots {
         if (br.state !== "match" && (b.respawnT -= delta) <= 0) { this._resetKit(b, true); this._placeOnGround(b, (Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30); b.mode = "warm"; }
       } else if (b.phase === PHASE_PLANE) this._plane(b, delta);
       else if (b.phase === PHASE_FALL || b.phase === PHASE_CHUTE) this._fall(b, delta);
+      else if (b.knocked) this._crawl(b, delta);
       else if (b.car) this._drive(b, delta);
       else this._ground(b, delta);
       this._publish(b);
@@ -395,8 +421,158 @@ export class Bots {
       const e = (p._botTarget ??= { id, x: 0, y: 0, z: 0, bot: !!bot, body: p.body, still: 0 });
       e.x = p.body.position.x; e.y = p.body.position.y; e.z = p.body.position.z;
       e.speed = Math.hypot(p.vx, p.vz);
+      e.knocked = p.knocked;
       out.push(e);
     }
+  }
+
+  // ── Teams ───────────────────────────────────────────────────────────────
+  /** Knocked: it crawls toward a teammate, bleeds, and dies with its team. */
+  _crawl(b, delta) {
+    const g = this.g, br = g.br;
+    if (!b.revivers.size) b.hp -= (TEAM.knockHp / bleedTime(b.knockN)) * delta;
+    if (br.zone && Math.hypot(b.x - br.zone.x, b.z - br.zone.z) > br.zone.r) {
+      b.zoneT = (b.zoneT ?? 1) - delta;
+      if (b.zoneT <= 0) { b.zoneT = 1; b.hp -= br.zone.dps; }
+    }
+    if ((b.wipeT -= delta) <= 0) {
+      b.wipeT = 0.3;
+      if (!g.mateUp(b.id)) b.hp = 0;
+    }
+    if (b.hp <= 0) { this._die(b, b.knockBy, b.knockW || "self", b.knockHs); return; }
+    const near = b.revivers.size ? null : this._nearestUpMate(b);
+    if (near && near.d > 2) this._walk(b, near.x, near.z, CRAWL, delta);
+    else { this._ease(b, 0, 0, delta); b.x += b.vx * delta; b.z += b.vz * delta; }
+    if (Math.abs(b.vx) + Math.abs(b.vz) > 0.2) b.yaw += THREE.MathUtils.clamp(angleDiff(Math.atan2(b.vx, b.vz), b.yaw), -3 * delta, 3 * delta);
+    b.aimYaw = b.yaw; b.aimPitch = 0;
+  }
+
+  _nearestUpMate(b) {
+    let best = null;
+    for (const id of this.g.mates(b.id)) {
+      if (this.g.isDown(id)) continue;
+      const at = this.g.posOf(id);
+      if (!at) continue;
+      const d = Math.hypot(at.x - b.x, at.z - b.z);
+      if (!best || d < best.d) best = { x: at.x, z: at.z, d };
+    }
+    return best;
+  }
+
+  /** Down to 0 with a teammate standing: on the ground instead of out. */
+  _knock(b, by, w, hs) {
+    if (b.car) this._leaveCar(b);
+    b.knocked = true;
+    b.knockN++;
+    b.hp = TEAM.knockHp;
+    b.knockBy = by; b.knockW = w; b.knockHs = !!hs;
+    b.revivers.clear();
+    b.enemy = null; b.pick = null; b.goal = null; b.mode = "knocked";
+    b.reloadT = 0; b.healT = 0; b.healKind = null; b.firing = 0; b.aiming = false; b.jy = b.jv = 0;
+    this._endTask(b);
+    b.stance = 2;
+    this.g.botKnocked(b.id, by, w, hs);
+  }
+
+  /** Someone started (on) or stopped reviving bot `id`. */
+  setReviver(id, by, on) {
+    const b = this.byId.get(id);
+    if (b) { if (on) b.revivers.add(by); else b.revivers.delete(by); }
+  }
+
+  /** The revive finished. */
+  revive(id) {
+    const b = this.byId.get(id);
+    if (!b?.knocked) return;
+    b.knocked = false;
+    b.hp = TEAM.reviveHp;
+    b.revivers.clear();
+    b.stance = 1;
+    b.mode = "loot";
+    b.think = 0.3;
+  }
+
+  /** A teammate called this bot back at (x, z): it comes down from the sky with a pistol. */
+  recall(id, x, z) {
+    const b = this.byId.get(id);
+    if (!b) return;
+    this._resetKit(b, false);
+    b.guns.pistol = { mag: WEAPONS.pistol.magSize, reserve: WEAPONS.pistol.magSize * 3 };
+    b.weapon = "pistol";
+    b.hp = TEAM.recallHp;
+    b.x = x; b.z = z; b.y = this.g.groundHeight(x, z) + PLANE.altitude;
+    b.phase = PHASE_FALL; b.vy = -4; b.mode = "plane";
+    b.drop = { x, z, along: 0 };
+    b.leadId = this.g.leaderOf(b.id);
+    b.p.soldier?.revive();
+  }
+
+  _endTask(b) {
+    const t = b.task;
+    if (!t) return;
+    b.task = null;
+    if (t.kind === "revive") this.g.botRevive(b.id, t.id, false);
+  }
+
+  _startTask(b, kind, id, time) {
+    b.task = { kind, id, t: time };
+    b.taskAnim = 0;
+    b.goal = null; b.pick = null;
+    b.mode = kind;
+    if (kind === "revive") this.g.botRevive(b.id, id, true);
+  }
+
+  /** Reviving or calling someone back: stands its ground till done, or till something changes. */
+  _doTask(b, delta) {
+    const g = this.g, t = b.task;
+    if (b.enemy) { this._endTask(b); return; }
+    if (t.kind === "revive") {
+      const at = g.posOf(t.id);
+      if (!at || !g.isDown(t.id) || Math.hypot(at.x - b.x, at.z - b.z) > TEAM.reviveRange + 0.6) { this._endTask(b); return; }
+    } else if (!g.cardOf(t.id)) { this._endTask(b); return; }
+    if ((b.taskAnim -= delta) <= 0) { b.taskAnim = 1.1; g.gesture(b.id, null, 1.1); }
+    if ((t.t -= delta) > 0) return;
+    b.task = null;
+    if (t.kind === "revive") { g.botRevive(b.id, t.id, false); g.botRevived(b.id, t.id); }
+    else { b.card = null; g.botRecall(b.id, t.id, b.x, b.z); }
+  }
+
+  /** Teammates first: pick one up, fetch a recall card, get it to a tower. True: busy with that. */
+  _teamDuty(b) {
+    const g = this.g;
+    // Someone on the ground
+    let down = null, downD = HELP_LOOK;
+    for (const id of g.mates(b.id)) {
+      if (!g.isDown(id)) continue;
+      const at = g.posOf(id);
+      if (!at) continue;
+      const d = Math.hypot(at.x - b.x, at.z - b.z);
+      if (d < downD) { down = { id, x: at.x, z: at.z }; downD = d; }
+    }
+    if (down) {
+      if (downD < TEAM.reviveRange - 0.5) { if (!b.task) this._startTask(b, "revive", down.id, TEAM.reviveTime); }
+      else { b.goal = { x: down.x, z: down.z }; b.pick = null; b.mode = "help"; }
+      return true;
+    }
+    // Carrying a card: to the nearest tower
+    if (b.card !== null) {
+      if (!g.cardOf(b.card)) { b.card = null; return false; }
+      const tower = g.towerNear(b.x, b.z);
+      if (tower) {
+        const d = Math.hypot(tower.x - b.x, tower.z - b.z);
+        if (d < TEAM.towerRange - 1) { if (!b.task) this._startTask(b, "recall", b.card, TEAM.recallTime); }
+        else { b.goal = { x: tower.x, z: tower.z }; b.pick = null; b.mode = "help"; }
+        return true;
+      }
+    }
+    // A card lying about
+    const card = g.groundCard(b.id, b.x, b.z, HELP_LOOK);
+    if (card) {
+      if (Math.hypot(card.x - b.x, card.z - b.z) < TEAM.cardRange - 0.4) { g.botTakeCard(b.id, card.v); b.card = card.v; b.think = 0; }
+      else { b.goal = { x: card.x, z: card.z }; b.pick = null; b.mode = "help"; }
+      return true;
+    }
+    return false;
   }
 
   // ── The drop ────────────────────────────────────────────────────────────
@@ -405,7 +581,10 @@ export class Bots {
     planeAt(br.route, br.t, _v);
     b.x = _v.x; b.z = _v.z; b.y = _v.y - 2;
     const pastEject = Math.hypot(_v.x, _v.z) > PLANE.ejectRadius && br.t > br.route.duration * 0.5;
-    if (br.t >= b.jumpAt || pastEject) {
+    // Riding with a person: it goes when they go
+    const human = b.leadId !== null && !isBotId(b.leadId);
+    const ready = human ? this.g.phaseOf(b.leadId) !== PHASE_PLANE : br.t >= b.jumpAt;
+    if (ready || pastEject) {
       b.phase = PHASE_FALL;
       b.vy = -4;
       b.x -= br.route.dx * 6; b.z -= br.route.dz * 6;
@@ -415,6 +594,11 @@ export class Bots {
 
   _fall(b, delta) {
     const g = this.g;
+    // Following a person down: wherever they're heading
+    if (b.leadId !== null && !isBotId(b.leadId)) {
+      const at = g.posOf(b.leadId);
+      if (at) { b.drop.x += (at.x + Math.sin(b.seed) * 7 - b.drop.x) * Math.min(1, delta * 2); b.drop.z += (at.z + Math.cos(b.seed) * 7 - b.drop.z) * Math.min(1, delta * 2); }
+    }
     const ground = g.groundHeight(b.x, b.z);
     const dx = b.drop.x - b.x, dz = b.drop.z - b.z, d = Math.hypot(dx, dz);
     const chute = b.phase === PHASE_CHUTE;
@@ -475,6 +659,7 @@ export class Bots {
 
     b.think -= delta;
     if (b.think <= 0) { b.think = THINK * (0.8 + Math.random() * 0.4); this._decide(b); }
+    if (b.task) this._doTask(b, delta);
 
     // Combat: track and shoot
     let speed = 0, gx = null, gz = null;
@@ -517,9 +702,10 @@ export class Bots {
       speed = b.stance ? CREEP : JOG;
     } else {
       b.aiming = false;
-      if (b.healT > 0) b.stance = 1;
+      if (b.healT > 0 || b.task) b.stance = 1;
       else if (b.pauseT <= 0 && !(b.style === "camper" && b.mode === "hold")) b.stance = 0;
-      if (b.pauseT > 0) { b.pauseT -= delta; } // stopped: to loot, listen or look about
+      if (b.task) { /* kneeling over a teammate, or calling at the tower */ }
+      else if (b.pauseT > 0) { b.pauseT -= delta; } // stopped: to loot, listen or look about
       else if (b.pick?.active) { gx = b.pick.x; gz = b.pick.z; speed = RUN; }
       else if (b.goal) {
         gx = b.goal.x; gz = b.goal.z;
@@ -548,7 +734,7 @@ export class Bots {
     if (warm && Math.random() < 0.02) b.warmFight = Math.random() < 0.6;
     if ((match || (warm && b.warmFight)) && b.weapon) {
       for (const t of this._targets) {
-        if (t.id === b.id) continue;
+        if (t.id === b.id || g.isMate(b.id, t.id)) continue;
         const dx = t.x - b.x, dz = t.z - b.z, d = Math.hypot(dx, dz);
         if (d > (match ? SIGHT : 30) || d > bestD) continue;
         // Behind it: only if close or it was just shot
@@ -567,6 +753,8 @@ export class Bots {
         const off = angleDiff(Math.atan2(best.x - b.x, best.z - b.z), b.aimYaw);
         b.over = off * (Math.random() < 0.6 ? 0.04 + Math.random() * 0.12 : -0.05);
         b.pauseT = 0;
+        // Tell the team (a person on it, anyway)
+        if (now - b.calloutAt > CALLOUT_GAP && g.teamSize() > 1) { b.calloutAt = now; g.botCallout(b.id, best.x, best.y - g.feetOffset, best.z); }
       }
       b.enemy = best;
       b.lastSeen = { x: best.x, y: best.y, z: best.z };
@@ -577,6 +765,9 @@ export class Bots {
       return;
     }
     b.enemy = null;
+    if (match && g.teamSize() > 1) b.leadId = g.leaderOf(b.id);
+    if (match && g.teamSize() > 1 && this._teamDuty(b)) return;
+    if (b.task) return;
     // Lost them: a grenade where they were, then go and look
     if (match && b.lastSeen && now - b.lastSeenAt < 5) {
       const d = Math.hypot(b.lastSeen.x - b.x, b.lastSeen.z - b.z);
@@ -628,12 +819,23 @@ export class Bots {
     }
     // Loot worth having nearby (more eager while it's poorly equipped)
     const needy = !b.weapon || b.gear.vest < 2 || b.heals.medkit + b.heals.biscuit < 2;
-    if (!zoneGoal || zoneGoal.far < 25 || !b.weapon) {
+    // Fallen behind its team: no stopping to shop until it's caught up
+    const lead = b.leadId !== null && b.leadId !== b.id ? g.posOf(b.leadId) : null;
+    const leadD = lead ? Math.hypot(lead.x - b.x, lead.z - b.z) : 0;
+    if ((!zoneGoal || zoneGoal.far < 25 || !b.weapon) && (leadD < 55 || !b.weapon)) {
       const pick = this._bestPickup(b, needy ? LOOT_LOOK : 25);
       if (pick) { b.pick = pick; b.mode = "loot"; b.goal = null; return; }
     }
     b.pick = null;
     if (zoneGoal) { b.goal = zoneGoal; b.mode = "zone"; return; }
+    // Stays with its team
+    if (lead && leadD > FOLLOW_DIST) {
+      b.goal = { x: lead.x + Math.sin(b.seed) * 6, z: lead.z + Math.cos(b.seed) * 6 };
+      b.mode = "follow";
+      return;
+    }
+    if (lead && b.mode === "follow") { b.goal = null; b.mode = "roam"; b.pauseT = 1 + Math.random() * 2; return; }
+    if (lead && b.leadId !== null && !isBotId(b.leadId) && leadD <= FOLLOW_DIST) { b.pauseT = Math.max(b.pauseT, 0.6); return; } // keeps by you, looking round
     // Off toward gunfire it heard (rushers)
     if (b.investigateUntil > now && b.goal && Math.hypot(b.goal.x - b.x, b.goal.z - b.z) > 3) { b.mode = "hunt"; return; }
     // Campers sit tight a while once they're kitted out, crouched, watching
@@ -906,7 +1108,7 @@ export class Bots {
       const p = _res.hitPointWorld;
       hits.push(r2(p.x), r2(p.y), r2(p.z));
       const victim = _res.body.playerTarget;
-      if (!victim) { g.impact(p, _res.hitNormalWorld, "dust"); continue; }
+      if (!victim || g.isMate(b.id, victim.id)) { g.impact(p, _res.hitNormalWorld, "dust"); continue; }
       const hs = p.y - (_res.body.position.y - g.feetOffset) > PVP_HEAD_Y;
       head ||= hs;
       const dmg = (PVP_DAMAGE[b.weapon] ?? 15) * (hs ? PVP_HEADSHOT[b.weapon] ?? 1.5 : 1);
@@ -991,8 +1193,8 @@ export class Bots {
 
   _hurt(b, dmg, by, w, hs, sx, sz, raw) {
     if (b.dead || b.phase === PHASE_PLANE || this.g.br.state === "end") return;
-    // Armour soaks its share, like a player's
-    if (!raw) {
+    // Armour soaks its share, like a player's (a knocked bot's bar takes it all)
+    if (!raw && !b.knocked) {
       const slot = hs ? "helmet" : w === "grenade" || w === "molotov" ? null : "vest";
       if (slot && b.gear[slot] && b.armor[slot] > 0) {
         const stop = dmg * GEAR[`${slot}${b.gear[slot]}`].reduce;
@@ -1012,14 +1214,22 @@ export class Bots {
       b.think = Math.min(b.think, 0.1);
     }
     if (b.car && b.hp > 0) this._leaveCar(b);
+    if (b.task) this._endTask(b);  // shot at: it drops what it was doing
     this.g.flinch(b.id, dmg);
-    if (b.hp <= 0) this._die(b, by, w, hs);
+    if (b.hp <= 0) {
+      if (!b.knocked && this.g.canKnock(b.id)) this._knock(b, by, w, hs);
+      else if (b.knocked && by === null) this._die(b, b.knockBy, b.knockW || w, b.knockHs); // the zone finished what they started
+      else this._die(b, by, w, hs);
+    }
   }
 
   _die(b, by, w, hs) {
     const g = this.g;
     b.hp = 0;
     b.dead = true;
+    b.knocked = false;
+    this._endTask(b);
+    b.revivers.clear();
     b.mode = "dead";
     b.jy = b.jv = 0;
     b.enemy = null;
@@ -1040,7 +1250,7 @@ export class Bots {
   /** A grenade went off (host): bots in reach take the blast. */
   blast(pos, by, radius, maxDamage) {
     for (const b of this.list) {
-      if (b.dead || b.phase !== PHASE_GROUND) continue;
+      if (b.dead || b.phase !== PHASE_GROUND || this.g.isMate(by, b.id)) continue;
       const d = Math.hypot(b.x - pos.x, b.z - pos.z);
       if (d >= radius) continue;
       const shield = this.g.shielded(pos, b.x, b.y + 1.2, b.z) ? 0.15 : 1;
@@ -1051,7 +1261,7 @@ export class Bots {
   /** Molotov fire under (x, z) (host). */
   burn(x, z, r, dps, dt, by) {
     for (const b of this.list) {
-      if (b.dead || b.phase !== PHASE_GROUND) continue;
+      if (b.dead || b.phase !== PHASE_GROUND || this.g.isMate(by, b.id)) continue;
       if (Math.hypot(b.x - x, b.z - z) < r + 0.35 && b.y - this.g.groundHeight(x, z) < 1) {
         this._hurt(b, dps * dt, by === b.id ? null : by, "molotov", false, null, null, false);
         if (!b.dead && this.g.now() - (b.fleeAt ?? -9) > 1) {
@@ -1076,7 +1286,8 @@ export class Bots {
     s.by = r2(b.yaw); s.ay = r2(b.aimYaw); s.ap = r2(b.aimPitch);
     s.aim = b.aiming ? 1 : 0; s.fire = b.firing > 0 ? 1 : 0;
     s.hp = Math.max(0, Math.round(b.hp)); s.k = b.kills;
-    s.w = b.weapon; s.dead = b.dead ? 1 : 0;
+    s.w = b.knocked ? null : b.weapon; s.dead = b.dead ? 1 : 0;
+    s.kn = b.knocked ? 1 : undefined;
     s.sn = b.stance; s.ph = b.phase;
     s.g = b.gear.helmet * 100 + b.gear.vest * 10 + b.gear.backpack;
     s.veh = b.car ? [r2(b.car.x), r2(b.car.z), r2(b.car.yaw), r1(b.car.speed), Math.round(b.car.fuel), g.vehicles.indexOf(b.car)] : undefined;

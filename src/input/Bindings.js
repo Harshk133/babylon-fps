@@ -42,8 +42,12 @@ export const ACTIONS = [
   { id: "inventory", label: "Inventory",                    key: "Tab",       group: "Menus" },
   { id: "map",      label: "Map",                           key: "KeyM",      group: "Menus" },
   { id: "chat",     label: "Chat (Enter works too)",        key: "KeyY",      group: "Menus" },
+  // Duo / Squad
+  { id: "ping",     label: "Mark what you're looking at (middle mouse too)", key: "KeyP", group: "Team" },
+  { id: "quickChat", label: "Quick chat menu",              key: "KeyO",      group: "Team" },
+  { id: "voice",    label: "Push to talk",                  key: "Backquote", group: "Team" },
 ];
-export const GROUPS = ["Movement", "Combat", "Interact", "Vehicles", "Menus"];
+export const GROUPS = ["Movement", "Combat", "Interact", "Vehicles", "Menus", "Team"];
 
 const KEY = "babylon-fps:keys";
 const BY_ID = new Map(ACTIONS.map(a => [a.id, a]));

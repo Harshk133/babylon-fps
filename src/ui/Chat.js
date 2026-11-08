@@ -27,7 +27,7 @@ export class Chat {
     root.innerHTML = `
       <div class="chat-log"></div>
       <form class="chat-form" autocomplete="off">
-        <span class="chat-to">ALL</span>
+        <button type="button" class="chat-to">ALL</button>
         <input class="chat-input" type="text" maxlength="${MAX_LEN}" enterkeyhint="send" spellcheck="false" placeholder="Say something…" />
         <span class="chat-hint"><kbd>Enter</kbd> send <kbd>Esc</kbd> close</span>
       </form>`;
@@ -35,6 +35,11 @@ export class Chat {
     this.log = root.querySelector(".chat-log");
     this.form = root.querySelector(".chat-form");
     this.input = root.querySelector(".chat-input");
+    this.toEl = root.querySelector(".chat-to");
+    this.hasTeam = false;     // in a Duo / Squad match: the box can talk to the team
+    this.toTeam = false;
+    // (pointerdown, so the input doesn't lose focus and close the box)
+    this.toEl.addEventListener("pointerdown", e => { e.preventDefault(); this._switchTo(); });
 
     this.form.addEventListener("submit", e => {
       e.preventDefault();
@@ -44,6 +49,7 @@ export class Chat {
     const stop = e => {
       e.stopPropagation();
       if (e.type === "keydown" && e.code === "Escape") { e.preventDefault(); this.close(); }
+      if (e.type === "keydown" && e.code === "Tab") { e.preventDefault(); this._switchTo(); }
     };
     this.input.addEventListener("keydown", stop);
     this.input.addEventListener("keyup", stop);
@@ -57,6 +63,25 @@ export class Chat {
     this.el.classList.toggle("on", on);
     document.body.classList.toggle("chat-on", on);
     if (!on) this.close();
+  }
+
+  /** A Duo / Squad match started or ended: the box defaults to the team while there is one. */
+  setTeam(on) {
+    this.hasTeam = on;
+    this.toTeam = on;
+    this._showTo();
+  }
+
+  _switchTo() {
+    if (!this.hasTeam) return;
+    this.toTeam = !this.toTeam;
+    this._showTo();
+  }
+
+  _showTo() {
+    this.toEl.textContent = this.toTeam ? "TEAM" : "ALL";
+    this.toEl.classList.toggle("team", this.toTeam);
+    this.toEl.title = this.hasTeam ? "Tab: switch between team and everyone" : "";
   }
 
   open() {
@@ -82,16 +107,16 @@ export class Chat {
       const now = performance.now();
       if (now - this._lastSent < SEND_GAP) return; // keep the draft, try again in a moment
       this._lastSent = now;
-      this.cb.send(text);
+      this.cb.send(text, this.hasTeam && this.toTeam);
       this.input.value = "";
     }
     this.close();
   }
 
-  /** A player's message. `self` marks your own. */
-  add(name, color, text, self = false) {
+  /** A player's message. `self` marks your own; `team`: only your team saw it. */
+  add(name, color, text, self = false, team = false) {
     const line = document.createElement("div");
-    line.className = self ? "chat-line self" : "chat-line";
+    line.className = `chat-line${self ? " self" : ""}${team ? " team" : ""}`;
     const who = document.createElement("span");
     who.className = "chat-name";
     who.style.color = color || "#e8dccb";

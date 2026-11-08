@@ -19,7 +19,7 @@ const PING_EVERY = 2000;  // ms
 const PING_LOST = 10000;  // ms without a pong: the connection is gone
 const OUTBOX_MAX = 400;   // messages queued while reconnecting
 // Replaced by the next one: not worth queueing while reconnecting
-const STREAMS = new Set(["st", "mon", "bots", "br", "lvl", "ping", "shot", "ef", "anim", "noise", "takeover"]);
+const STREAMS = new Set(["st", "mon", "bots", "br", "lvl", "ping", "shot", "ef", "anim", "noise", "takeover", "vo"]);
 
 const randomId = () => Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
 
@@ -128,13 +128,15 @@ export class Net {
    * room: the code as typed (without the "br-" prefix). VITE_PUBLIC_URL sets the site
    * address for builds that don't run on it (the Android app is https://localhost).
    */
-  static inviteUrl(mode, room) {
+  static inviteUrl(mode, room, extra = {}) {
     const base = (import.meta.env.VITE_PUBLIC_URL || "").trim() || location.origin + location.pathname;
     const url = new URL(base, location.href);
     const here = new URLSearchParams(location.search);
     for (const k of ["relay"]) if (here.has(k)) url.searchParams.set(k, here.get(k)); // same server when testing
     url.searchParams.set("room", room);
     url.searchParams.set("mode", mode);
+    // Battle royale: which queue (team=2|4) and whose party
+    for (const [k, v] of Object.entries(extra)) if (v) url.searchParams.set(k, v);
     return url.toString();
   }
 

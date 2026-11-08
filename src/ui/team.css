@@ -1,0 +1,139 @@
+/* ── Team play (src/ui/TeamHud.js, the squad panel in Duo / Squad) ──────────── */
+#tm-knock {
+  position: fixed;
+  left: 50%;
+  bottom: 24%;
+  z-index: 1300;
+  display: none;
+  width: min(340px, 70vw);
+  transform: translateX(-50%);
+  text-align: center;
+  font-family: "Teko", "Segoe UI", system-ui, sans-serif;
+  color: #ffd9d2;
+  pointer-events: none;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.9);
+}
+#tm-knock.on { display: block; }
+.tm-knock-title { font-size: 40px; line-height: 1; letter-spacing: 0.12em; color: #ff4b3a; }
+#tm-knock.reviving .tm-knock-title { color: #7ee05a; }
+.tm-knock-bar {
+  height: 9px;
+  margin: 6px 0;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 75, 58, 0.55);
+}
+.tm-knock-bar i { display: block; height: 100%; width: 100%; background: #ff4b3a; }
+#tm-knock.reviving .tm-knock-bar { border-color: rgba(126, 224, 90, 0.6); }
+#tm-knock.reviving .tm-knock-bar i { background: #7ee05a; }
+.tm-knock-text { font: 600 14px "Segoe UI", system-ui, sans-serif; color: rgba(255, 235, 228, 0.9); }
+
+/* Knocked: the edges of the screen run dark red, the health bar is the bleed-out */
+body.knocked::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 42%, rgba(120, 8, 0, 0.62));
+}
+body.knocked #crosshair { visibility: hidden; }
+body.knocked #health-bar-fill { background: #ff4b3a !important; }
+
+/* Quick chat */
+#tm-quick {
+  position: fixed;
+  left: 28px;
+  top: 50%;
+  z-index: 1500;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 210px;
+  padding: 8px;
+  transform: translateY(-50%);
+  background: rgba(10, 7, 7, 0.82);
+  border-left: 3px solid var(--amber, #e2a42b);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  pointer-events: auto;
+}
+#tm-quick.on { display: flex; }
+.tm-quick-head { padding: 0 4px 4px; font-size: 11px; font-weight: 800; letter-spacing: 0.22em; color: var(--amber, #e2a42b); }
+.tm-quick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  font: 600 14px "Segoe UI", system-ui, sans-serif;
+  color: #f1e8dc;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.tm-quick-row:hover { background: rgba(232, 220, 203, 0.12); }
+.tm-quick-row kbd {
+  min-width: 20px;
+  font: 700 12px "Segoe UI", system-ui, sans-serif;
+  text-align: center;
+  color: #16100c;
+  background: var(--amber, #e2a42b);
+  border-radius: 2px;
+}
+
+/* Voice chip, above the chat */
+#tm-voice {
+  position: fixed;
+  left: 28px;
+  bottom: 142px;
+  z-index: 1300;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  font: 700 11px "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0.05em;
+  color: rgba(241, 232, 220, 0.86);
+  background: rgba(10, 7, 7, 0.62);
+  pointer-events: none;
+}
+#tm-voice.on { display: flex; }
+#tm-voice i { width: 8px; height: 8px; border-radius: 50%; background: #8a8a8a; }
+#tm-voice[data-kind="live"] i { background: #7ee05a; box-shadow: 0 0 8px #7ee05a; }
+#tm-voice[data-kind="ready"] i { background: #e2a42b; }
+#tm-voice[data-kind="error"] i { background: #ff4b3a; }
+
+/* The squad panel in a match: wider rows with a state and a mute button */
+#squad.team { pointer-events: auto; }
+.squad-row.team { grid-template-columns: 10px 118px 70px 34px 22px; }
+.squad-row.knocked .squad-name { color: #ff8a7a; }
+.squad-row.knocked .squad-kills { color: #ff4b3a; font-weight: 800; }
+.squad-row.speaking .squad-dot { box-shadow: 0 0 0 2px #7ee05a; }
+.squad-mute {
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  font: 800 10px "Segoe UI", system-ui, sans-serif;
+  color: rgba(241, 232, 220, 0.8);
+  background: rgba(232, 220, 203, 0.12);
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.squad-mute.on { color: #16100c; background: #ff6a5a; }
+
+/* Touch: ping, quick chat and mic in the top-left utility row, only in a team match */
+#touch-ui .tc-ping, #touch-ui .tc-quick, #touch-ui .tc-mic { display: none; top: 8px; }
+#touch-ui .tc-ping { left: calc(var(--l) + 275px); }
+#touch-ui .tc-quick { left: calc(var(--l) + 330px); }
+#touch-ui .tc-mic { left: calc(var(--l) + 385px); }
+body.in-team #touch-ui .tc-ping, body.in-team #touch-ui .tc-quick { display: flex; }
+body.in-team.voice-on #touch-ui .tc-mic { display: flex; }
+#touch-ui .tc-mic.down { background: rgba(126, 224, 90, 0.5); }
+#touch-ui .tc-ping svg, #touch-ui .tc-quick svg, #touch-ui .tc-mic svg { width: 58%; height: 58%; fill: currentColor; }
+/* Knocked on a phone: only the joystick, the map and the team buttons are left */
+body.knocked #touch-ui :is(.tc-fire, .tc-fire-l, .tc-scope, .tc-jump, .tc-crouch, .tc-prone, .tc-reload, .tc-throw, .tc-swap, .tc-heal, .tc-run, .tc-bag) { display: none !important; }
+body.touch #tm-quick { left: 50%; top: 62px; transform: translateX(-50%); display: none; grid-template-columns: repeat(3, 1fr); min-width: min(560px, 76vw); zoom: 0.92; }
+body.touch #tm-quick.on { display: grid; }
+body.touch #tm-quick .tm-quick-head { grid-column: 1 / -1; }
+body.touch #tm-voice { left: 50%; bottom: auto; top: 40px; transform: translateX(-50%); zoom: 0.8; }
+body.touch #tm-knock { bottom: 30%; zoom: 0.85; }

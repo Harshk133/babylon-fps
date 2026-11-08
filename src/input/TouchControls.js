@@ -152,6 +152,13 @@ export class TouchControls {
     // Room chat (shown only in multiplayer, see ui/chat.css): a plain speech bubble, the icon set has none
     this.chatBtn = btn("tc-chat tc-small", null);
     this.chatBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/></svg>';
+    // Duo / Squad (shown in a team match, see ui/team.css)
+    this.pingBtn = btn("tc-ping tc-small", null);
+    this.pingBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a7 7 0 0 0-7 7c0 5 7 13 7 13s7-8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>';
+    this.quickBtn = btn("tc-quick tc-small", null);
+    this.quickBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm3 5v2h10V8H7zm0 4v2h7v-2H7z"/></svg>';
+    this.micBtn = btn("tc-mic tc-small", null);
+    this.micBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 0 0-8 0v5a4 4 0 0 0 4 4zm7-4a1 1 0 0 0-2 0 5 5 0 0 1-10 0 1 1 0 0 0-2 0 7 7 0 0 0 6 6.9V21H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-3.1A7 7 0 0 0 19 11z"/></svg>';
     this.startBtn = btn("tc-start tc-wide", null, "START MATCH");
 
     // While paused: settings
@@ -427,6 +434,16 @@ export class TouchControls {
     });
     this.pauseBtn.addEventListener("click", () => cb.pause());
     this.chatBtn.addEventListener("click", e => { e.stopPropagation(); cb.chat?.(); });
+    this.pingBtn.addEventListener("click", e => { e.stopPropagation(); cb.ping?.(); });
+    this.quickBtn.addEventListener("click", e => { e.stopPropagation(); cb.quick?.(); });
+    // Held to talk
+    const talk = down => e => {
+      e.stopPropagation();
+      this.micBtn.classList.toggle("down", down);
+      cb.talk?.(down);
+    };
+    this.micBtn.addEventListener("pointerdown", talk(true));
+    for (const t of ["pointerup", "pointercancel", "pointerleave"]) this.micBtn.addEventListener(t, talk(false));
     this.gearBtn.addEventListener("click", e => { e.stopPropagation(); this.showSettings(true); });
   }
 

@@ -69,11 +69,19 @@
 #chat.open .chat-form { display: flex; }
 
 .chat-to {
+  padding: 0;
+  font: inherit;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.12em;
   color: var(--amber, #e2a42b);
+  background: none;
+  border: 0;
+  cursor: pointer;
 }
+.chat-to.team { color: #7ee05a; }
+.chat-line.team { border-left-color: #7ee05a; }
+.chat-line.team .chat-name::before { content: "[TEAM] "; color: #7ee05a; }
 
 .chat-input {
   flex: 1;

@@ -13,6 +13,11 @@ export const SETTING_DEFAULTS = {
   sound: true,          // every sound in the game
   volume: 0.9,          // master volume 0..1
   fps: "auto",          // desktop frame rate: "auto" | "max" | "60" | "30" (phones use the touch settings' own)
+  voice: false,         // team voice chat (peer-to-peer, so opt-in)
+  voiceMic: "ptt",      // "off" | "ptt" | "open"
+  voiceSpeaker: true,   // hear others (separate from your mic)
+  voiceChannel: "team", // "team" | "all" (nearby enemies hear you too)
+  muteRandoms: false,   // start muted on teammates outside your party
 };
 
 export class Settings {
@@ -38,6 +43,13 @@ const TOGGLES = [
   { id: "fps", title: "Frame rate", text: "Auto runs at your screen's rate and drops to an even half of it when the game can't keep up. Capped rates keep laptops cooler.", desktop: true,
     choices: [["auto", "Auto"], ["max", "Unlimited"], ["60", "60"], ["30", "30"]] },
   { id: "bots", title: "Bots in Battle Royale", text: "AI players fill your room. If anyone in the room turns this on, everyone in it plays with bots. Takes effect in the warm-up." },
+  { id: "voice", title: "Team voice chat", text: "Talk to your Duo or Squad. Audio goes straight between players, so anyone you connect with can see your IP address. Off: nothing connects." },
+  { id: "voiceMic", title: "Microphone", text: "Off: listen only. Push to talk: only while you hold the key or the MIC button. Open: always on.",
+    choices: [["off", "Off"], ["ptt", "Push to talk"], ["open", "Open mic"]] },
+  { id: "voiceSpeaker", title: "Speaker", text: "Hear other players' voices." },
+  { id: "voiceChannel", title: "Voice channel", text: "Team: only your teammates hear you. All: enemies within 45 m hear you too.",
+    choices: [["team", "Team"], ["all", "All"]] },
+  { id: "muteRandoms", title: "Mute randoms", text: "Start every match with teammates outside your party muted. Unmute anyone from the squad list." },
 ];
 
 export class SettingsPanel {

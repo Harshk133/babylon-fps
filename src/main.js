@@ -111,6 +111,9 @@ import { RenderInterp } from "./physics/RenderInterp.js";
 import { PerfManager } from "./render/PerfManager.js";
 import { StaticGridBroadphase } from "./physics/StaticGridBroadphase.js";
 import { Bots, isBotId } from "./br/Bots.js";
+import { TEAM, TEAM_NAMES, TEAM_WORDS, QUICK_CHAT, PING_LOOK, bleedTime, assignTeams, seatLate, relayRoomName, parseRoomName } from "./br/Teams.js";
+import { TeamHud } from "./ui/TeamHud.js";
+import { VoiceChat } from "./net/VoiceChat.js";
 
 // The caves' heavy lifting (rock field, mesh, torches, baked light) runs on a
 // worker from the very start, in parallel with every download; if workers
@@ -298,7 +301,7 @@ function updateThreatUI() {
 function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX = null, srcZ = null, kind = "raw") {
   if (playerHealth <= 0 || (isBR() && (br.ghost || br.flight === PHASE_PLANE))) return;
   lastHit.x = srcX; lastHit.z = srcZ; lastHit.head = kind === "head";
-  amount = armorAbsorb(amount, kind);
+  if (!knock.on) amount = armorAbsorb(amount, kind); // armour doesn't help you once you're down
   playerHealth = Math.max(0, playerHealth - amount);
   if (srcX !== null) {
     const dx = srcX - characterBody.position.x, dz = srcZ - characterBody.position.z;
@@ -333,7 +336,7 @@ function dealDamageToPlayer(amount, knockX = 0, knockZ = 0, shake = 0.45, srcX =
   cameraTrauma = Math.min(1, cameraTrauma + shake);
   knockbackVel.x += knockX;
   knockbackVel.z += knockZ;
-  if (playerHealth <= 0) onPlayerDeath();
+  if (playerHealth <= 0 && !brTryKnock()) onPlayerDeath();
 }
 
 /** Helmet / vest take their share of a hit and lose that much durability; broken pieces are gone. */
@@ -1236,12 +1239,13 @@ function setKey(code, pressed, repeat) {
     case "left":    keys.left     = pressed; break;
     case "right":   keys.right    = pressed; break;
     case "jump":
-      keys.jump = pressed;
-      if (pressed) jumpQueued = true;
+      keys.jump = pressed && !knock.on;
+      if (pressed && !knock.on) jumpQueued = true;
       break;
     case "sprint": keys.run = pressed; break;
   }
   if (repeat) return;
+  if (act === "voice") voice.setPtt(pressed);
 
   // One-shot actions
   const playing = isLocked() && playerHealth > 0;
@@ -1251,6 +1255,11 @@ function setKey(code, pressed, repeat) {
     if (act === "map" && !lobby.open && (isLocked() || brWatching() || worldMap.open)) { setMapOpen(!worldMap.open); return; }
     if (code === "Escape" && worldMap.open) { setMapOpen(false); return; }
     if (code === "Escape" && shopUI.open) { setShopOpen(false); return; }
+    if (teamLive() && !lobby.open) {
+      if (teamHud.quickOpen && /^Digit[1-9]$/.test(code)) { teamHud.pickKey(Number(code[5]) - 1); return; }
+      if (act === "quickChat") { teamHud.toggleQuick(); return; }
+      if (act === "ping" && isLocked()) { brPing(); return; }
+    }
     if (isBR() && !lobby.open) {
       if (code === "Enter" && brHostCanStart()) { brHostStart(); return; }
       if (brWatching()) {
@@ -1259,7 +1268,7 @@ function setKey(code, pressed, repeat) {
         return;
       }
     }
-    if (!playing) return;
+    if (!playing || knock.on) return;   // knocked: you can crawl and call for help, that's all
     if (code in SLOT_KEYS) {
       cancelWeaponWheel();
       const id = WEAPON_ORDER.find(w => WEAPONS[w].slot === SLOT_KEYS[code]);
@@ -1273,7 +1282,7 @@ function setKey(code, pressed, repeat) {
       case "cycleThrow": cycleThrowable(); break;
       case "heal": useHeal(); break;
       case "shop": if (nearShop) setShopOpen(!shopUI.open); break;
-      case "use": if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); else if (nearCseDoor) useCseDoor(); else if (nearCrate) meleeCrate(); break;
+      case "use": if (brTeamUse()) break; if (nearDoor) useDoor(!nearDoor.doorOpen); else if (nearGatePart) useGate(nearGatePart); else if (nearCseDoor) useCseDoor(); else if (nearCrate) meleeCrate(); break;
       case "crouch": toggleStance("crouch"); break;
       case "prone": toggleStance("prone"); break;
       case "light": useLightSwitch(); break;
@@ -1287,6 +1296,8 @@ function setKey(code, pressed, repeat) {
     }
   } else if (act === "throw") {
     releaseThrow();
+  } else if (act === "use" && !IS_TOUCH && team.act.on) {
+    brTeamActStop("Stopped");       // held: letting go stops it (a tap on a phone keeps going till you move)
   }
 }
 /** Touch buttons and prompt taps send an action's original key: play it as whatever key that action is on now. */
@@ -1314,7 +1325,7 @@ let wheelCooldown = 0;
 window.addEventListener("wheel", e => {
   if (!isLocked() || e.deltaY === 0) return;
   if (worldMap.open) return; // the map zooms with its own wheel handler
-  if (playerHealth <= 0) return;
+  if (playerHealth <= 0 || knock.on) return;
   const now = performance.now();
   if (now < wheelCooldown) return;
   wheelCooldown = now + 120;
@@ -1332,6 +1343,8 @@ canvas.addEventListener("mousedown", e => {
     if (e.button === 2) cancelWeaponWheel();
     return;
   }
+  if (e.button === 1 && teamLive()) { brPing(); return; }
+  if (knock.on) return;
   if (e.button === 0) { input.fire = true; input.firePressed = true; }
   if (e.button === 2) input.aim = true;
 });
@@ -1384,12 +1397,12 @@ const touch = IS_TOUCH ? new TouchControls({
   look: (dx, dy) => { if (isLocked()) lookBy(dx, dy); },
   turn: (yaw, pitch) => { if (isLocked()) turnBy(yaw, pitch); },
   fire(down) {
-    if (down && isLocked()) { input.fire = true; input.firePressed = true; }
+    if (down && isLocked() && !knock.on) { input.fire = true; input.firePressed = true; }
     else input.fire = false;
   },
-  aim(on) { input.aim = on && isLocked(); },
+  aim(on) { input.aim = on && isLocked() && !knock.on; },
   hotbar({ hb, id }) {
-    if (playerHealth <= 0) return;
+    if (playerHealth <= 0 || knock.on) return;
     if (hb === "weapon") {
       if (inventory.has(id)) equipWeapon(id);
       else inventoryUI.feed(`${WEAPONS[id].name} not found yet`, "info");
@@ -1404,6 +1417,9 @@ const touch = IS_TOUCH ? new TouchControls({
   pause: () => releaseLock(),
   unlock: () => sfx.unlock(),
   chat: () => openChat(),
+  ping: () => { if (teamLive()) brPing(); },
+  quick: () => { if (teamLive()) teamHud.toggleQuick(); },
+  talk: down => voice.setPtt(down),
 }) : null;
 
 // Android back button: close the settings / inventory / map, otherwise pause
@@ -1501,7 +1517,7 @@ function updateCharacterMovement(delta) {
   const depth = waterDepthAt(characterBody.position.x, characterBody.position.z);
   swimming = alive && !drive.on && !ride.on && !climb.active && !brAirborne() && depth > (swimming ? SWIM_DEPTH - 0.15 : SWIM_DEPTH);
   if (swimming && stance !== "stand") setStance("stand", true);
-  sprinting = alive && !swimming && !exhausted && (keys.run || !!touch?.sprint) && iz > 0.5 && !input.fire && !input.aim;
+  sprinting = alive && !knock.on && !swimming && !exhausted && (keys.run || !!touch?.sprint) && iz > 0.5 && !input.fire && !input.aim;
   // Sprinting gets you up off the ground first
   if (sprinting && stance !== "stand" && !setStance("stand")) sprinting = false;
 
@@ -1865,7 +1881,7 @@ function updateSoldier(delta) {
     localRight:   footed ? -vx * cy + vz * sy : 0,
     // Prone always holds the gun up (the arms are what you lie on)
     // First person holds it up too, so the gun is in front of you
-    aiming: alive && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone" || fpBlend > 0.5),
+    aiming: alive && !knock.on && !sprinting && !brAirborne() && !drive.on && (input.aim || input.fire || timeSinceShot < 0.5 || stance === "prone" || fpBlend > 0.5),
     firing: timeSinceShot < 0.12,
     aimYawOffset: angleDiff(aimYaw + recoilYaw, bodyYaw),
     // First person aims from the eye anyway: the camera direction is right there
@@ -2303,8 +2319,8 @@ function currentSpread() {
 
 function updateWeapon(delta) {
   const def = currentDef();
-  if (!def || brAirborne() || drive.on) {
-    // Empty hands, or still in the air: nothing to shoot with
+  if (!def || brAirborne() || drive.on || knock.on) {
+    // Empty hands, knocked, or still in the air: nothing to shoot with
     timeSinceShot += delta;
     input.firePressed = false;
     weapon.reloading = false;
@@ -2411,7 +2427,8 @@ function fireShot(def) {
 
     const zombie = _shotResult.body.zombie;
     const victim = _shotResult.body.playerTarget;
-    if (pvp && victim && !victim.local) {
+    // (A teammate stops the bullet but takes no damage: there's no friendly fire)
+    if (pvp && victim && !victim.local && !isMate(net.id, victim.id)) {
       const head = _hitPoint.y - (_shotResult.body.position.y - FEET_OFFSET) > PVP_HEAD_Y;
       const dmg = (PVP_DAMAGE[inventory.current] ?? 15) * (head ? PVP_HEADSHOT[inventory.current] ?? 1.5 : 1)
         * (br.mw === net.id ? MW_DAMAGE : 1); // the Most Wanted hits harder
@@ -2652,7 +2669,7 @@ function onGrenadeExplode(pos, owner = null) {
 
   const px = characterBody.position.x - pos.x, pz = characterBody.position.z - pos.z;
   const pd = Math.hypot(px, pz);
-  if (pd < GRENADE.playerRadius) {
+  if (pd < GRENADE.playerRadius && !isMate(by, localTarget.id)) {
     if (by !== localTarget.id) brNoteAttacker(by, "grenade", false);
     const shield = blastShielded(pos, characterBody.position.x, characterBody.position.y + 0.4, characterBody.position.z) ? 0.15 : 1;
     const f = (1 - pd / GRENADE.playerRadius) * shield;
@@ -2686,7 +2703,7 @@ function onFireTick(x, z, r, dt, owner = null, hostile = false) {
   }
   const px = characterBody.position.x - x, pz = characterBody.position.z - z;
   const pr = r + CHARACTER_RADIUS;
-  if (px * px + pz * pz < pr * pr && characterBody.position.y - FEET_OFFSET - groundHeight(x, z) < 1) {
+  if (px * px + pz * pz < pr * pr && characterBody.position.y - FEET_OFFSET - groundHeight(x, z) < 1 && (hostile || !isMate(by, localTarget.id))) {
     if (!hostile && by !== localTarget.id) brNoteAttacker(by, "molotov", false);
     dealDamageToPlayer(MOLOTOV.playerDps * dt, 0, 0, 0.08);
   }
@@ -2756,19 +2773,22 @@ function collectPickup(entry, manual = false) {
 }
 
 function interact() {
+  if (team.near.card) { brTakeCard(team.near.card.v, net.id); return; }
   if (pickups.nearestWeapon && !brAirborne() && !drive.on) collectPickup(pickups.nearestWeapon, true);
 }
 
 function updatePickups(delta) {
   // Feet height: only loot on your floor of a house can be picked up
   pickups.update(delta, focusPos.x, focusPos.z, brWatching() ? null : characterBody.position.y - FEET_OFFSET);
-  const canLoot = playerHealth > 0 && !brAirborne() && !brWatching();
+  const canLoot = playerHealth > 0 && !knock.on && !brAirborne() && !brWatching();
   if (canLoot) {
     for (let i = pickups.touching.length - 1; i >= 0; i--) collectPickup(pickups.touching[i]);
   }
 
   // Context prompts: key, action, what it's on, icon, and a bar (0..1, or -1 for none)
   promptN = 0;
+  if (canLoot) brTeamPrompts();
+  else team.near.down = team.near.card = team.near.tower = null;
   if (canLoot) {
     const e = drive.on ? null : pickups.nearestWeapon;
     if (e) {
@@ -3299,7 +3319,7 @@ let inventoryOpen = false;
 
 function setInventoryOpen(open) {
   if (open === inventoryOpen) return;
-  if (open && playerHealth <= 0) return;
+  if (open && (playerHealth <= 0 || knock.on)) return;
   inventoryOpen = open;
   lootScreen.setOpen(open);
   if (open) {
@@ -3888,7 +3908,7 @@ const minimap = new Minimap(document.getElementById("minimap"), {
   fires: () => throwables.fires,
   obstacles: () => mapObstacles,
   roads: () => roadLines,
-  players: () => (isBR() ? NO_PLAYERS : remotePlayers.mapList()),
+  players: () => brMapPlayers(),
   zone: () => (isBR() && br.state === "match" ? br.zone : null),
   pins: () => pinList,
   fights: () => fightZones,
@@ -3980,7 +4000,7 @@ function mapMe() {
 }
 const worldMap = new WorldMap({
   me: mapMe,
-  players: () => (isBR() ? NO_PLAYERS : remotePlayers.mapList()),
+  players: () => brMapPlayers(),
   obstacles: () => mapObstacles,
   fires: () => atmosphere.sources,
   vehicles: () => vehicles,
@@ -4014,8 +4034,9 @@ function setPin(id, x, z, share = false, look = null) {
   pinList.length = 0;
   for (const q of worldMap.pins.values()) pinList.push(q);
   if (id === "me" && p) sfx.click();
-  // Squadmates see your pin; in the battle royale everyone's an enemy
+  // Squadmates see your pin; in the battle royale only your own Duo / Squad does
   if (share && gameMode === "coop" && net.inRoom) net.send(p ? { t: "pin", x: Math.round(x * 10) / 10, z: Math.round(z * 10) / 10 } : { t: "pin", c: 1 });
+  if (share && id === "me" && teamLive()) brShareMapPin(p);
 }
 
 function setMapOpen(open) {
@@ -5138,6 +5159,7 @@ function playerJoined(p) {
   updateSquadPlayerCount();
   if (isBR()) {
     br.netTimer = 0; // send them the match state right away
+    team.dirty = true;
     if (net.isHost) {
       net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state }, cse: cseBuilding?.openDoors(), crates: crates?.brokenList(), poles: powerLines?.state(), stalls: shops.brokenList?.() });
       brAdmitLate(p);
@@ -5163,6 +5185,7 @@ function playerJoined(p) {
 /** A player left the room (or wasn't in the roster any more when we got back). */
 function playerLeft(id) {
   botPrefs.delete(id);
+  team.prefs.delete(id);
   if (typeof id === "number") brSyncBots();
   const name = remotePlayers.players.get(id)?.name ?? "A player";
   remotePlayers.remove(id);
@@ -5222,6 +5245,7 @@ function saveLastPos() {
     room: net.room, br: isBR(), seed: isBR() ? br.seed : 0,
     x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2), yaw: +aimYaw.toFixed(3),
     hp: Math.round(playerHealth), inv: inventory.snapshot(), at: Date.now(),
+    kn: knock.on ? knock.count : 0,  // a reload doesn't get you back on your feet
   };
   try { sessionStorage.setItem(LASTPOS_KEY, JSON.stringify(lastPos)); } catch { /* storage full */ }
 }
@@ -5249,6 +5273,7 @@ function applyRestore(r) {
   if (r.inv) { inventory.restore(r.inv); onWeaponChanged(false); }
   playerHealth = healthTrail = Math.max(1, Math.min(MAX_HEALTH, r.hp ?? MAX_HEALTH));
   inventoryUI.feed("Reconnected · back where you were", "info");
+  if (r.kn && isBR() && team.of.has(net.id)) { knock.count = r.kn - 1; brEnterKnock(r.hp); }
 }
 
 net.on("reconnecting", info => {
@@ -5317,9 +5342,9 @@ function setNetStatus(text) {
 }
 
 /** Joined from the lobby: remember the room and put its link in the address bar. */
-function enteredRoom(mode, code) {
-  Object.assign(myRoom, { mode, code });
-  Lobby.setRoomUrl(mode, code);
+function enteredRoom(mode, code, extra = {}) {
+  Object.assign(myRoom, { mode, code, extra });
+  Lobby.setRoomUrl(mode, code, extra);
   document.body.classList.add("in-room");
 }
 
@@ -5334,7 +5359,7 @@ function leaveRoom() {
 /** Copies this room's invite link (the pause screen's button). */
 function copyInvite(btn) {
   if (!myRoom.mode) return;
-  copyText(Net.inviteUrl(myRoom.mode, myRoom.code)).then(ok => {
+  copyText(Net.inviteUrl(myRoom.mode, myRoom.code, myRoom.extra)).then(ok => {
     const label = btn.querySelector("span");
     label.textContent = ok ? "Link copied!" : "Copy the address bar instead";
     setTimeout(() => { label.textContent = "Copy invite link"; }, 2200);
@@ -5399,7 +5424,8 @@ net.on("st", msg => remotePlayers.applyState(msg.from, msg));
 // colours come from the relay's player list, keyed by the relay-stamped `from`.
 const CHAT_KEYS = new Set(["Enter", "NumpadEnter", "Slash"]); // plus the bound chat key (Y by default)
 const chat = new Chat({
-  send(text) {
+  send(text, toTeam) {
+    if (toTeam) { brTeamSay(text); return; }
     net.send({ t: "chat", m: text });
     const me = net.players.get(net.id);
     chat.add(me?.name ?? myName, me?.color, text, true);
@@ -5612,7 +5638,8 @@ function netTick(delta) {
       vx: +v.x.toFixed(2), vz: +v.z.toFixed(2),
       by: +bodyYaw.toFixed(3), ay: +aimYaw.toFixed(3), ap: +aimPitch.toFixed(3),
       aim: input.aim ? 1 : 0, fire: timeSinceShot < 0.15 ? 1 : 0,
-      w: inventory.current, hp: Math.max(0, Math.round(playerHealth)), dead: playerHealth <= 0 ? 1 : 0,
+      w: knock.on ? null : inventory.current, hp: Math.max(0, Math.round(playerHealth)), dead: playerHealth <= 0 ? 1 : 0,
+      kn: knock.on ? 1 : undefined,
       vis: +playerVisibility().toFixed(2), k: killsThisLife, sn: STANCE_RANK[stance], g: _gearCode || undefined,
       av: encodeAvatar(soldier.avatar), swm: swimming ? 1 : undefined, air: airPose > 0.5 ? 1 : undefined,
       th: throwAiming && playerHealth > 0 ? inventory.selectedThrowable : undefined,
@@ -5666,7 +5693,11 @@ function updateSquad(delta) {
   if (squadTimer > 0) return;
   squadTimer = 0.25;
   let html = "";
-  if (net.inRoom && !isBR()) {
+  const onTeam = teamLive() && team.of.has(net.id);
+  squadEl.classList.toggle("team", onTeam);
+  if (onTeam) {
+    html = brSquadHtml();
+  } else if (net.inRoom && !isBR()) {
     const me = net.players.get(net.id);
     const rows = [{ name: myName, color: me?.color ?? "#fff", hp: Math.max(0, playerHealth), kills: killsThisLife, me: true }];
     for (const p of remotePlayers.players.values()) rows.push({ name: p.name, color: p.color, hp: p.hp, kills: p.kills, dead: p.dead });
@@ -6899,6 +6930,10 @@ function keepInBounds() {
 // shooters send `pvp` damage to the victim, and the victim announces `elim`.
 const brHud = new BrHud();
 const brEdgeHud = new BrEdgeHud();
+const teamHud = new TeamHud({ onQuick: i => brQuickChat(i) });
+const voice = new VoiceChat(net, {
+  onError: text => inventoryUI.feed(text, "info"),
+});
 const supplyDrops = new SupplyDrops(scene, (x, z) => surfaceHeight(x, z), d => onSupplyLanded(d));
 const zoneWall = new ZoneWall(scene);
 const dropPlane = createPlane();
@@ -7030,6 +7065,7 @@ const bots = new Bots({
   impact: (p, n, kind) => effects.impact(p, n.x, n.y, n.z, kind, kind === "blood" ? 9 : 5),
   /** A bot hit player `id`: you, a bot, or someone else (who applies it themselves). */
   hitPlayer(id, dmg, hs, by, w, sx, sz) {
+    if (isMate(by, id)) return;
     if (isBotId(id)) bots.damage(id, dmg, hs, by, w, sx, sz);
     else if (id === localTarget.id) pvpHitMe(by, dmg, hs, w, sx, sz);
     else net.send({ t: "pvp", to: id, b: by, d: +dmg.toFixed(1), hs: hs ? 1 : 0, w, sx: +sx.toFixed(1), sz: +sz.toFixed(1) });
@@ -7049,6 +7085,46 @@ const bots = new Bots({
     const msg = { t: "elim", v: id, k: by ?? null, w: w ?? "self", hs: hs ? 1 : 0 };
     net.send(msg);
     brHandleElim(msg);
+  },
+  // Duo / Squad
+  teamSize: () => team.size,
+  teamOf: id => team.of.get(id),
+  isMate: (a, b) => isMate(a, b),
+  isDown: id => isDownId(id),
+  mates: id => brMatesOf(id),
+  mateUp: id => brMateUp(id),
+  posOf: id => brPlayerPos(id),
+  phaseOf: id => (id === net.id ? br.flight : remotePlayers.players.get(id)?.phase ?? PHASE_GROUND),
+  leaderOf: id => brLeaderOf(id),
+  canKnock: id => br.state === "match" && team.size > 1 && brMateUp(id),
+  botKnocked(id, by, w, hs) {
+    const msg = { t: "knk", v: id, k: by ?? null, w, hs: hs ? 1 : 0 };
+    net.send(msg);
+    brHandleKnock(msg);
+  },
+  /** A bot started (on) or stopped reviving player `id`. */
+  botRevive(by, id, on) {
+    if (isBotId(id)) bots.setReviver(id, by, on);
+    else if (id === net.id) { if (on) knock.revivers.add(by); else knock.revivers.delete(by); }
+    else net.send({ t: "rvs", to: id, v: id, s: on ? 1 : 0, b: by });
+  },
+  botRevived(by, id) {
+    if (isBotId(id)) bots.revive(id);
+    else if (id === net.id) brRevivedBy(by);
+    else net.send({ t: "rvd", to: id, v: id, b: by });
+  },
+  groundCard: (id, x, z, range) => brGroundCard(id, x, z, range),
+  cardOf: v => team.cards.get(v) ?? null,
+  botTakeCard(id, v) {
+    brTakeCard(v, id);
+  },
+  towerNear: (x, z) => brNearestTower(x, z),
+  botRecall(id, v, x, z) {
+    brSendRecall(v, id, x, z);
+  },
+  botCallout(id, x, y, z) {
+    brToMates(id, { t: "tchat", m: QUICK_CHAT[0].text, b: id }, () => brShowTeamChat(id, QUICK_CHAT[0].text));
+    brToMates(id, { t: "tping", k: "enemy", x: +x.toFixed(1), y: +y.toFixed(1), z: +z.toFixed(1), b: id }, () => brShowPing(id, "enemy", x, z));
   },
   /** A bot joined or left: the same lines a person gets. */
   announce(id, what) {
@@ -7093,7 +7169,9 @@ function brColor(id) { return net.players.get(id)?.color ?? remotePlayers.player
 
 function brPickSpectate(dir) {
   _specIds.length = 0;
-  for (const id of br.alive) if (id !== net.id && remotePlayers.players.get(id)?.hasState) _specIds.push(id);
+  // Your own team first, while any of them are left
+  for (const id of br.alive) if (isMate(id, net.id) && remotePlayers.players.get(id)?.hasState) _specIds.push(id);
+  if (!_specIds.length) for (const id of br.alive) if (id !== net.id && remotePlayers.players.get(id)?.hasState) _specIds.push(id);
   if (!_specIds.length) { br.spectating = null; return; }
   const n = _specIds.length, i = _specIds.indexOf(br.spectating);
   br.spectating = _specIds[(((i + dir) % n) + n) % n];
@@ -7119,8 +7197,10 @@ function enterBattleRoyale(welcome) {
   remotePlayers.pvp = true;
   br.gate = null;
   br.hostQuiet = 0;
+  const roomInfo = parseRoomName(welcome.room);
+  team.size = roomInfo.size;
   chat.setEnabled(true);
-  chat.system(`Room "${welcome.room.slice(3)}" · press ${IS_TOUCH ? "the chat button" : "Y"} to chat`);
+  chat.system(`Room "${roomInfo.code}" · ${TEAM_NAMES[team.size]} · press ${IS_TOUCH ? "the chat button" : "Y"} to chat`);
   for (const p of welcome.players) if (p.id !== net.id) remotePlayers.add(p);
   zombieManager.clearAll();
   enemyFire.clear();
@@ -7130,7 +7210,7 @@ function enterBattleRoyale(welcome) {
   brEnterWarmup();
   inventoryUI.feed(net.isHost
     ? `You're the host. The match starts by itself, or ${IS_TOUCH ? "tap START MATCH" : "press ENTER"} to drop now`
-    : `Joined "${welcome.room.slice(3)}" · the match starts by itself`, "info");
+    : `Joined "${roomInfo.code}" · the match starts by itself`, "info");
 }
 
 function brWarmSpawn() {
@@ -7153,6 +7233,7 @@ function brResetPlayer(x, y, z, empty) {
   characterBody.velocity.set(0, 0, 0);
   moveVelocity.set(0, 0, 0);
   camPivot.set(x, y - FEET_OFFSET + cameraRig.pivotHeight, z);
+  brClearKnock();
   inventory.reset(empty);
   if (!empty) inventory.addThrowable("smoke", SMOKE.warmupKit); // try it out before the drop
   onWeaponChanged(false);
@@ -7190,6 +7271,7 @@ function brEnterWarmup() {
   killsThisLife = 0;
   progress.resetRun();
   brResetTwists();
+  brClearTeams();
   if (net.isHost) {
     if (!botsWanted()) brSyncBots();
     else if (bots.hosting) bots.onWarmup();
@@ -7208,7 +7290,11 @@ function botsWanted() {
   return false;
 }
 function sendBotPref(to) {
-  if (net.inRoom) net.send(to === undefined ? { t: "pref", b: settings.get("bots") ? 1 : 0 } : { t: "pref", to, b: settings.get("bots") ? 1 : 0 });
+  if (!net.inRoom) return;
+  // Also how you want to be teamed up: f: Auto-fill, p: party code
+  const msg = { t: "pref", b: settings.get("bots") ? 1 : 0, f: team.fill ? 1 : 0, p: team.party || undefined };
+  if (to !== undefined) msg.to = to;
+  net.send(msg);
 }
 function brSyncBots() {
   if (!isBR() || !net.isHost || (br.state !== "warm" && br.state !== "count")) return;
@@ -7222,6 +7308,7 @@ function brSyncBots() {
 }
 net.on("pref", msg => {
   botPrefs.set(msg.from, !!msg.b);
+  team.prefs.set(msg.from, { f: msg.f !== 0, p: typeof msg.p === "string" ? msg.p.slice(0, 12) : "" });
   brSyncBots();
 });
 settings.onChange(name => {
@@ -7236,8 +7323,9 @@ function brHostStart() {
   bots.flushPending(); // anyone about to join drops with everyone
   const seed = (Math.random() * 0xffffffff) >>> 0;
   const ids = [net.id, ...remotePlayers.players.keys()];
-  net.send({ t: "brstart", seed, ids });
-  brStartMatch(seed, ids, 0);
+  const teams = team.size > 1 ? brDealTeams(ids) : null;
+  net.send({ t: "brstart", seed, ids, teams });
+  brStartMatch(seed, ids, 0, teams);
 }
 
 /**
@@ -7258,9 +7346,11 @@ const BR_ZONE_SITES = [
   { name: "Pine Hollow", x: -120, z: 8 },
 ];
 
-/** Everyone builds the match from the seed. ids: who's dropping; t: match time (late joiners). */
-function brStartMatch(seed, ids, t) {
+/** Everyone builds the match from the seed. ids: who's dropping; t: match time (late joiners); teams: Duo / Squad. */
+function brStartMatch(seed, ids, t, teams = null) {
   br.state = "match";
+  brResetTeamRound();
+  if (teams) brApplyTeams(teams);
   br.seed = seed;
   br.t = t;
   br.route = planeRoute(seed);
@@ -7317,7 +7407,7 @@ function brStartMatch(seed, ids, t) {
     sfx.levelStart();
   } else if (br.inMatch) {
     setMapOpen(true);
-    gameHud.showBanner({ title: "DROP ZONE", sub: "Pick your spot", text: `${IS_TOUCH ? "JUMP" : "SPACE"} jumps. Land, loot, and stay inside the blue zone.`, color: "#4da3ff", duration: 5 });
+    gameHud.showBanner({ title: "DROP ZONE", sub: team.of.has(net.id) && team.size > 1 ? `Your ${TEAM_NAMES[team.size].toLowerCase()}: ${brMateNames()}` : "Pick your spot", text: `${IS_TOUCH ? "JUMP" : "SPACE"} jumps. Land, loot, and stay inside the blue zone.`, color: "#4da3ff", duration: 5 });
     sfx.levelStart();
   } else {
     gameHud.showBanner({ title: "MATCH IN PROGRESS", sub: "You're spectating until the next one", color: "#4da3ff", duration: 4 });
@@ -7431,10 +7521,10 @@ function brPlaneGone() {
   return br.t >= br.route.duration - 3 || brMustEject();
 }
 
-/** A late joiner with no plane to jump from: freefall from plane height over a spot inside the zone. */
-function brSkyDrop() {
+/** A late joiner with no plane to jump from: freefall from plane height over a spot inside the zone (or `at`). */
+function brSkyDrop(at = null) {
   const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * br.zone.r * 0.6;
-  const x = br.zone.x + Math.cos(a) * r, z = br.zone.z + Math.sin(a) * r;
+  const x = at ? at.x : br.zone.x + Math.cos(a) * r, z = at ? at.z : br.zone.z + Math.sin(a) * r;
   br.flight = PHASE_FALL;
   br.fallTime = 0;
   br.vy = -3;
@@ -7463,6 +7553,13 @@ function brAdmitLate(p) {
   }
   br.alive.add(p.id);
   net.send({ t: "brlate", id: p.id });
+  if (team.size > 1 && team.list.length) {
+    const pref = team.prefs.get(p.id);
+    const next = team.list.map(t => [...t]);
+    seatLate(next, { id: p.id, party: pref?.p ?? "", fill: pref?.f ?? true }, team.size, brPartyOf);
+    brApplyTeams(next);
+    team.dirty = true;
+  }
 }
 
 function brClosedReason() {
@@ -7596,6 +7693,8 @@ function brZoneDamage(delta) {
 
 // ── Eliminations & results ───────────────────────────────────────────────────
 function brOnLocalDeath() {
+  brTeamActStop();
+  brClearKnock();
   // A revenant whose clock ran out fades: nobody gets the kill
   const recent = !br.fading && br.atkId !== null && clock.elapsedTime - br.atkAt < 10;
   const msg = {
@@ -7648,30 +7747,715 @@ function brHandleElim({ v, k, w, hs }) {
   if (vKey) br.outKeys.add(vKey);
   // Revenge Run: the host gives every person (not a bot) one second life a match,
   // while at least two others are still standing
-  if (net.isHost && !isBotId(v) && w !== "fade" && !br.revUsed.has(v) && br.alive.size >= 2) {
+  // (Solo only: in a Duo or Squad your team brings you back with a recall)
+  if (net.isHost && team.size === 1 && !isBotId(v) && w !== "fade" && !br.revUsed.has(v) && br.alive.size >= 2) {
     br.revUsed.add(v);
     if (vKey) br.outKeys.delete(vKey);
     net.send({ t: "brrev", id: v });
     brOnRevenge(v);
   }
+  brTeamOnElim(v);
+  const onTeam = team.size > 1 && team.of.has(net.id);
   if (v === net.id) {
     br.inMatch = false;
     postFx.kick(0.4, 0xff2a1a);
     postFx.glitch(1); // signal lost, then the spectator feed
-    const place = br.placement || br.alive.size + 1;
-    progress.brFinished(place, br.started);
-    brHud.showResult({
-      title: "ELIMINATED",
-      sub: kName ? `by ${kName}` : w === "zone" ? "Caught outside the zone" : "",
-      lines: [["PLACE", `#${place}`], ["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`], ["XP", `+${progress.runXp}`]],
-      foot: br.rev ? "REVENGE RUN · you drop back in a moment" : br.alive.size ? "Spectating in a moment…" : "",
-      color: "#ff4b3a",
-      duration: 4.5,
-    });
+    const sub = kName ? `by ${kName}` : w === "zone" ? "Caught outside the zone" : "";
+    if (onTeam && brMatesOf(net.id).length) {
+      // Your team's still in it: no placing yet
+      brHud.showResult({
+        title: "ELIMINATED", sub,
+        lines: [["KILLS", `${killsThisLife}`], ["XP", `+${progress.runXp}`]],
+        foot: team.cards.has(net.id) ? "Your recall card is on the ground. A teammate can bring you back" : "Your team fights on",
+        color: "#ff4b3a", duration: 4.5,
+      });
+    } else if (onTeam) {
+      brTeamOut(sub);
+    } else {
+      const place = br.placement || br.alive.size + 1;
+      progress.brFinished(place, br.started);
+      brHud.showResult({
+        title: "ELIMINATED",
+        sub,
+        lines: [["PLACE", `#${place}`], ["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`], ["XP", `+${progress.runXp}`]],
+        foot: br.rev ? "REVENGE RUN · you drop back in a moment" : br.alive.size ? "Spectating in a moment…" : "",
+        color: "#ff4b3a",
+        duration: 4.5,
+      });
+    }
+  } else if (onTeam && isMate(v, net.id) && !br.inMatch && !brMatesOf(net.id).length) {
+    brTeamOut("Your last teammate went down"); // you were watching them
   }
   if (br.spectating === v) br.spectating = null;
   brCheckWinner();
 }
+
+// ── Duo / Squad ──────────────────────────────────────────────────────────────
+// A queue is a room (br/Teams.js): the host deals the teams when the match
+// starts and "br" repeats them for late joiners. Each player still owns their
+// health. At 0 with a teammate standing you're knocked, not out: playerHealth
+// becomes the bleed-out bar (TEAM.knockHp), you crawl, you can't fight, and
+// `st.kn` tells everyone. A teammate holds Use to revive you (rvs start / stop,
+// rvd done); nobody on your team left standing and the knocked die with it.
+// Eliminated with a teammate left, your recall card drops; they carry it to a
+// water tower (the recall towers) and call you back in from the sky.
+const team = {
+  size: 1,               // 1 Solo, 2 Duo, 4 Squad: the queue (from the room name)
+  list: [], sig: "",     // the teams: [[ids], …] and their JSON (to spot a change)
+  of: new Map(),         // id → index in list
+  fill: true, party: "", // your choices in the lobby
+  prefs: new Map(),      // id → { f, p } of everyone else
+  dirty: false, tick: 0, // host: send the teams with the next "br"
+  cards: new Map(),      // victim id → { v, x, z, t, holder }
+  recalled: new Set(),   // already had their one recall this match
+  done: false,           // your team's finish is scored
+  near: { down: null, card: null, tower: null }, // what your Use / Interact would do now
+  act: { on: false, kind: "", id: null, t: 0, dur: 0, crouched: false, anim: 0, label: "" },
+  downPins: new Set(),
+  pings: new Map(),      // pin id → s left
+  pingCd: 0,
+  towerPin: null,        // the recall tower pinned for you
+  slow: 0,               // s to the next 2 Hz pass
+  wipe: 0,
+  lastChat: new Map(),   // sender → when their last team line arrived
+  wanted: new Map(), allowed: new Set(),
+};
+const knock = { on: false, count: 0, by: null, w: "", hs: false, revivers: new Set() };
+const PING_LIFE = 14;           // s a mark stays up
+const VOICE_ALL_RANGE = 45;     // m: the "All" channel carries this far
+const VOICE_KEEP_RANGE = 60;    // m: connections to non-teammates are kept this far
+const DOWN_COLOR = "#ff4b3a";
+const CARD_COLOR = "#6ae8ff";
+const NO_IDS = [];
+
+function teamLive() { return isBR() && team.size > 1 && team.list.length > 0 && br.state === "match"; }
+function isMate(a, b) { return a !== b && a !== null && a !== undefined && team.of.has(a) && team.of.get(a) === team.of.get(b); }
+function isDownId(id) { return id === net.id ? knock.on : !!remotePlayers.players.get(id)?.knocked; }
+function brTeamIds(id) { return team.list[team.of.get(id)] ?? NO_IDS; }
+function brPartyOf(id) { return id === net.id ? team.party : team.prefs.get(id)?.p ?? ""; }
+/** id's teammates still in the match. */
+function brMatesOf(id) { return brTeamIds(id).filter(m => m !== id && br.alive.has(m)); }
+function brMateUp(id) { return brTeamIds(id).some(m => m !== id && br.alive.has(m) && !isDownId(m)); }
+function brTeamsAlive() {
+  let n = 0;
+  for (const t of team.list) if (t.some(id => br.alive.has(id))) n++;
+  return n;
+}
+function brMateNames() { return brTeamIds(net.id).filter(id => id !== net.id).map(brName).join(", ") || "just you"; }
+function brMapPlayers() { return !isBR() ? remotePlayers.mapList() : team.list.length ? remotePlayers.mapList(true) : NO_PLAYERS; }
+
+/** Who a bot keeps close to: a person on its team, else the team's first bot (which leads, and follows nobody). */
+function brLeaderOf(id) {
+  const t = brTeamIds(id);
+  const human = t.find(m => m !== id && !isBotId(m) && br.alive.has(m));
+  if (human !== undefined) return human;
+  const first = t.find(m => br.alive.has(m));
+  return first === undefined || first === id ? null : first;
+}
+
+/** Host: the teams for this match. */
+function brDealTeams(ids) {
+  const humans = [], botIds = [];
+  for (const id of ids) {
+    if (isBotId(id)) { botIds.push(id); continue; }
+    const pref = id === net.id ? { f: team.fill, p: team.party } : team.prefs.get(id);
+    humans.push({ id, party: pref?.p ?? "", fill: pref?.f ?? true });
+  }
+  return assignTeams(humans, botIds, team.size);
+}
+
+function brApplyTeams(list) {
+  const sig = JSON.stringify(list);
+  if (sig === team.sig) return;
+  team.sig = sig;
+  team.list = list;
+  team.of.clear();
+  list.forEach((t, i) => t.forEach(id => team.of.set(id, i)));
+  remotePlayers.setMates(id => isMate(id, net.id));
+  const on = team.size > 1 && team.of.has(net.id);
+  teamHud.setVisible(on);
+  chat.setTeam(on);
+  if (on && settings.get("muteRandoms")) {
+    for (const id of brTeamIds(net.id)) if (typeof id === "number" && id !== net.id && (!team.party || brPartyOf(id) !== team.party)) voice.setMuted(id, true);
+  }
+}
+
+/** A new round: nobody knocked, no cards, no marks (the teams themselves stay). */
+function brResetTeamRound() {
+  brTeamActStop();
+  brClearKnock();
+  knock.count = 0;
+  for (const c of team.cards.values()) setPin(`card${c.v}`, null);
+  team.cards.clear();
+  team.recalled.clear();
+  team.done = false;
+  for (const id of team.downPins) setPin(id, null);
+  team.downPins.clear();
+  for (const id of team.pings.keys()) setPin(id, null);
+  team.pings.clear();
+  brSetTowerPin(null);
+}
+
+function brClearTeams() {
+  brResetTeamRound();
+  team.list = [];
+  team.sig = "";
+  team.of.clear();
+  remotePlayers.setMates(() => false);
+  teamHud.setVisible(false);
+  chat.setTeam(false);
+  voice.setActive(false);
+}
+
+// ── Knocked ──
+/** Your health just hit 0: true if you're knocked instead of out. */
+function brTryKnock() {
+  if (knock.on) {
+    // Finished off by the zone or a fall: still the kill of whoever knocked you
+    if (knock.by !== null && clock.elapsedTime - br.atkAt >= 10) { br.atkId = knock.by; br.atkW = knock.w; br.atkHs = knock.hs; br.atkAt = clock.elapsedTime; }
+    return false;
+  }
+  if (!isBR() || team.size <= 1 || br.state !== "match" || !br.inMatch || br.fading || br.flight !== PHASE_GROUND || !brMateUp(net.id)) return false;
+  knock.by = br.atkId !== null && clock.elapsedTime - br.atkAt < 10 ? br.atkId : null;
+  knock.w = knock.by !== null ? br.atkW : br.outside ? "zone" : "self";
+  knock.hs = knock.by !== null && br.atkHs;
+  brEnterKnock(TEAM.knockHp);
+  const msg = { t: "knk", v: net.id, k: knock.by, w: knock.w, hs: knock.hs ? 1 : 0 };
+  net.send(msg);
+  brHandleKnock(msg);
+  return true;
+}
+
+function brEnterKnock(hp) {
+  knock.on = true;
+  knock.count++;
+  knock.revivers.clear();
+  playerHealth = hp;
+  healthTrail = hp;
+  // Everything you were doing stops
+  cancelClimb();
+  stopRepair();
+  brTeamActStop();
+  exitVehicle();
+  releaseRope();
+  cancelThrow();
+  setInventoryOpen(false);
+  setShopOpen(false);
+  input.fire = false;
+  input.aim = false;
+  weapon.reloading = false;
+  soldier.stopGesture("reload");
+  soldier.setWeapon(null);
+  setStance("prone", true);
+  postFx.kick(0.3, 0xff2a1a);
+  sfx.spotted();
+}
+
+/** Back to normal bookkeeping (your health and stance are the caller's). */
+function brClearKnock() {
+  knock.on = false;
+  knock.by = null;
+  knock.revivers.clear();
+  teamHud.setKnocked(null);
+}
+
+function brHandleKnock({ v, k, w, hs }) {
+  const kName = k !== null && k !== undefined ? brName(k) : null;
+  const vName = brName(v);
+  gameHud.killFeed(kName ? `${kName} ▸ ${vName}` : vName, "KNOCKED", brColor(kName ? k : v), !!hs);
+  if (k === net.id) { showHitMarker(!!hs, true); sfx.kill(); }
+  if (isMate(v, net.id)) {
+    inventoryUI.feed(`${vName} is KNOCKED`, "info");
+    sfx.spotted();
+  }
+}
+
+/** Bled out or the whole team is down: out, credited to whoever knocked you. */
+function brKnockFinish() {
+  playerHealth = 0;
+  healthTrail = 0;
+  if (knock.by !== null) { br.atkId = knock.by; br.atkW = knock.w; br.atkHs = knock.hs; br.atkAt = clock.elapsedTime; }
+  onPlayerDeath();
+}
+
+function brRevivedBy(by) {
+  if (!knock.on) return;
+  brClearKnock();
+  playerHealth = TEAM.reviveHp;
+  healthTrail = TEAM.reviveHp;
+  setStance("crouch", true);
+  soldier.setCarried(inventory.ownedWeapons);
+  soldier.setWeapon(inventory.current);
+  sfx.heal();
+  postFx.kick(0.25, 0x7ee05a);
+  gameHud.showBanner({ title: "REVIVED", sub: `by ${brName(by)}`, color: "#7ee05a", duration: 2.2 });
+}
+
+// ── Reviving and recalling: Use, held ──
+/** Use pressed: true if it started a revive or a recall. */
+function brTeamUse() {
+  const n = team.near;
+  if (n.down !== null) { brTeamActStart("revive", n.down, TEAM.reviveTime, brName(n.down)); return true; }
+  if (n.tower) {
+    const c = brHeldCard();
+    if (c) { brTeamActStart("recall", c.v, TEAM.recallTime, brName(c.v)); return true; }
+  }
+  return false;
+}
+
+function brTeamActStart(kind, id, dur, label) {
+  const a = team.act;
+  if (a.on || drive.on || ride.on) return;
+  Object.assign(a, { on: true, kind, id, t: 0, dur, label, anim: 0, crouched: stance === "stand" });
+  if (a.crouched) setStance("crouch");
+  moveVelocity.set(0, 0, 0);
+  cancelThrow();
+  input.fire = false;
+  input.aim = false;
+  weapon.reloading = false;
+  if (kind === "revive") {
+    const at = brPlayerPos(id);
+    if (at) bodyYaw = aimYaw = Math.atan2(at.x - characterBody.position.x, at.z - characterBody.position.z);
+    brToOwner(id, { t: "rvs", v: id, s: 1 }, () => { if (isBotId(id)) bots.setReviver(id, net.id, true); });
+  }
+}
+
+/** Stops the revive / recall in progress (msg: what the feed says). */
+function brTeamActStop(msg = null) {
+  const a = team.act;
+  if (!a.on) return;
+  a.on = false;
+  if (a.kind === "revive") brToOwner(a.id, { t: "rvs", v: a.id, s: 0 }, () => { if (isBotId(a.id)) bots.setReviver(a.id, net.id, false); });
+  if (a.crouched && stance === "crouch") setStance("stand");
+  if (msg) inventoryUI.feed(msg, "info");
+}
+
+/** Sends msg to whoever owns player id's health: them, or the host for a bot. local(): it's us. */
+function brToOwner(id, msg, local) {
+  if (isBotId(id)) {
+    if (net.isHost) local(); else net.send({ ...msg, to: "host" });
+  } else if (id === net.id) local();
+  else net.send({ ...msg, to: id });
+}
+
+function updateTeamAct(delta) {
+  const a = team.act;
+  if (!a.on) return;
+  const moving = keys.forward || keys.backward || keys.left || keys.right || (touch && Math.hypot(touch.moveX, touch.moveY) > 0.35);
+  if (playerHealth <= 0 || knock.on) { brTeamActStop(); return; }
+  if (moving || input.fire || jumpQueued || keys.jump) { brTeamActStop(a.kind === "revive" ? "Revive cancelled" : "Recall cancelled"); return; }
+  if (a.kind === "revive") {
+    const at = brPlayerPos(a.id);
+    if (!at || !isDownId(a.id) || Math.hypot(at.x - characterBody.position.x, at.z - characterBody.position.z) > TEAM.reviveRange + 0.8) { brTeamActStop(); return; }
+  } else if (!team.cards.has(a.id)) { brTeamActStop(); return; }
+  if ((a.anim -= delta) <= 0) { a.anim = 1.1; playerAnim.clip("interact", 1.1, 0.9); }
+  a.t += delta;
+  if (a.t < a.dur) return;
+  // Done
+  const { kind, id } = a;
+  a.on = false;
+  if (a.crouched && stance === "crouch") setStance("stand");
+  if (kind === "revive") {
+    brToOwner(id, { t: "rvd", v: id }, () => { if (isBotId(id)) bots.revive(id); });
+    inventoryUI.feed(`You revived ${brName(id)}`, "medkit", "medkit");
+    sfx.heal();
+  } else {
+    const p = characterBody.position;
+    brSendRecall(id, net.id, p.x, p.z);
+    sfx.levelStart();
+  }
+}
+
+function brTeamPrompts() {
+  const n = team.near;
+  n.down = n.card = n.tower = null;
+  if (!teamLive() || drive.on || ride.on || !team.of.has(net.id)) return;
+  const p = characterBody.position;
+  const a = team.act;
+  let best = TEAM.reviveRange;
+  for (const id of brTeamIds(net.id)) {
+    if (id === net.id || !br.alive.has(id) || !isDownId(id)) continue;
+    const at = brPlayerPos(id);
+    if (!at) continue;
+    const d = Math.hypot(at.x - p.x, at.z - p.z);
+    if (d < best) { best = d; n.down = id; }
+  }
+  if (a.on && a.kind === "revive") addPrompt("use", "Reviving…", a.label, "medkit", a.t / a.dur);
+  else if (n.down !== null) addPrompt("use", IS_TOUCH ? "Revive" : "Hold: revive", brName(n.down), "medkit");
+  for (const c of team.cards.values()) {
+    if (c.holder === null && isMate(c.v, net.id) && Math.hypot(c.x - p.x, c.z - p.z) < TEAM.cardRange) { n.card = c; break; }
+  }
+  if (n.card) addPrompt("interact", "Take recall card", brName(n.card.v), "medkit");
+  const held = brHeldCard();
+  if (held) {
+    const t = brNearestTower(p.x, p.z);
+    if (t && Math.hypot(t.x - p.x, t.z - p.z) < TEAM.towerRange) n.tower = t;
+    if (a.on && a.kind === "recall") addPrompt("use", "Calling…", a.label, "medkit", a.t / a.dur);
+    else if (n.tower) addPrompt("use", IS_TOUCH ? "Recall" : "Hold: recall", brName(held.v), "medkit", held.t / TEAM.cardHeldTime);
+  }
+}
+
+// ── Recall ──
+function brHeldCard() {
+  for (const c of team.cards.values()) if (c.holder === net.id) return c;
+  return null;
+}
+
+function brRecallTowers() { return waterTowers?.towers?.length ? waterTowers.towers : BR_ZONE_SITES; }
+
+function brNearestTower(x, z) {
+  let best = null, bd = Infinity;
+  for (const t of brRecallTowers()) {
+    const d = (t.x - x) ** 2 + (t.z - z) ** 2;
+    if (d < bd) { bd = d; best = t; }
+  }
+  return best;
+}
+
+function brSetTowerPin(t) {
+  if (t === team.towerPin) return;
+  team.towerPin = t;
+  if (t) setPin("recallTower", t.x, t.z, false, { color: CARD_COLOR, label: "RECALL TOWER" });
+  else setPin("recallTower", null);
+}
+
+/** Someone was eliminated: their card drops (if their team can use it), whatever they carried falls with them. */
+function brTeamOnElim(v) {
+  if (team.size <= 1) return;
+  knock.revivers.delete(v);
+  const at = brPlayerPos(v);
+  const x = at?.x ?? 0, z = at?.z ?? 0;
+  for (const c of team.cards.values()) {
+    if (c.holder !== v) continue;
+    c.holder = null;
+    c.x = x; c.z = z;
+    c.t = TEAM.cardDropTime;
+    if (isMate(c.v, net.id)) setPin(`card${c.v}`, c.x, c.z, false, { color: CARD_COLOR, label: `RECALL · ${brName(c.v)}` });
+  }
+  if (!at || team.recalled.has(v) || !brMatesOf(v).length) return;
+  team.cards.set(v, { v, x, z, t: TEAM.cardTime, holder: null });
+  if (isMate(v, net.id)) {
+    setPin(`card${v}`, x, z, false, { color: CARD_COLOR, label: `RECALL · ${brName(v)}` });
+    inventoryUI.feed(`${brName(v)} is down for good: grab their recall card`, "info");
+  }
+}
+
+/** Your whole team is out: where you placed. */
+function brTeamOut(sub) {
+  if (team.done) return;
+  team.done = true;
+  const place = brTeamsAlive() + 1, teams = team.list.length;
+  progress.brFinished(place, teams);
+  brHud.showResult({
+    title: `${TEAM_NAMES[team.size].toUpperCase()} ELIMINATED`, sub,
+    lines: [["PLACE", `#${place}`], ["KILLS", `${killsThisLife}`], [TEAM_WORDS[team.size].toUpperCase(), `${teams}`], ["XP", `+${progress.runXp}`]],
+    foot: br.alive.size ? "Spectating in a moment…" : "",
+    color: "#ff4b3a", duration: 4.5,
+  });
+}
+
+function brGroundCard(id, x, z, range) {
+  let best = null, bd = range;
+  for (const c of team.cards.values()) {
+    if (c.holder !== null || !isMate(c.v, id)) continue;
+    const d = Math.hypot(c.x - x, c.z - z);
+    if (d < bd) { bd = d; best = c; }
+  }
+  return best;
+}
+
+function brTakeCard(v, by) {
+  if (!team.cards.get(v) || team.cards.get(v).holder !== null) return;
+  net.send({ t: "rcard", v, by });
+  brOnCardTaken(v, by);
+}
+
+function brOnCardTaken(v, by) {
+  const c = team.cards.get(v);
+  if (!c || c.holder !== null) return;
+  c.holder = by;
+  c.t = TEAM.cardHeldTime;
+  if (isMate(v, net.id)) {
+    setPin(`card${v}`, null);
+    inventoryUI.feed(by === net.id ? `Recall card taken: get to a recall tower to bring ${brName(v)} back` : `${brName(by)} has ${brName(v)}'s recall card`, "info");
+  }
+  if (by === net.id) sfx.equip();
+}
+
+function brSendRecall(v, by, x, z) {
+  // Over the tower, but never outside the zone
+  const dx = x - br.zone.x, dz = z - br.zone.z, d = Math.hypot(dx, dz), max = br.zone.r * 0.85;
+  if (d > max) { x = br.zone.x + (dx / d) * max; z = br.zone.z + (dz / d) * max; }
+  const msg = { t: "recall", v, by, x: +x.toFixed(1), z: +z.toFixed(1) };
+  net.send(msg);
+  brOnRecall(msg);
+}
+
+function brOnRecall({ v, by, x, z }) {
+  if (br.state !== "match" || br.alive.has(v)) return;
+  team.cards.delete(v);
+  setPin(`card${v}`, null);
+  team.recalled.add(v);
+  br.alive.add(v);
+  const key = v === net.id ? net.key : net.players.get(v)?.k;
+  if (key) br.outKeys.delete(key);
+  if (v === net.id) brComeBack(x, z);
+  else if (isBotId(v) && net.isHost) bots.recall(v, x, z);
+  if (isMate(v, net.id)) inventoryUI.feed(`${brName(v)} is back in the fight`, "info");
+  if (by === net.id) inventoryUI.feed(`You called ${brName(v)} back`, "info");
+}
+
+/** Your team called you back: out of the sky with a pistol. */
+function brComeBack(x, z) {
+  brHud.hideResult();
+  br.spectating = null;
+  brResetPlayer(characterBody.position.x, characterBody.position.y, characterBody.position.z, true);
+  inventory.addWeapon("pistol", WEAPONS.pistol.magSize, WEAPONS.pistol.magSize * 3);
+  inventory.equip("pistol");
+  onWeaponChanged(false);
+  playerHealth = healthTrail = TEAM.recallHp;
+  knock.count = 0;
+  br.inMatch = true;
+  br.ghost = false;
+  brSkyDrop({ x, z });
+  gameHud.showBanner({ title: "RECALLED", sub: "Your team brought you back", text: IS_TOUCH ? "" : "Click to drop in.", color: CARD_COLOR, duration: 4 });
+  postFx.glitch(0.5);
+  postFx.kick(0.3, 0x6ae8ff);
+}
+
+// ── Team talk: chat lines, quick chat and marks ──
+/** Sends msg to the people on id's team; local() if you're one of them (a bot's message from the host). */
+function brToMates(id, msg, local = null) {
+  for (const m of brTeamIds(id)) {
+    if (m === id || isBotId(m)) continue;
+    if (m === net.id) local?.();
+    else net.send({ ...msg, to: m });
+  }
+}
+
+function brShowTeamChat(id, text) {
+  const p = remotePlayers.players.get(id);
+  chat.add(p?.name ?? "?", p?.color, text, false, true);
+  sfx.click();
+}
+
+function brTeamSay(text) {
+  brToMates(net.id, { t: "tchat", m: text });
+  const me = net.players.get(net.id);
+  chat.add(me?.name ?? myName, me?.color, text, true, true);
+}
+
+function brQuickChat(i) {
+  const line = QUICK_CHAT[i];
+  if (!line || !teamLive()) return;
+  brTeamSay(line.text);
+  if (line.ping === "enemy") brPing("enemy");
+  else if (line.ping === "self") {
+    const p = characterBody.position;
+    brSendPing("go", p.x, p.y - FEET_OFFSET, p.z);
+  }
+}
+
+const _pingFrom = new CANNON.Vec3(), _pingTo = new CANNON.Vec3(), _pingRes = new CANNON.RaycastResult();
+const pingOpts = { collisionFilterMask: GROUP_WORLD | GROUP_PLAYER, skipBackfaces: true };
+const PING_RANGE = 340;
+
+/** Marks what's under the crosshair for your team. force: call it that, whatever it turns out to be. */
+function brPing(force = null) {
+  if (!teamLive() || team.pingCd > 0 || (brWatching() && !force)) return;
+  team.pingCd = 0.6;
+  camera.getWorldDirection(_aimDir);
+  const near = camera.position.distanceTo(camPivot) + 0.6;
+  _pingFrom.set(camera.position.x + _aimDir.x * near, camera.position.y + _aimDir.y * near, camera.position.z + _aimDir.z * near);
+  _pingTo.set(camera.position.x + _aimDir.x * PING_RANGE, camera.position.y + _aimDir.y * PING_RANGE, camera.position.z + _aimDir.z * PING_RANGE);
+  _pingRes.reset();
+  const group = characterBody.collisionFilterGroup;
+  characterBody.collisionFilterGroup = 0;
+  const hit = world.raycastClosest(_pingFrom, _pingTo, pingOpts, _pingRes);
+  characterBody.collisionFilterGroup = group;
+  if (!hit) { team.pingCd = 0; if (!force) inventoryUI.feed("Nothing to mark there", "info"); return; }
+  const at = _pingRes.hitPointWorld;
+  let kind = force, label = null;
+  const victim = _pingRes.body.playerTarget;
+  if (!kind && victim && !isMate(net.id, victim.id)) kind = "enemy";
+  if (!kind) {
+    for (const e of pickups.active) if (Math.hypot(e.x - at.x, e.z - at.z) < 3 && Math.abs(e.y - at.y) < 3) { kind = "loot"; label = e.def.label; break; }
+  }
+  if (!kind) {
+    for (const v of vehicles) if (Math.hypot(v.x - at.x, v.z - at.z) < 5) { kind = "vehicle"; label = v.spec.label; break; }
+  }
+  brSendPing(kind ?? "go", at.x, at.y, at.z, label);
+}
+
+function brSendPing(kind, x, y, z, label = null) {
+  brToMates(net.id, { t: "tping", k: kind, x: +x.toFixed(1), y: +y.toFixed(1), z: +z.toFixed(1), l: label ?? undefined });
+  brShowPing(net.id, kind, x, z, label);
+}
+
+/** A mark from a teammate (or you): on the world, the compass, both maps and in the chat. */
+function brShowPing(from, kind, x, z, label = null) {
+  const look = PING_LOOK[kind] ?? PING_LOOK.go;
+  const text = label ? `${look.label} · ${label}` : look.label;
+  const id = `ping${from}`;
+  setPin(id, x, z, false, { color: look.color, label: text });
+  team.pings.set(id, PING_LIFE);
+  sfx.click();
+  if (from === net.id) return;
+  const p = characterBody.position;
+  chat.system(`${brName(from)}: ${text} · ${Math.round(Math.hypot(x - p.x, z - p.z))} m ${headingName(bearingDeg(p.x, p.z, x, z))}`);
+}
+
+/** Your pin on the big map: your team sees it too. */
+function brShareMapPin(p) {
+  if (p) brToMates(net.id, { t: "tping", k: "map", x: +p.x.toFixed(1), y: 0, z: +p.z.toFixed(1) });
+  else brToMates(net.id, { t: "tping", c: 1 });
+}
+
+// ── Voice ──
+function applyVoiceSettings() {
+  voice.setMicMode(settings.get("voiceMic"));
+  voice.setSpeaker(settings.get("voiceSpeaker"));
+  voice.setChannel(settings.get("voiceChannel"));
+  document.body.classList.toggle("voice-on", !!settings.get("voice"));
+}
+
+/** Twice a second: who we should be connected to and what the voice chip says. */
+function brVoiceTick() {
+  const on = !!settings.get("voice") && teamLive() && team.of.has(net.id);
+  voice.setActive(on);
+  if (!on) { teamHud.setVoice(null); return; }
+  const w = team.wanted, ok = team.allowed;
+  w.clear(); ok.clear();
+  const p = characterBody.position;
+  for (const id of brTeamIds(net.id)) {
+    if (typeof id !== "number" || id === net.id) continue;
+    w.set(id, { mate: true, volume: 1 });
+    ok.add(id);
+  }
+  // Nearby enemies: heard only if they're on the All channel, or you are
+  for (const [id, r] of remotePlayers.players) {
+    if (typeof id !== "number" || w.has(id) || !r.hasState || r.dead) continue;
+    const d = Math.hypot(r.body.position.x - p.x, r.body.position.z - p.z);
+    if (d > VOICE_KEEP_RANGE) continue;
+    ok.add(id);
+    if (settings.get("voiceChannel") === "all" && d < VOICE_ALL_RANGE) w.set(id, { mate: false, volume: 1 - d / VOICE_ALL_RANGE });
+  }
+  voice.sync(w, ok);
+  voice.tick();
+  const mode = settings.get("voiceMic"), all = settings.get("voiceChannel") === "all" ? " · ALL" : "";
+  if (mode === "off") teamHud.setVoice({ kind: "muted", text: `Mic off${settings.get("voiceSpeaker") ? " · listening" : " · speaker off"}` });
+  else if (!voice.track) teamHud.setVoice({ kind: "error", text: "Mic not available" });
+  else if (voice.transmitting) teamHud.setVoice({ kind: "live", text: `TALKING${all}` });
+  else teamHud.setVoice({ kind: "ready", text: mode === "ptt" ? `${IS_TOUCH ? "Hold MIC" : `Hold ${K("voice")}`} to talk${all}` : `Mic open${all}` });
+}
+
+// ── Per frame ──
+function brTeamUpdate(delta) {
+  teamHud.update(delta);
+  if (!teamLive()) return;
+  if (team.pingCd > 0) team.pingCd -= delta;
+  updateTeamAct(delta);
+  for (const [id, left] of team.pings) {
+    if (left <= delta) { team.pings.delete(id); setPin(id, null); }
+    else team.pings.set(id, left - delta);
+  }
+  for (const c of team.cards.values()) {
+    if ((c.t -= delta) > 0) continue;
+    team.cards.delete(c.v);
+    setPin(`card${c.v}`, null);
+    if (isMate(c.v, net.id)) inventoryUI.feed(`${brName(c.v)}'s recall card is gone`, "info");
+  }
+  if (knock.on) {
+    const reviving = knock.revivers.size > 0;
+    if (!reviving) {
+      playerHealth -= (TEAM.knockHp / bleedTime(knock.count)) * delta;
+      healthTrail = playerHealth;
+    }
+    if ((team.wipe -= delta) <= 0) { team.wipe = 0.25; if (!brMateUp(net.id)) playerHealth = 0; }
+    if (playerHealth <= 0) { brKnockFinish(); return; }
+    const secs = Math.ceil((playerHealth / TEAM.knockHp) * bleedTime(knock.count));
+    teamHud.setKnocked({
+      frac: playerHealth / TEAM.knockHp, reviving,
+      text: reviving ? `${brName(knock.revivers.values().next().value)} is reviving you…` : `Bleeding out · ${secs} s · crawl to cover`,
+    });
+  }
+  if ((team.slow -= delta) > 0) return;
+  team.slow = 0.5;
+  // Knocked teammates: a red mark to run to
+  for (const id of brTeamIds(net.id)) {
+    if (id === net.id) continue;
+    const pinId = `down${id}`;
+    const at = br.alive.has(id) && isDownId(id) ? brPlayerPos(id) : null;
+    if (at) { setPin(pinId, at.x, at.z, false, { color: DOWN_COLOR, label: `REVIVE · ${brName(id)}` }); team.downPins.add(pinId); }
+    else if (team.downPins.delete(pinId)) setPin(pinId, null);
+  }
+  // Holding a card: the nearest recall tower is marked
+  const held = br.inMatch ? brHeldCard() : null;
+  brSetTowerPin(held ? brNearestTower(characterBody.position.x, characterBody.position.z) : null);
+  brVoiceTick();
+}
+
+function brSquadHtml() {
+  const ids = brTeamIds(net.id);
+  const rows = [net.id, ...ids.filter(id => id !== net.id)].map(id => {
+    const me = id === net.id, r = remotePlayers.players.get(id);
+    const out = !br.alive.has(id), kn = !out && isDownId(id);
+    const hp = out ? 0 : me ? Math.max(0, playerHealth) : r?.hp ?? 0;
+    const color = (me ? net.players.get(net.id)?.color : r?.color) ?? "#fff";
+    const talking = me ? voice.transmitting : voice.isSpeaking(id);
+    const canMute = !me && typeof id === "number" && settings.get("voice");
+    return `<div class="squad-row team${me ? " me" : ""}${out ? " down" : ""}${kn ? " knocked" : ""}${talking ? " speaking" : ""}">
+      <span class="squad-dot" style="background:${color}"></span>
+      <span class="squad-name">${escapeHtml(brName(id))}${me ? " (you)" : ""}</span>
+      <span class="squad-hp"><i style="width:${Math.round(hp)}%;background:${kn ? DOWN_COLOR : color}"></i></span>
+      <span class="squad-kills">${out ? (team.cards.has(id) ? "CARD" : "OUT") : kn ? "KO" : me ? killsThisLife : r?.kills ?? 0}</span>
+      ${canMute ? `<button type="button" class="squad-mute${voice.isMuted(id) ? " on" : ""}" data-mute="${id}" title="Mute">M</button>` : "<span></span>"}
+    </div>`;
+  }).join("");
+  return `<div class="squad-head">${TEAM_NAMES[team.size].toUpperCase()}${team.party ? ` · ${escapeHtml(team.party)}` : ""}</div>${rows}`;
+}
+// (pointerdown: the row may be redrawn between press and release)
+document.getElementById("squad")?.addEventListener("pointerdown", e => {
+  const b = e.target.closest?.("[data-mute]");
+  if (!b) return;
+  e.stopPropagation();
+  voice.toggleMuted(Number(b.dataset.mute));
+  b.classList.toggle("on");
+});
+
+net.on("knk", msg => { if (isBR()) brHandleKnock(msg); });
+// A teammate started / stopped reviving someone (the health's owner hears it)
+net.on("rvs", msg => {
+  if (!isBR()) return;
+  const by = msg.b ?? msg.from;
+  if (msg.v === net.id) { if (msg.s) knock.revivers.add(by); else knock.revivers.delete(by); }
+  else if (isBotId(msg.v) && net.isHost) bots.setReviver(msg.v, by, !!msg.s);
+});
+net.on("rvd", msg => {
+  if (!isBR()) return;
+  if (msg.v === net.id) brRevivedBy(msg.b ?? msg.from);
+  else if (isBotId(msg.v) && net.isHost) bots.revive(msg.v);
+});
+net.on("rcard", msg => { if (isBR()) brOnCardTaken(msg.v, msg.by ?? msg.from); });
+net.on("recall", msg => { if (isBR()) brOnRecall(msg); });
+net.on("tchat", msg => {
+  // b: the host speaking for one of its bots
+  const who = msg.b && msg.from === net.hostId && isBotId(msg.b) ? msg.b : msg.from;
+  if (!teamLive() || !isMate(who, net.id)) return;
+  const now = performance.now();
+  if (now - (team.lastChat.get(who) ?? -1e9) < 250) return;
+  team.lastChat.set(who, now);
+  const text = String(msg.m ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, Chat.MAX_LEN);
+  if (text) brShowTeamChat(who, text);
+});
+net.on("tping", msg => {
+  const who = msg.b && msg.from === net.hostId && isBotId(msg.b) ? msg.b : msg.from;
+  if (!teamLive() || !isMate(who, net.id)) return;
+  if (msg.c) { team.pings.delete(`ping${who}`); setPin(`ping${who}`, null); return; }
+  if (Number.isFinite(msg.x) && Number.isFinite(msg.z) && PING_LOOK[msg.k]) brShowPing(who, msg.k, msg.x, msg.z, typeof msg.l === "string" ? msg.l.slice(0, 30) : null);
+});
+settings.onChange(name => { if (name.startsWith("voice")) applyVoiceSettings(); });
+applyVoiceSettings();
 
 // ── Battle royale twists ─────────────────────────────────────────────────────
 // MOST WANTED: the match's top killer (MW_MIN_KILLS or more) is marked. Every
@@ -8033,9 +8817,11 @@ function brNemesisHud(delta) {
 /** Host: one player left (or nobody, in a practice drop) ends the match. */
 function brCheckWinner() {
   if (!net.isHost || br.state !== "match") return;
-  const n = br.alive.size;
-  if (n === 0 || (br.started >= 2 && n === 1)) {
-    const w = n === 1 ? br.alive.values().next().value : null;
+  // Duo / Squad: teams with someone left, against the teams that dropped
+  const teams = team.size > 1 && team.list.length > 0;
+  const n = teams ? brTeamsAlive() : br.alive.size;
+  if (n === 0 || ((teams ? team.list.length : br.started) >= 2 && n === 1)) {
+    const w = n >= 1 ? br.alive.values().next().value : null;
     net.send({ t: "brend", w });
     brShowEnd(w);
   }
@@ -8049,18 +8835,24 @@ function brShowEnd(w) {
   br.outside = false;
   zoneWall.hide();
   dropPlane.visible = false;
-  br.won = w === net.id;
-  if (w === net.id) progress.brFinished(1, br.started);
-  const lines = [["KILLS", `${killsThisLife}`], ["PLAYERS", `${br.started}`], ["XP", `+${progress.runXp}`]];
-  if (w === net.id) {
-    brHud.showResult({ title: "WINNER", sub: "Last one standing", lines: [["PLACE", "#1"], ...lines], color: "#ffd84d" });
+  // Duo / Squad: the whole team wins, whoever's still on their feet
+  const teamGame = team.size > 1 && team.list.length > 0;
+  const won = w === net.id || (w !== null && isMate(w, net.id));
+  br.won = won;
+  const field = teamGame ? team.list.length : br.started;
+  if (won && !team.done) { team.done = true; progress.brFinished(1, field); }
+  brTeamActStop();
+  if (knock.on) { brClearKnock(); setStance("stand", true); soldier.setCarried(inventory.ownedWeapons); soldier.setWeapon(inventory.current); }
+  const lines = [["KILLS", `${killsThisLife}`], [teamGame ? TEAM_WORDS[team.size].toUpperCase() : "PLAYERS", `${field}`], ["XP", `+${progress.runXp}`]];
+  if (won) {
+    brHud.showResult({ title: "WINNER", sub: teamGame ? `Your ${TEAM_NAMES[team.size].toLowerCase()} is the last one standing` : "Last one standing", lines: [["PLACE", "#1"], ...lines], color: "#ffd84d" });
     postFx.kick(0.6, 0xffd27a);
     sfx.levelCleared();
     confetti.celebrate("victory");
   } else {
     brHud.showResult({
       title: w !== null ? "MATCH OVER" : "NO SURVIVORS",
-      sub: w !== null ? `${brName(w)} is the last one standing` : "The zone took everyone",
+      sub: w !== null ? (teamGame ? `${brName(w)}'s ${TEAM_NAMES[team.size].toLowerCase()} won` : `${brName(w)} is the last one standing`) : "The zone took everyone",
       lines,
       color: "#6ab4ff",
     });
@@ -8069,6 +8861,10 @@ function brShowEnd(w) {
 
 function brOnPlayerLeft(id) {
   if (br.spectating === id) br.spectating = null;
+  knock.revivers.delete(id);
+  // Anything they were carrying is gone with them
+  for (const c of team.cards.values()) if (c.holder === id) { team.cards.delete(c.v); setPin(`card${c.v}`, null); }
+  team.cards.delete(id);
   if (br.state === "match" && br.alive.delete(id)) brCheckWinner();
   if (net.isHost && br.state === "count" && remotePlayers.count === 0) br.state = "warm";
 }
@@ -8114,6 +8910,7 @@ function brUpdate(delta) {
     if (brWatching() && !brHud.resultShown && (br.spectating === null || !br.alive.has(br.spectating))) brPickSpectate(1);
   }
   brUpdateTwists(delta);
+  brTeamUpdate(delta);
   if (br.state === "end") {
     br.endTimer = Math.max(0, br.endTimer - delta);
     brHud.setResultFoot(`Next match in ${Math.ceil(br.endTimer)}`);
@@ -8144,7 +8941,10 @@ function brNetTick(delta) {
     t: "br", s: br.state, seed: br.seed, tm: +br.t.toFixed(2), cd: +br.countdown.toFixed(1),
     et: +br.endTimer.toFixed(1), al: [...br.alive], hr: +env.hour.toFixed(3), wx: weather.state,
     mw: br.mw, mk: br.mwKills, rv: [...br.revenants], sd: supplyDrops.state(),
+    // The teams, for late joiners: every 2 s, or at once when someone new needs them
+    tt: team.list.length && (team.dirty || ++team.tick % 4 === 0) ? team.list : undefined,
   });
+  team.dirty = false;
 }
 
 function brHint() {
@@ -8174,9 +8974,9 @@ function brUpdateHud(delta) {
     const players = remotePlayers.count + 1;
     let status = "", kind = "", alive = null;
     if (br.state === "warm") {
-      status = `${players}/${BR_MAX_PLAYERS} players · ${net.isHost ? (IS_TOUCH ? "tap START MATCH" : "press ENTER to start") : "starting soon"}`;
+      status = `${TEAM_NAMES[team.size]} · ${players}/${BR_MAX_PLAYERS} players · ${net.isHost ? (IS_TOUCH ? "tap START MATCH" : "press ENTER to start") : "starting soon"}`;
     } else if (br.state === "count") {
-      status = `Match starts in ${Math.ceil(br.countdown)}${net.isHost ? (IS_TOUCH ? " · START MATCH: go now" : " · ENTER: start now") : ""}`;
+      status = `${TEAM_NAMES[team.size]} · Match starts in ${Math.ceil(br.countdown)}${net.isHost ? (IS_TOUCH ? " · START MATCH: go now" : " · ENTER: start now") : ""}`;
       kind = "warn";
     } else if (br.state === "match") {
       alive = br.alive.size;
@@ -8184,6 +8984,7 @@ function brUpdateHud(delta) {
       if (z.final) { status = "Final zone"; kind = "danger"; }
       else if (z.shrinking) { status = `Zone shrinking · ${fmtClock(z.timeLeft)}`; kind = "danger"; }
       else { status = `Zone shrinks in ${fmtClock(z.timeLeft)}`; kind = "warn"; }
+      if (team.size > 1 && team.list.length) status = `${brTeamsAlive()} ${TEAM_WORDS[team.size]} left · ${status}`;
     } else {
       status = "Match over";
     }
@@ -8217,8 +9018,9 @@ net.on("br", msg => {
   applyWorldClock(msg.hr, msg.wx);
   if (msg.s === "match") {
     // Missed the start (or joined late): build the match from the seed
-    if (br.state !== "match" || br.seed !== msg.seed) brStartMatch(msg.seed, msg.al, msg.tm);
+    if (br.state !== "match" || br.seed !== msg.seed) brStartMatch(msg.seed, msg.al, msg.tm, msg.tt ?? null);
     else if (Math.abs(br.t - msg.tm) > 0.4) br.t = msg.tm;
+    if (msg.tt) brApplyTeams(msg.tt);
     // The twists: who's wanted, who's out on a Revenge Run (late joiners catch up here)
     if (msg.mw !== undefined && (msg.mw !== br.mw || msg.mk !== br.mwKills)) brSetMostWanted(msg.mw, msg.mk ?? 0);
     if (msg.sd) for (const [i, x, z, t0] of msg.sd) brOnSupply(i, x, z, t0);
@@ -8235,7 +9037,7 @@ net.on("br", msg => {
     br.countdown = msg.cd;
   }
 });
-net.on("brstart", msg => { if (isBR()) brStartMatch(msg.seed, msg.ids, 0); });
+net.on("brstart", msg => { if (isBR()) brStartMatch(msg.seed, msg.ids, 0, msg.teams ?? null); });
 net.on("brend", msg => { if (isBR()) brShowEnd(msg.w ?? null); });
 net.on("brwarm", () => { if (isBR()) brEnterWarmup(); });
 // A late joiner was let into the running match (they build it themselves from the host's "br")
@@ -8267,13 +9069,14 @@ net.on("pvp", msg => {
 net.on("bots", msg => { if (isBR() && !net.isHost) bots.applyNet(msg); });
 
 function pvpHitMe(from, d, hs, w, sx, sz) {
-  if (!isBR() || playerHealth <= 0 || br.ghost || br.flight === PHASE_PLANE) return;
+  if (!isBR() || playerHealth <= 0 || br.ghost || br.flight === PHASE_PLANE || isMate(from, net.id)) return;
   brNoteAttacker(from, w, !!hs);
   dealDamageToPlayer(d, 0, 0, hs ? 0.5 : 0.25, sx, sz, w === "rickshaw" ? "raw" : hs ? "head" : "body");
 }
 
 /** A hit on player `id` by you (m: { d, hs, w, sx, sz }): to them, or to the host when it's a bot. */
 function sendPvp(id, m) {
+  if (isMate(net.id, id)) return; // no friendly fire (a vehicle's run-over comes through here too)
   if (isBotId(id)) {
     if (net.isHost) bots.damage(id, m.d, !!m.hs, localTarget.id, m.w, m.sx, m.sz);
     else net.send({ t: "pvp", to: "host", v: id, ...m });
@@ -8300,10 +9103,15 @@ const lobby = new Lobby({
   },
   async onBattleRoyale(name, room) {
     myName = name;
-    // Battle royale rooms live apart from the co-op ones with the same code
-    const relayRoom = `br-${room}`.slice(0, 24);
+    // Battle royale rooms live apart from the co-op ones with the same code, and each queue
+    // (Solo, Duo, Squad) has its own. Inviting friends needs a party code, so one exists from here on.
+    const extras = lobby.linkExtras(true);
+    const choice = lobby.teamChoice;
+    team.fill = choice.fill;
+    team.party = choice.party;
+    const relayRoom = relayRoomName(room, choice.size);
     const welcome = await net.connect(Net.defaultUrl(), name, relayRoom);
-    enteredRoom("br", room);
+    enteredRoom("br", room, extras);
     enterBattleRoyale(welcome);
     lobby.hide();
   },
@@ -8384,7 +9192,8 @@ function refreshKeyLabels() {
       [kb("use"), "Doors · kick a crate (punch when crouched)"], [kb("light"), "Light switch"],
       [kb("vehicle"), "Drive / ride / get out"], [`${kb("pillionFront")}${kb("pillionBack")}`, "Sit behind on a bike (front / back)"],
       [kb("refuel"), "Refuel with a petrol can"], [kb("repair"), "Repair with a toolkit"], [kb("torch"), "Flashlight"],
-      [kb("inventory"), "Inventory"], [kb("map"), "Map: click to pin a spot"], [`${kb("chat")}<kbd>Enter</kbd>`, "Chat"], ["<kbd>Esc</kbd>", "Pause"],
+      [kb("inventory"), "Inventory"], [kb("map"), "Map: click to pin a spot"], [`${kb("chat")}<kbd>Enter</kbd>`, "Chat"],
+      [kb("ping"), "Duo / Squad: mark for your team"], [kb("quickChat"), "Duo / Squad: quick chat"], [kb("voice"), "Duo / Squad: push to talk"], ["<kbd>Esc</kbd>", "Pause"],
     ];
     list.innerHTML = rows.map(([k, t]) => `<div>${k}<span>${t}</span></div>`).join("");
   }
@@ -8397,6 +9206,7 @@ if (import.meta.env.DEV) {
     get powerLines() { return powerLines; }, get shops() { return shops; }, get crates() { return crates; },
     fireGrapple, knockPole, smashStall, toggleVehicle, startRepair, damageVehicle,
     rope: () => ({ on: rope.on, phase: rope.phase }), health: () => playerHealth,
+    br, team, knock, bots, net, voice, teamHud, chat, remotePlayers, dealDamageToPlayer, brHostStart, brPing, brTeamUse, brQuickChat, brTakeCard,
   };
 }
 refreshKeyLabels();

@@ -13,7 +13,12 @@ import "./lobby.css";
 const NAME_KEY = "babylon-fps:name";
 const ROOM_KEY = "babylon-fps:room";
 const MODE_KEY = "babylon-fps:mode";
+const TEAM_KEY = "babylon-fps:teamsize";
+const FILL_KEY = "babylon-fps:fill";
+const PARTY_KEY = "babylon-fps:party";
 const MODES = { solo: "Solo", coop: "Co-op", br: "Battle Royale" };
+const TEAM_LABELS = { 1: "Solo", 2: "Duo", 4: "Squad" };
+const cleanParty = s => s.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 12);
 
 function load(key, fallback) {
   try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
@@ -33,9 +38,19 @@ export class Lobby {
     this.playSubEl = document.getElementById("lobby-play-sub");
     this.copyBtn = document.getElementById("lobby-copy");
     this.modeBtns = [...this.el.querySelectorAll("[data-mode]")];
+    this.teamBtns = [...this.el.querySelectorAll("[data-team]")];
+    this.fillEl = document.getElementById("lobby-fill");
+    this.partyEl = document.getElementById("lobby-party");
     this.open = false;
 
     const params = new URLSearchParams(location.search);
+    // An invite link says which queue and party; otherwise what you played last
+    this.teamSize = Number(params.get("team")) || Number(load(TEAM_KEY, "1"));
+    if (!TEAM_LABELS[this.teamSize]) this.teamSize = 1;
+    this.fillEl.checked = load(FILL_KEY, "1") === "1";
+    this.partyEl.value = cleanParty(params.get("party") ?? load(PARTY_KEY, ""));
+    for (const btn of this.teamBtns) btn.addEventListener("click", () => this.selectTeam(Number(btn.dataset.team)));
+    this.fillEl.addEventListener("change", () => save(FILL_KEY, this.fillEl.checked ? "1" : "0"));
     this.nameEl.value = load(NAME_KEY, "");
     this.roomEl.value = (params.get("room") || load(ROOM_KEY, "horde")).replace(/^br-/, "");
     // An invite link (?room=, ?mode=) means a friend is waiting: that mode (co-op if it doesn't say)
@@ -43,10 +58,11 @@ export class Lobby {
     const linked = params.get("mode");
     this.invite = params.has("room") && params.get("room").trim() ? (linked === "br" ? "br" : "coop") : null;
     this.select(this.invite ?? (MODES[saved] ? saved : "solo"));
+    this.selectTeam(this.teamSize);
 
     this.copyBtn?.addEventListener("click", () => {
       const room = this.roomEl.value.trim().toLowerCase() || "horde";
-      copyText(Net.inviteUrl(this.mode === "br" ? "br" : "coop", room))
+      copyText(Net.inviteUrl(this.mode === "br" ? "br" : "coop", room, this.linkExtras(true)))
         .then(ok => this.setStatus(ok ? "Invite link copied: send it to your friends" : "Couldn't copy: copy the address bar after you join", !ok));
     });
 
@@ -79,7 +95,7 @@ export class Lobby {
       if (this.mode === "solo") onSolo(name());
       else join(this.mode === "coop" ? onCoop : onBattleRoyale);
     });
-    for (const el of [this.nameEl, this.roomEl]) {
+    for (const el of [this.nameEl, this.roomEl, this.partyEl]) {
       el.addEventListener("keydown", e => {
         e.stopPropagation(); // typing WASD here shouldn't move the player
         if (e.key === "Enter") this.playBtn.click();
@@ -99,8 +115,42 @@ export class Lobby {
     }
     this.el.dataset.mode = mode;
     if (this.copyBtn) this.copyBtn.hidden = mode === "solo";
-    this.playSubEl.textContent = MODES[mode];
+    this._showPlaySub();
     this.setStatus("");
+  }
+
+  /** The battle royale queue: 1 | 2 | 4. Each is its own set of rooms. */
+  selectTeam(size) {
+    this.teamSize = size;
+    save(TEAM_KEY, String(size));
+    this.el.dataset.team = String(size);
+    for (const btn of this.teamBtns) {
+      const on = Number(btn.dataset.team) === size;
+      btn.classList.toggle("selected", on);
+      btn.setAttribute("aria-checked", on);
+    }
+    this._showPlaySub();
+  }
+
+  _showPlaySub() {
+    this.playSubEl.textContent = this.mode === "br" && this.teamSize > 1 ? `Battle Royale · ${TEAM_LABELS[this.teamSize]}` : MODES[this.mode];
+  }
+
+  /** What you picked for the battle royale: { size, fill, party }. */
+  get teamChoice() {
+    const party = cleanParty(this.partyEl.value);
+    save(PARTY_KEY, party);
+    return { size: this.teamSize, fill: this.fillEl.checked, party: this.teamSize > 1 ? party : "" };
+  }
+
+  /**
+   * The team= / party= part of an invite link. invite: it's for friends, so a
+   * Duo / Squad without a party code gets one now (they land on your team).
+   */
+  linkExtras(invite = false) {
+    if (this.mode !== "br" || this.teamSize <= 1) return {};
+    if (invite && !cleanParty(this.partyEl.value)) this.partyEl.value = Math.random().toString(36).slice(2, 8);
+    return { team: String(this.teamSize), party: this.teamChoice.party };
   }
 
   setStatus(text, error = false) {
@@ -122,11 +172,14 @@ export class Lobby {
   }
 
   /** The address bar shows the room's invite link while you're in it (a reload rejoins); null clears it. */
-  static setRoomUrl(mode, room) {
+  static setRoomUrl(mode, room, extra = {}) {
     try {
       const url = new URL(location.href);
-      if (mode) { url.searchParams.set("room", room); url.searchParams.set("mode", mode); }
-      else { url.searchParams.delete("room"); url.searchParams.delete("mode"); }
+      for (const k of ["team", "party"]) url.searchParams.delete(k);
+      if (mode) {
+        url.searchParams.set("room", room); url.searchParams.set("mode", mode);
+        for (const [k, v] of Object.entries(extra)) if (v) url.searchParams.set(k, v);
+      } else { url.searchParams.delete("room"); url.searchParams.delete("mode"); }
       history.replaceState(history.state, "", url);
     } catch { /* sandboxed */ }
   }

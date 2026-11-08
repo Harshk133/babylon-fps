@@ -389,6 +389,21 @@
             </button>
           </div>
 
+          <div class="lb-team" id="lobby-team">
+            <div class="lb-seg" role="radiogroup" aria-label="Team size">
+              <button type="button" data-team="1" role="radio">Solo<small>Just you</small></button>
+              <button type="button" data-team="2" role="radio">Duo<small>Teams of 2</small></button>
+              <button type="button" data-team="4" role="radio">Squad<small>Teams of 4</small></button>
+            </div>
+            <label class="lb-fill" title="Off: your team plays short-handed, with nobody added">
+              <input id="lobby-fill" type="checkbox" checked>
+              <span>Auto-fill team</span>
+            </label>
+            <label class="lb-party">
+              <span class="lb-label">Party code</span>
+              <input id="lobby-party" maxlength="12" placeholder="optional" autocomplete="off" spellcheck="false">
+            </label>
+          </div>
           <div class="lb-launch">
             <label class="lb-room">
               <span class="lb-label">Room code</span>

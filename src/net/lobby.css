@@ -356,6 +356,29 @@
 .lobby-mode.selected .mode-tag { color: #fff; border-color: var(--mode); }
 
 /* Room code + Play */
+/* Battle royale only: team size (the queue), auto-fill and a party code */
+.lb-team { display: none; align-items: flex-end; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
+#lobby[data-mode="br"] .lb-team { display: flex; }
+.lb-seg { display: flex; gap: 4px; }
+.lb-seg button {
+  display: flex;
+  flex-direction: column;
+  min-width: 82px;
+  padding: 5px 12px;
+  font: 800 16px "Segoe UI", system-ui, sans-serif;
+  text-align: left;
+  color: var(--bone);
+  background: var(--fill);
+  border: 1px solid var(--edge);
+  cursor: pointer;
+}
+.lb-seg button small { font-size: 10px; font-weight: 600; color: var(--bone-dim); }
+.lb-seg button:hover { border-color: var(--mode); }
+.lb-seg button.selected { background: color-mix(in srgb, var(--mode) 34%, var(--fill)); border-color: var(--mode); }
+.lb-fill { display: flex; align-items: center; gap: 6px; min-height: 40px; font-size: 13px; color: var(--bone); cursor: pointer; }
+.lb-party { width: 130px; }
+#lobby[data-team="1"] .lb-fill, #lobby[data-team="1"] .lb-party { display: none; }
+
 .lb-launch { display: flex; align-items: flex-end; gap: 14px; }
 .lb-room { flex: 1; min-width: 0; max-width: 360px; }
 .lb-room-hint { display: block; margin-top: 5px; font-size: 11px; color: var(--bone-dim); }
@@ -506,6 +529,11 @@
   }
   .mode-tag { grid-area: tag; justify-self: start; margin: 0; font-size: 12px; }
   .lb-room-hint { display: none; }
+  .lb-team { margin-bottom: 4px; gap: 8px; flex-wrap: nowrap; }
+  .lb-seg button { min-width: 60px; padding: 2px 8px; font-size: 13px; }
+  .lb-seg button small { display: none; }
+  .lb-fill { min-height: 28px; font-size: 12px; white-space: nowrap; }
+  .lb-party { width: 92px; }
   .lb-copy { margin-bottom: 0; }
   .lb-room .lb-label { display: block; margin-bottom: 2px; }
   .lb-play { min-width: 200px; padding: 6px 26px; }
