@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { SpatialGrid } from "./SpatialGrid.js";
 import * as CANNON from "cannon-es";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { claimVertices } from "./Collapse.js";
 import { GROUP_WORLD, GROUP_ZOMBIE } from "../physicsGroups.js";
 import { ROAD_HALF, SHOULDER } from "./Roads.js";
 import { groundHeight } from "./Terrain.js";
@@ -163,7 +164,9 @@ export class Plots {
           solid(w, h, d, x, h / 2, zz);
           // Piers at the panel ends of the plastered walls
           if (!p.brick) plain.push(box(0.36, h + 0.15, 0.36, along ? a : z, (h + 0.15) / 2, along ? z : a, _coping));
-          mapObstacles.push(this._obstacle(p, x, zz, w, d));
+          const wallBox = this._obstacle(p, x, zz, w, d);
+          (p.obstacles ??= []).push(wallBox);
+          mapObstacles.push(wallBox);
         }
       };
       const { hw, hd } = p;
@@ -225,6 +228,7 @@ export class Plots {
       } else if (rng() < 0.5) bags(0, -hd * 0.4);
 
       // To the world
+      for (const g of [...bricks, ...plain]) g.userData.owner = p;
       const cell = cellOf(p.x, p.z);
       for (const g of bricks) { g.applyMatrix4(m); cell.brick.push(g); }
       for (const g of plain) { g.applyMatrix4(m); cell.plain.push(g); }
@@ -233,6 +237,7 @@ export class Plots {
       body.position.set(p.x, y0, p.z);
       body.quaternion.setFromEuler(0, p.rot, 0);
       world.addBody(body);
+      p.bodies = [body];
       if (ramps.length) {
         const rb = new CANNON.Body({ mass: 0, material, collisionFilterGroup: GROUP_WORLD, collisionFilterMask: ~GROUP_ZOMBIE });
         for (const [hx, hy, hz, x, y, z, rz] of ramps) {
@@ -242,9 +247,12 @@ export class Plots {
         rb.position.set(p.x, y0, p.z);
         rb.quaternion.setFromEuler(0, p.rot, 0);
         world.addBody(rb);
+        p.bodies.push(rb);
       }
       // Monsters go round the plot as a whole (and in through the gate only by luck)
-      navObstacles?.push({ type: "box", x: p.x, z: p.z, w: hw * 2, d: hd * 2, rot: p.rot, hw, hd, plot: true });
+      const plotBox = { type: "box", x: p.x, z: p.z, w: hw * 2, d: hd * 2, rot: p.rot, hw, hd, plot: true };
+      navObstacles?.push(plotBox);
+      (p.obstacles ??= []).push(plotBox);
     }
 
     this.meshes = [];
@@ -254,6 +262,7 @@ export class Plots {
         const geo = mergeGeometries(cell[key], false);
         geo.computeBoundingSphere();
         const mesh = new THREE.Mesh(geo, mat);
+        claimVertices(cell[key], mesh);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         mesh.matrixAutoUpdate = false;

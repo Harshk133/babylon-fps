@@ -9,9 +9,9 @@
 const RESET_AFTER = 2500; // ms between letters before you're starting over
 
 export const CHEATS = [
-  { id: "toon",   code: "TOONED",     label: "Cartoon world",       color: "#ffb13d", toggle: true },
-  { id: "bw",     code: "NOIRFILM",   label: "Black and white",     color: "#e8e8e8", toggle: true },
-  { id: "sketch", code: "PENCILIT",   label: "Pencil sketch",       color: "#c9c2ae", toggle: true },
+  { id: "toon",   code: "TOONED",     label: "Cartoon world",       color: "#ffb13d", toggle: true, filter: true },
+  { id: "bw",     code: "NOIRFILM",   label: "Black and white",     color: "#e8e8e8", toggle: true, filter: true },
+  { id: "sketch", code: "PENCILIT",   label: "Pencil sketch",       color: "#c9c2ae", toggle: true, filter: true },
   { id: "tank",   code: "STEELBEAST", label: "Battle tank",         color: "#7ee05a" },
   { id: "plane",  code: "WINGSUP",    label: "Bomber plane",        color: "#6ab4ff" },
   { id: "rain",   code: "ROCKRAIN",   label: "Meteor shower",       color: "#ff6a3d" },
@@ -19,6 +19,22 @@ export const CHEATS = [
   { id: "heads",  code: "BOBBLEHEAD", label: "Giant heads",         color: "#ff6ad5", toggle: true },
   { id: "loot",   code: "LOCKNLOAD",  label: "Everyone fully armed", color: "#ffe14d" },
   { id: "speed",  code: "TURBOLEGS",  label: "Super speed",         color: "#4dd2ff", toggle: true },
+  // More picture styles
+  { id: "thermal", code: "THERMALEYE", label: "Thermal vision",     color: "#ff5a2a", toggle: true, filter: true },
+  { id: "pixel",  code: "PIXELPAST",  label: "8-bit world",         color: "#7dff6a", toggle: true, filter: true },
+  { id: "rainc",  code: "DATASTORM",  label: "Digital rain",        color: "#3dff7a", toggle: true, filter: true },
+  { id: "neon",   code: "NEONGRID",   label: "Neon outlines",       color: "#ff3df0", toggle: true, filter: true },
+  { id: "acid",   code: "ACIDTRIP",   label: "Kaleidoscope trip",   color: "#ffe14d", toggle: true, filter: true },
+  { id: "comic",  code: "POPCOMIC",   label: "Pop-art comic",       color: "#ff4b3a", toggle: true, filter: true },
+  { id: "ascii",  code: "ASCIIWORLD", label: "Text-mode world",     color: "#9cffb0", toggle: true, filter: true },
+  { id: "xray",   code: "XRAYBONES",  label: "X-ray",               color: "#6ad8ff", toggle: true, filter: true },
+  // Super-weapons: every gun in the room fires this instead of bullets
+  { id: "rail",   code: "RAILSTRIKE", label: "Railgun",             color: "#5de8ff", toggle: true, weapon: true },
+  { id: "hole",   code: "BLACKHOLE",  label: "Black hole launcher", color: "#c07bff", toggle: true, weapon: true },
+  { id: "bolt",   code: "SKYBOLT",    label: "Chain lightning",     color: "#bcd0ff", toggle: true, weapon: true },
+  { id: "swarm",  code: "SWARMFIRE",  label: "Rocket swarm",        color: "#ffa23d", toggle: true, weapon: true },
+  // The end of the world
+  { id: "doom",   code: "DOOMROCK",   label: "Asteroid strike",     color: "#ff3a1a" },
 ];
 
 const BY_CODE = new Map(CHEATS.map(c => [c.code, c]));

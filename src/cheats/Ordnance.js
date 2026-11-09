@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
-import { GROUP_WORLD } from "../physicsGroups.js";
+import { GROUP_WORLD, GROUP_ZOMBIE } from "../physicsGroups.js";
 
 // Things that fall out of the sky: a bomber's bombs and the meteor shower. One
 // pooled InstancedMesh for each look. Everyone flies their own copy; only the copy
@@ -10,6 +10,14 @@ const POOL = 48;
 const BOMB_GRAVITY = 26;
 const _from = new CANNON.Vec3(), _to = new CANNON.Vec3(), _res = new CANNON.RaycastResult();
 const rayOpts = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
+const hitOpts = { collisionFilterMask: GROUP_WORLD | GROUP_ZOMBIE, skipBackfaces: true };
+// g: gravity; life: s before it gives up; seek: also stops on monsters and snakes; size: stretch
+const KINDS = {
+  bomb:   { g: BOMB_GRAVITY, life: 12, seek: false, size: [1, 1, 1] },
+  meteor: { g: 0, life: 12, seek: false, size: [1.25, 5.5, 1.25] },
+  rocket: { g: 0, life: 4, seek: true, size: [0.2, 2.6, 0.2] },
+  orb:    { g: 0, life: 3, seek: true, size: [0.8, 0.8, 0.8] },
+};
 const _m = new THREE.Matrix4(), _p = new THREE.Vector3(), _s = new THREE.Vector3(), _q = new THREE.Quaternion(), _dir = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 
@@ -26,7 +34,9 @@ export class Ordnance {
     const rock = new THREE.Mesh(
       new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color: new THREE.Color(5, 1.6, 0.25), toneMapped: true }));
     this.meshes = {};
-    for (const [kind, proto] of [["bomb", bomb], ["meteor", rock]]) {
+    const flame = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), new THREE.MeshBasicMaterial({ color: new THREE.Color(4, 1.9, 0.4) }));
+    const orb = new THREE.Mesh(new THREE.SphereGeometry(1, 14, 10), new THREE.MeshBasicMaterial({ color: new THREE.Color(1.8, 0.4, 4) }));
+    for (const [kind, proto] of [["bomb", bomb], ["meteor", rock], ["rocket", flame], ["orb", orb]]) {
       const im = new THREE.InstancedMesh(proto.geometry, proto.material, POOL);
       im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       im.frustumCulled = false;
@@ -41,7 +51,7 @@ export class Ordnance {
   spawn(kind, x, y, z, vx, vy, vz, report, by) {
     const it = this.items.find(i => !i.live);
     if (!it) return;
-    Object.assign(it, { live: true, kind, x, y, z, vx, vy, vz, report, by });
+    Object.assign(it, { live: true, kind, x, y, z, vx, vy, vz, report, by, age: 0 });
     this.live++;
   }
 
@@ -55,13 +65,16 @@ export class Ordnance {
     if (!this.live) return;
     for (const it of this.items) {
       if (!it.live || dt <= 0) continue;
-      if (it.kind === "bomb") it.vy -= BOMB_GRAVITY * dt;
+      const K = KINDS[it.kind];
+      it.vy -= K.g * dt;
+      it.age += dt;
       const nx = it.x + it.vx * dt, ny = it.y + it.vy * dt, nz = it.z + it.vz * dt;
       let hit = false, hx = nx, hy = ny, hz = nz;
       const g = this.groundAt(nx, nz);
       _from.set(it.x, it.y, it.z); _to.set(nx, ny, nz);
       _res.reset();
-      if (this.world.raycastClosest(_from, _to, rayOpts, _res)) {
+      if (it.age > K.life) { hit = true; }
+      else if (this.world.raycastClosest(_from, _to, K.seek ? hitOpts : rayOpts, _res)) {
         hit = true; hx = _res.hitPointWorld.x; hy = _res.hitPointWorld.y; hz = _res.hitPointWorld.z;
       } else if (ny <= g) { hit = true; hy = g; }
       if (hit) {
@@ -84,7 +97,7 @@ export class Ordnance {
         _dir.set(it.vx, it.vy, it.vz).normalize();
         _q.setFromUnitVectors(UP, _dir);
         // A meteor is stretched along its fall: a streak
-        _s.set(...(kind === "meteor" ? [1.25, 5.5, 1.25] : [1, 1, 1]));
+        _s.set(...KINDS[kind].size);
         im.setMatrixAt(n++, _m.compose(_p.set(it.x, it.y, it.z), _q, _s));
       }
       im.count = n;

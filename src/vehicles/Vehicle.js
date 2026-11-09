@@ -30,7 +30,10 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
  * the wheel turns. dust: puffs per m/s per wheel on loose ground (emitDust).
  * spin: wheels built and spun by the vehicle itself [x, z, radius, width, front].
  */
-const NO_EXTRA = [];
+const AIR_GRAVITY = 18;
+const HOP_SPEED = 9;           // m/s: slower than this it just follows the ground
+const HOP_CLIMB = 1.6;         // m/s of climb the crest has to be throwing it up at
+const AIRBORNE_INPUT = { throttle: 0, steer: 0, handbrake: false, grip: 1 };
 const BIKE_TURN_IN = 10;   // 1/s: how fast a bike's turn rate reaches what the steering asks
 
 export const VEHICLES = {
@@ -50,7 +53,7 @@ export const VEHICLES = {
     box: [0.66, 0.8, 1.3, 0.85],
     modelYaw: Math.PI,           // the Sketchfab tuk-tuk (public/models/india/autorickshaw.glb) faces −Z
     runOver: 5, tone: 1,
-    grip: 0.8, slide: 0.12, steerRate: 7, dust: 1.0,
+    grip: 0.8, slide: 0.12, steerRate: 7, dust: 1.0, rollAt: 17,  // three wheels: the first to tip over
   },
   thar: {
     label: "Thar",
@@ -68,7 +71,7 @@ export const VEHICLES = {
     box: [1.05, 1.05, 2.21, 1.11],
     modelYaw: Math.PI / 2,       // the Sketchfab Thar Roxx is modelled nose along −X
     runOver: 7, tone: 0.68,
-    grip: 0.95, slide: 0.14, steerRate: 7, dust: 1.4,
+    grip: 0.95, slide: 0.14, steerRate: 7, dust: 1.4, rollAt: 34,
   },
   tractor: {
     label: "tractor",
@@ -86,7 +89,7 @@ export const VEHICLES = {
     box: [0.97, 0.95, 1.85, 1.0],
     runOver: 6, tone: 0.5,
     // Loose rear end: a sharp turn at speed on dirt swings the back out
-    grip: 0.72, slide: 0.2, steerRate: 4, dust: 2.4,
+    grip: 0.72, slide: 0.2, steerRate: 4, dust: 2.4, rollAt: 11,
     spin: [[0.86, -0.85, 0.78, 0.46, false], [-0.86, -0.85, 0.78, 0.46, false], [0.74, 1.2, 0.44, 0.28, true], [-0.74, 1.2, 0.44, 0.28, true]],
   },
   // The cheat-code vehicles (main.js "Cheats"): built by hand, parked out of the world until someone asks.
@@ -105,7 +108,7 @@ export const VEHICLES = {
     hits: { z: [-2.2, 0, 2.2], r: 1.75 },
     box: [1.7, 1.15, 3.6, 1.2],
     runOver: 14, tone: 0.4, grip: 1.4, slide: 0.05, steerRate: 5, dust: 3,
-    turret: true, noBots: true, cam: { distance: 11, height: 2.6 },
+    turret: true, noBots: true, heavy: true, cam: { distance: 11, height: 2.6 },
   },
   plane: {
     label: "bomber plane",
@@ -121,7 +124,7 @@ export const VEHICLES = {
     hits: { z: [-3, 0, 3], r: 1.4 },
     box: [1.3, 1.2, 5.6, 1.6],
     runOver: 20, tone: 0.8, grip: 2, slide: 0.02, steerRate: 4, dust: 2,
-    plane: { takeoff: 22, stall: 15, maxPitch: 0.7, maxRoll: 1.0, turn: 1.05, clearance: 16, top: 125 },
+    plane: { takeoff: 22, stall: 15, maxPitch: 0.7, maxRoll: 1.0, turn: 1.05, safe: 24, top: 125 },
     noBots: true, cam: { distance: 20, height: 4.5 },
   },
   // Motorbikes (public/models/bikes/, Poly Pizza, CC BY 3.0: credited in src/legal/credits.js). Two wheels:
@@ -499,6 +502,7 @@ export class Vehicle {
     });
     this.body.addShape(new CANNON.Box(new CANNON.Vec3(S.box[0], S.box[1], S.box[2])), new CANNON.Vec3(0, S.box[3], 0));
     this.body.vehicle = this;
+    this.world = world;
     world.addBody(this.body);
 
     // Footprint for the minimap (and skipped by our own collision test)
@@ -525,6 +529,12 @@ export class Vehicle {
     this.setStowed(!!this.spawn.stowed);
     this.air = false;         // a plane off the ground
     this.climb = 0;
+    this.hop = false;         // off the ground for a moment: over a crest, or thrown by a crash
+    this.vy = 0; this.pitchV = 0; this.rollV = 0; this.airVx = 0; this.airVz = 0;
+    this.tumbling = false;    // rolling over and over
+    this.overturned = false;  // came to rest on its side or roof
+    this.tip = 0; this.tipDir = 0; this.bounces = 0; this.landed = 0;
+    this._gy = null; this._gv = 0;
     this.turretYaw = this.yaw;
     this.gunPitch = 0;
     this.speed = 0;
@@ -582,6 +592,9 @@ export class Vehicle {
   setStowed(on) {
     this.stowed = on;
     this.root.visible = !on;
+    // Out of the physics world while it waits: nothing pays for it until someone calls it in
+    if (on && this.body.world) this.world.removeBody(this.body);
+    else if (!on && !this.body.world) this.world.addBody(this.body);
   }
 
   /** Called in by a cheat: here, ready to go. */
@@ -600,18 +613,118 @@ export class Vehicle {
     this.place();
   }
 
-  /** The extra numbers a driver sends after [x, z, yaw, speed, fuel, index]. */
+  /** The extra numbers a driver sends after [x, z, yaw, speed, fuel, index]: y, pitch, roll, flags, then the gun. */
   netExtra() {
-    if (this.spec.plane) return [+this.y.toFixed(2), +this.pitch.toFixed(3), +this.roll.toFixed(3), this.air ? 1 : 0];
-    if (this.spec.turret) return [+this.turretYaw.toFixed(3), +this.gunPitch.toFixed(3)];
-    return NO_EXTRA;
+    const base = [+this.y.toFixed(2), +this.pitch.toFixed(3), +this.roll.toFixed(3), (this.air ? 1 : 0) | (this.hop ? 2 : 0) | (this.overturned ? 4 : 0)];
+    if (this.spec.turret) base.push(+this.turretYaw.toFixed(3), +this.gunPitch.toFixed(3));
+    return base;
   }
 
   setRemoteExtra(v) {
     const r = this.remote;
-    if (!r || v.length < 8) return;
-    if (this.spec.plane) { r.y = v[6]; r.pitch = v[7]; r.roll = v[8]; this.air = !!v[9]; }
-    else if (this.spec.turret) { r.ty = v[6]; r.gp = v[7]; }
+    if (!r || v.length < 10) return;
+    r.y = v[6]; r.pitch = v[7]; r.roll = v[8];
+    this.air = !!(v[9] & 1);
+    this.hop = !!(v[9] & 2);
+    this.overturned = !!(v[9] & 4);
+    if (this.spec.turret && v.length >= 12) { r.ty = v[10]; r.gp = v[11]; }
+  }
+
+  /** Thrown into the air (a head-on crash, a nearby blast). spin: how hard it tumbles. */
+  launch(vy, vx, vz, spin) {
+    if (this.spec.plane && this.air) return;
+    this.hop = true;
+    this.vy = vy;
+    this.airVx = vx; this.airVz = vz;
+    this.rollV = spin;
+    this.pitchV = spin * 0.35;
+    this.tumbling = Math.abs(spin) > 2.5;
+    this.bounces = 0;
+    this._settle = Math.max(this._settle, 0.6);
+  }
+
+  /** Rolled it: over onto its side and off the road. dir: +1 / −1 which way. */
+  startFlip(dir) {
+    this.tip = 0;
+    this.launch(6.5, 0, 0, dir * 6.2);
+    this.tumbling = true;
+  }
+
+  /** Back on its wheels. */
+  right() {
+    this.overturned = false;
+    this.tumbling = false;
+    this.hop = false;
+    this.roll = 0; this.pitch = 0;
+    this.speed = 0;
+    this._gy = null;
+    this.place();
+  }
+
+  /** How hard it last came down (m/s), once. */
+  takeLanding() {
+    const v = this.landed;
+    this.landed = 0;
+    return v;
+  }
+
+  /** While it's off the ground. gy, gp, gr: where the ground would hold it. True if it's handled the pose. */
+  _airborne(dt, gy, gp, gr) {
+    if (this.overturned) {
+      this.y = gy + 0.55;
+      this.root.position.set(this.x, this.y, this.z);
+      this.root.rotation.set(-this.pitch, this.yaw, this.roll);
+      return true;
+    }
+    if (!this.hop) {
+      const pred = this._gy === null ? gy : this._gy + this._gv * dt;
+      const groundV = this._gy === null ? 0 : (gy - this._gy) / dt;
+      const climbing = this._gv;
+      this._gy = gy;
+      this._gv += (groundV - this._gv) * Math.min(1, dt * 18);
+      // The ground fell away under it faster than it was going up: it carries on, into the air
+      if (Math.abs(this.speed) < HOP_SPEED || climbing < HOP_CLIMB || gy > pred - 0.03) return false;
+      this.hop = true;
+      this.vy = climbing * 1.15;
+      this.pitchV = 0; this.rollV = 0;
+      this.airVx = this.airVz = 0;
+      this.tumbling = false;
+    }
+    this.vy -= AIR_GRAVITY * dt;
+    this.y += this.vy * dt;
+    this.x += this.airVx * dt;
+    this.z += this.airVz * dt;
+    this.roll += this.rollV * dt;
+    this.pitch += this.pitchV * dt;
+    if (!this.tumbling) this.pitchV -= 0.9 * dt;      // the nose drops as it flies
+    if (this.y <= gy && this.vy < 0) {
+      const impact = -this.vy;
+      this.y = gy;
+      this.landed = Math.max(this.landed, impact);
+      this.joltV += impact * 0.12;
+      if (this.tumbling && this.bounces < 2 && impact > 3) {
+        this.bounces++;
+        this.vy = impact * 0.38;
+        this.rollV *= 0.6;
+        this.airVx *= 0.6; this.airVz *= 0.6;
+      } else {
+        this.hop = false;
+        this.airVx = this.airVz = 0;
+        this._gy = gy; this._gv = 0;
+        if (this.tumbling) {
+          this.tumbling = false;
+          const q = Math.PI / 2, r = ((this.roll % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+          const near = Math.round(r / q) % 4;
+          this.speed = 0;
+          if (near === 0) { this.roll = gr; }
+          else { this.roll = near * q; this.overturned = true; }
+          this.pitch = gp;
+        } else { this.pitch = gp; this.roll = gr; }
+      }
+    }
+    this.root.position.set(this.x, this.y, this.z);
+    this.root.rotation.set(-this.pitch + this.jolt, this.yaw, this.roll + this.joltRoll);
+    return true;
   }
 
   /** The tank's gun follows your aim (world yaw, pitch). */
@@ -627,77 +740,119 @@ export class Vehicle {
 
   /**
    * A plane, flown by you. input: { throttle −1..1, steer −1..1 (+ = left bank), pitch −1..1 (+ = nose up) }.
-   * It rolls down the ground, lifts off by itself at takeoff speed, and sinks if it gets too
-   * slow. Comes back to the ground gently and it lands; too steep, or into a building, it crashes.
-   * Returns the crash speed (0 if none).
+   * env: { blocked(x, z, r, self): the 2D obstacle test (for the ground only), surface(x, z): the height
+   * to stay above, hit(x0, y0, z0, x1, y1, z1): a real 3D test against buildings, trees and rock }.
+   *
+   * It lifts off by itself at takeoff speed. In the air it looks after you: it holds enough speed
+   * to stay up and pulls up for the ground and hills ahead, unless you're landing (holding brake).
+   * What crashes it is actually flying into something, or slamming down hard. A bump on the
+   * ground just stops it. Returns the crash speed (0 if none).
    */
-  fly(delta, input, blocked) {
+  fly(delta, input, env) {
     const R = this.spec, P = R.plane;
+    const landing = input.throttle < 0;
     const t = this.fuel > 0 && !this.wrecked ? input.throttle : 0;
     this.throttle = Math.max(0, t);
     let v = this.speed;
     if (t > 0) v += R.accel * t * delta * (1 - v / R.maxSpeed * 0.85);
     else if (t < 0) v -= R.brake * delta;
     else v -= R.coast * delta * (this.air ? 0.3 : 1);
+    // Not landing: the engine keeps it above the stall by itself
+    if (this.air && !landing && this.fuel > 0 && v < P.takeoff) v += R.accel * delta;
     v = Math.max(0, Math.min(R.maxSpeed, v));
     this.speed = v;
     if (this.fuel > 0) this.fuel = Math.max(0, this.fuel - R.burn * this.throttle * delta);
     const lift = Math.max(0, Math.min(1, (v - P.stall) / (P.takeoff - P.stall)));
     const k = 1 - Math.exp(-2.4 * delta);
     if (!this.air) {
-      this.yawRate = input.steer * 0.75 * Math.min(1, v / 8);
-      const yaw = this.yaw + this.yawRate * delta;
-      const nx = this.x + Math.sin(yaw) * v * delta, nz = this.z + Math.cos(yaw) * v * delta;
-      if (v > 3 && this._blockedAt(nx, nz, yaw, blocked)) { this.speed = 0; return v; }
-      this.x = nx; this.z = nz; this.yaw = yaw;
-      if (v >= P.takeoff) { this.air = true; this.climb = 2.5; }
+      // It can always turn on the spot, so it can never be left stuck against something
+      this.yawRate = input.steer * 0.75 * Math.max(0.6, Math.min(1, v / 8));
+      this.yaw += this.yawRate * delta;
+      const nx = this.x + Math.sin(this.yaw) * v * delta, nz = this.z + Math.cos(this.yaw) * v * delta;
+      const wedged = this._blockedAt(this.x, this.z, this.yaw, env.blocked);   // (parked against it: let it roll clear)
+      const ahead = v > 1 && env.hit(this.x, this.y + 1.7, this.z, nx + Math.sin(this.yaw) * 7, this.y + 1.7, nz + Math.cos(this.yaw) * 7);   // (solid things the 2D list doesn't have)
+      if (!wedged && (ahead || this._blockedAt(nx, nz, this.yaw, env.blocked))) { this.speed = 0; return 0; }
+      this.x = nx; this.z = nz;
+      if (v >= P.takeoff && t > 0) { this.air = true; this.climb = 3; }
       return 0;
     }
-    let want = input.pitch * P.maxPitch;
+    const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
+    const here = env.surface(this.x, this.z);
+    const height = this.y - here;
+    let want = input.pitch * P.maxPitch, pull = false;
     if (this.climb > 0) { this.climb -= delta; want = Math.max(want, 0.32); }
     want -= (1 - lift) * 0.8;
-    this.pitch += (want - this.pitch) * k;
+    if (landing) {
+      // A flare: however it's pointed, it levels off as the ground comes up
+      if (height < 24) want = Math.max(want, height < 7 ? 0.05 : -0.14);
+    } else {
+      // Terrain assist: looks ahead along its path and clears whatever's there
+      const look = Math.max(24, v * 2.4);
+      const ahead = Math.max(here, env.surface(this.x + sy * look * 0.5, this.z + cy * look * 0.5), env.surface(this.x + sy * look, this.z + cy * look));
+      // (judged by where the dive will have taken it, not by how high it is now)
+      const sp0 = Math.sin(this.pitch), cp0 = Math.cos(this.pitch);
+      const short = ahead + P.safe - (this.y + Math.min(0, sp0) * look);
+      if (short > 0) { want = Math.max(want, Math.min(P.maxPitch, Math.atan2(short, look) + 0.12)); pull = true; }
+      // ...and anything standing in the way: along its actual path, and straight ahead
+      const midY = this.y + 1.7;
+      if (env.hit(this.x, midY, this.z, this.x + sy * cp0 * look, midY + sp0 * look, this.z + cy * cp0 * look)
+        || env.hit(this.x, midY, this.z, this.x + sy * look, midY, this.z + cy * look)) { want = P.maxPitch; pull = true; }
+    }
+    // Pulling out of trouble is quicker than ordinary flying
+    this.pitch += (want - this.pitch) * (pull ? 1 - Math.exp(-7 * delta) : k);
     this.roll += (-input.steer * P.maxRoll - this.roll) * k;
     this.yawRate = -Math.sin(this.roll) * P.turn;
     this.yaw += this.yawRate * delta;
     // The edge of the island: it turns you back
-    const far = Math.hypot(this.x, this.z);
-    if (far > 490) {
+    if (Math.hypot(this.x, this.z) > 490) {
       let d = (Math.atan2(-this.x, -this.z) - this.yaw) % (Math.PI * 2);
       if (d > Math.PI) d -= Math.PI * 2; else if (d < -Math.PI) d += Math.PI * 2;
       this.yaw += d * 1.5 * delta;
     }
-    const cp = Math.cos(this.pitch);
+    const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
+    const sinkSlow = (1 - lift) * 14 * Math.max(0.25, Math.min(1, height / 18));   // less of a drop near the ground
+    const climbRate = sp * v - sinkSlow;
+    const ox = this.x, oy = this.y, oz = this.z;
     this.x += Math.sin(this.yaw) * cp * v * delta;
     this.z += Math.cos(this.yaw) * cp * v * delta;
-    this.y = Math.min(P.top, this.y + Math.sin(this.pitch) * v * delta - (1 - lift) * 14 * delta);
-    const ground = groundHeight(this.x, this.z);
-    if (this.y <= ground) {
-      this.y = ground;
-      const sink = -Math.sin(this.pitch) * v;
-      this.air = false;
-      this.pitch = this.roll = 0;
-      if (sink > 9 || Math.abs(this.roll) > 0.5) { const c = v; this.speed = 0; return Math.max(20, c); }
-      return 0;
-    }
-    if (this.y - ground < P.clearance && blocked(this.x, this.z, 2.5, this)) {
-      const c = v;
+    this.y = Math.min(P.top, this.y + climbRate * delta);
+    // Really flying into something: a segment from the body to just past the nose
+    const nose = 4 / Math.max(1, v * delta + 4);
+    const cy2 = 1.7;
+    if (env.hit(ox, oy + cy2, oz, this.x + (this.x - ox) * nose + Math.sin(this.yaw) * cp * 4, this.y + cy2 + sp * 4, this.z + (this.z - oz) * nose + Math.cos(this.yaw) * cp * 4)) {
       this.air = false;
       this.speed = 0;
       this.pitch = this.roll = 0;
-      return Math.max(20, c);
+      return Math.max(20, v);
+    }
+    const ground = env.surface(this.x, this.z);
+    if (this.y <= ground) {
+      this.y = ground;
+      const sink = -climbRate, banked = Math.abs(this.roll);
+      this.air = false;
+      this.pitch = this.roll = 0;
+      // Down too hard, or on a wingtip
+      if (sink > 16 || banked > 1.2) { this.speed = 0; return Math.max(20, v); }
+      return 0;
     }
     return 0;
   }
 
-  /** Smooths a plane someone else flies; one nobody flies comes down. */
+  /** Smooths the height and tilt someone else sends. */
+  _remoteTick(delta) {
+    const r = this.remote;
+    if (!r || this.driver === "local" || r.y === undefined) return;
+    const k = 1 - Math.exp(-10 * delta);
+    this.y += (r.y - this.y) * k;
+    this.pitch += (r.pitch - this.pitch) * k;
+    this.roll += (r.roll - this.roll) * k;
+  }
+
+  /** A plane nobody flies comes down. */
   _planeTick(delta) {
     const r = this.remote;
     if (r && this.driver !== "local" && r.y !== undefined) {
-      const k = 1 - Math.exp(-10 * delta);
-      this.y += (r.y - this.y) * k;
-      this.pitch += (r.pitch - this.pitch) * k;
-      this.roll += (r.roll - this.roll) * k;
+      // (_remoteTick has it)
     } else if (this.air && this.driver === null) {
       this.pitch += (-0.6 - this.pitch) * (1 - Math.exp(-delta));
       this.x += Math.sin(this.yaw) * this.speed * delta;
@@ -715,6 +870,12 @@ export class Vehicle {
       this.root.rotation.set(-this.pitch + this.jolt, this.yaw, this.roll + this.joltRoll);
       return;
     }
+    // Someone else is driving: they worked out its height and tilt, and sent them
+    if (this.remote && this.driver !== "local" && this.remote.y !== undefined) {
+      this.root.position.set(this.x, this.y, this.z);
+      this.root.rotation.set(-this.pitch + this.jolt, this.yaw, this.roll + this.joltRoll);
+      return;
+    }
     const { front, rear: back, track } = this.spec.wheels;
     const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
     const fx = sy, fz = cy;          // forward
@@ -725,8 +886,9 @@ export class Vehicle {
     const rear = (hL + hR) / 2;
     const pitch = Math.atan2(hF - rear, front - back);
     // Leans out of a slide (a little body roll you can feel); a bike leans into the turn
-    const roll = this.spec.bike ? -this.lean : Math.atan2(hL - hR, track * 2) - this.slip * 0.035;
+    const roll = this.spec.bike ? -this.lean : Math.atan2(hL - hR, track * 2) - this.slip * 0.035 + this.tip * this.tipDir * 0.24;
     const y = rear + (hF - rear) * (-back / (front - back));
+    if (!this.spec.plane && delta > 0 && this._airborne(Math.min(delta, 0.05), y, pitch, roll)) return;
     if (delta > 0) {
       // A little suspension: ease into the new pose
       const k = 1 - Math.exp(-14 * delta);
@@ -754,6 +916,10 @@ export class Vehicle {
    */
   drive(delta, input, blocked) {
     const R = this.spec;
+    // On its roof it isn't going anywhere
+    if (this.overturned) { this.speed = 0; this.throttle = 0; this.contact.on = false; return 0; }
+    const flying = this.hop || this.tumbling;       // no grip in the air: wheels spin, nothing steers
+    if (flying) { input = AIRBORNE_INPUT; }
     const t = this.fuel > 0 && !this.wrecked ? input.throttle : 0;
     this.throttle = Math.abs(t);
     let v = this.speed;
@@ -780,6 +946,14 @@ export class Vehicle {
       const cap = R.bike.turn / Math.max(1.5, Math.abs(v));
       yawRate = THREE.MathUtils.clamp(yawRate, -cap, cap);
     }
+    // Too hard a turn at speed and it goes over: the tip builds while you hold it
+    if (R.rollAt && !flying) {
+      const lateral = v * yawRate, over = Math.abs(lateral) - R.rollAt;
+      this.tip = over > 0 ? this.tip + over * 0.05 * delta : Math.max(0, this.tip - 2.2 * delta);
+      if (over > 0) this.tipDir = lateral > 0 ? 1 : -1;
+      if (this.tip >= 1) this.startFlip(this.tipDir);
+    }
+    if (this.tumbling) v *= Math.exp(-1.4 * delta);
     // Sliding: the turn wants v·ω of sideways acceleration, the tyres give grip·g
     // (a bike's tyres hold its full turn on asphalt, and let go on dirt or the handbrake)
     const want = v * yawRate, have = grip * (R.bike ? R.bike.turn / R.grip : 9.8);
@@ -946,6 +1120,7 @@ export class Vehicle {
    * collider, and runs the lights. darkness: 0 day … 1 night.
    */
   update(delta, darkness) {
+    if (this.stowed) return;
     const r = this.remote;
     if (r && this.driver !== "local") {
       // Dead-reckon between packets, then ease toward it
@@ -962,6 +1137,7 @@ export class Vehicle {
       this.throttle = Math.min(1, Math.abs(r.speed) / this.spec.maxSpeed + 0.2);
     }
     if (this.spec.bike) this._bikeDynamics(delta);
+    this._remoteTick(delta);
     if (this.spec.plane) this._planeTick(delta);
     if (this.gun) {
       if (r && this.driver !== "local" && r.ty !== undefined) { this.turretYaw = r.ty; this.gunPitch = r.gp; }
@@ -978,7 +1154,7 @@ export class Vehicle {
       if (this.damage > 0 && !this.wrecked) this.damage = Math.max(0, this.damage - delta / DAMAGE_CLEAR);
     }
     // A parked vehicle nobody touches doesn't need re-posing every frame
-    const moving = this.driver !== null || this._settle > 0 || this.air || (this.spec.bike && Math.abs(this.leanV) + Math.abs(this.diveV) > 0.01);
+    const moving = this.driver !== null || this._settle > 0 || this.air || this.hop || this.tumbling || this.overturned || (this.spec.bike && Math.abs(this.leanV) + Math.abs(this.diveV) > 0.01);
     if (moving) {
       this._pose(delta);
       this._settle = this.driver !== null ? 0.5 : this._settle - delta;

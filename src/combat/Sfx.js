@@ -512,6 +512,39 @@ export class Sfx {
   // ── Grenades, molotovs, smoke ───────────────────────────────────────────────
 
   /** vol: 1 for a grenade, less for a dragon's fireball. */
+  /** The ground itself shaking: a long, very low roar. */
+  rumble(seconds = 6, vol = 1) {
+    if (!this.ctx) return;
+    const c = this.ctx, t = c.currentTime, n = Math.floor(c.sampleRate * seconds);
+    const buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < n; i++) { last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02; d[i] = last * 11; }
+    const src = c.createBufferSource(), low = c.createBiquadFilter(), g = c.createGain();
+    src.buffer = buf;
+    low.type = "lowpass"; low.frequency.value = 95;
+    g.gain.setValueAtTime(0.001, t);
+    g.gain.exponentialRampToValueAtTime(0.95 * vol, t + 0.25);
+    g.gain.exponentialRampToValueAtTime(0.001, t + seconds);
+    src.connect(low); low.connect(g); g.connect(this.master);
+    src.start(t);
+  }
+
+  /** A snake's hiss. vol: by distance. */
+  hiss(vol = 1) {
+    if (!this.ctx || vol <= 0.02) return;
+    const c = this.ctx, t = c.currentTime, n = Math.floor(c.sampleRate * 0.9);
+    const buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+    const src = c.createBufferSource(), band = c.createBiquadFilter(), g = c.createGain();
+    src.buffer = buf;
+    band.type = "bandpass"; band.frequency.value = 4600; band.Q.value = 0.7;
+    g.gain.setValueAtTime(0.001, t);
+    g.gain.exponentialRampToValueAtTime(0.5 * vol, t + 0.08);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+    src.connect(band); band.connect(g); g.connect(this.master);
+    src.start(t);
+  }
+
   explosion(at = null, vol = 1) {
     const ctx = this.ctx;
     if (!ctx) return;

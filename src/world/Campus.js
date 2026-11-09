@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { claimVertices } from "./Collapse.js";
 import { GROUP_WORLD } from "../physicsGroups.js";
 import {
   CAMPUS_BUILDINGS, CRICKET, FIELD_POLY, RED_STRIP, WALL, WALL_GAPS, KEEP_OUT, AREA, AREA_BOX,
@@ -407,6 +408,7 @@ export class Campus {
         solid(2.0, 2.4, 2.0, tx, H + 0.22 + 1.2, tz);
       }
 
+      for (const g of [...facade, ...plain]) g.userData.owner = b;
       const cell = cellOf(b.x, b.z);
       toCell(facade, cell.facade, b.x, y0, b.z, b.rot);
       toCell(plain, cell.plain, b.x, y0, b.z, b.rot);
@@ -415,6 +417,7 @@ export class Campus {
       body.position.set(b.x, y0, b.z);
       body.quaternion.setFromEuler(0, b.rot, 0);
       world.addBody(body);
+      b.bodies = [body];
       // A loot spot or two on the verandah / beside the door
       const c = Math.cos(b.rot), s = Math.sin(b.rot);
       const spot = (lx, lz) => this.lootSpots.push({ x: b.x + lx * c + lz * s, y: y0 + 0.14, z: b.z - lx * s + lz * c });
@@ -594,6 +597,7 @@ export class Campus {
         if (!geo) continue;
         geo.computeBoundingSphere();
         const mesh = new THREE.Mesh(geo, mat);
+        claimVertices(cell[key], mesh);
         mesh.castShadow = shadow;
         mesh.receiveShadow = true;
         mesh.matrixAutoUpdate = false;

@@ -82,6 +82,8 @@ export class RemotePlayers {
     this.seatAt = null;
     /** (from, to) → true if a smoke cloud hides the line between them (set by main.js). */
     this.concealed = null;
+    /** (root) -> Promise: readies a new model before it is shown (set by main.js). */
+    this.prepare = null;
     this._targets = [];
     this._v = new THREE.Vector3();
     this._muzzle = new THREE.Vector3();
@@ -91,6 +93,7 @@ export class RemotePlayers {
   add({ id, name, color }) {
     if (this.players.has(id)) return this.players.get(id);
     const root = new THREE.Group();
+    root.rotation.order = "YXZ";
     root.position.set(0, -500, 0);
     this.scene.add(root);
 
@@ -141,7 +144,7 @@ export class RemotePlayers {
     if (p.avatarCode === code) return;
     p.avatarCode = code;
     const soldier = new Soldier({ avatar: code });
-    soldier.load(this.loader).then(() => {
+    soldier.load(this.loader).then(() => this.prepare?.(soldier.root)).then(() => {
       if (!this.players.has(p.id) || p.avatarCode !== code) return;
       if (p.soldier) { p.root.remove(p.soldier.root); p.soldier.release(); }
       p.root.add(soldier.root);
@@ -209,6 +212,7 @@ export class RemotePlayers {
     p.aim = !!s.aim; p.fire = !!s.fire;
     p.hp = s.hp; p.vis = s.vis ?? 1; p.kills = s.k ?? 0;
     p.swim = !!s.swm; p.air = s.air ? 1 : 0;
+    p.tilt = s.rt ?? 0;           // leaning into a rope descent
     p.throwHold = s.th ?? null;   // the throwable they're holding ready, if any
     p.knocked = !!s.kn;           // Duo / Squad: down but not out (hp is their bleed-out bar)
     if (s.av !== undefined && s.av !== p.avatarCode) this._build(p, s.av);
@@ -323,6 +327,7 @@ export class RemotePlayers {
 
       p.root.position.set(b.x, b.y - feetOffset, b.z);
       p.root.rotation.y += angleDiff(p.bodyYaw, p.root.rotation.y) * k;
+      p.root.rotation.x += ((p.tilt ?? 0) - p.root.rotation.x) * k;
       // On a motorbike: main.js puts them on its seat (and poses the ride) instead
       p.riding = !!this.seatAt?.(p, delta);
       const inPlane = p.phase === PHASE_PLANE;

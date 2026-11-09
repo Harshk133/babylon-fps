@@ -515,6 +515,15 @@ export class PostFX {
       grainFeed = 0.05 * feed;
     }
 
+    // After the asteroid: an ash-orange sky over everything
+    if (s.apoc > 0) {
+      _c1.lerp(_c2.setRGB(1.2, 0.86, 0.68), 0.75 * s.apoc);
+      sat -= 0.14 * s.apoc;
+      bleach += 0.1 * s.apoc;
+      vig += 0.2 * s.apoc;
+      contrast += 0.06 * s.apoc;
+    }
+
     if (s.dead) { sat = 0; contrast = 1.18; vig = 0.7; red = 0; chroma = 0; scan = 0; _c1.setRGB(1, 1, 1); }
 
     const k = 1 - Math.exp(-6 * dt);

@@ -1174,6 +1174,7 @@ export class Bots {
 
   _drive(b, delta) {
     const car = b.car, goal = b.driveTo;
+    if (car.overturned) car.right();
     b.carT += delta;
     const dx = goal.x - car.x, dz = goal.z - car.z, d = Math.hypot(dx, dz);
     const want = Math.atan2(dx, dz);

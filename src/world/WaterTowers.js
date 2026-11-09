@@ -326,6 +326,7 @@ export function buildWaterTowers({ gltf, scene, world, material, spots, groundAt
   });
 
   spots.forEach((s, i) => {
+    const obstaclesBefore = mapObstacles.length;
     const y = groundAt(s.x, s.z);
     const c = Math.cos(s.rot), sn = Math.sin(s.rot);
     const toWorld = (lx, lz) => ({ x: s.x + lx * c + lz * sn, z: s.z - lx * sn + lz * c });
@@ -374,7 +375,7 @@ export function buildWaterTowers({ gltf, scene, world, material, spots, groundAt
       const w = toWorld(-MODEL_CX + Math.cos(a) * 2.3, Math.sin(a) * 2.3);
       lootSpots.push({ x: w.x, y: y + ROOF_Y + 0.12, z: w.z, tower: i });
     }
-    towers[i] = { ...towers[i], x: s.x, z: s.z, y, rot: s.rot, roofY: y + ROOF_Y };
+    towers[i] = { ...towers[i], x: s.x, z: s.z, y, rot: s.rot, roofY: y + ROOF_Y, body, index: i, obstacles: mapObstacles.slice(obstaclesBefore) };
   });
 
   for (const im of meshes) {
@@ -385,7 +386,7 @@ export function buildWaterTowers({ gltf, scene, world, material, spots, groundAt
     scene.add(im);
   }
   return {
-    towers, lootSpots,
+    towers, lootSpots, meshes,
     /** True within pad of a tower's footprint. */
     blocks: (x, z, pad = 0) => towers.some(t => Math.hypot(x - t.x, z - t.z) < TOWER_R + pad),
   };

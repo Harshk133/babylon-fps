@@ -5,7 +5,7 @@ import { FullScreenQuad } from "three/addons/postprocessing/Pass.js";
 // on the finished frame (copied off the screen), so it looks the same whatever the
 // PostFX quality is, and costs nothing while no style is on.
 
-const MODES = { toon: 1, bw: 2, sketch: 3 };
+const MODES = { toon: 1, bw: 2, sketch: 3, thermal: 4, pixel: 5, rainc: 6, neon: 7, acid: 8, comic: 9, ascii: 10, xray: 11 };
 
 const fragmentShader = /* glsl */ `
   precision highp float;
@@ -86,9 +86,134 @@ const fragmentShader = /* glsl */ `
     return mix(paper, vec3(0.13, 0.13, 0.17), ink);
   }
 
+  vec3 heat(float t) {
+    t = clamp(t, 0.0, 1.0);
+    vec3 a = mix(vec3(0.02, 0.0, 0.12), vec3(0.35, 0.0, 0.75), smoothstep(0.0, 0.25, t));
+    a = mix(a, vec3(0.95, 0.05, 0.25), smoothstep(0.22, 0.5, t));
+    a = mix(a, vec3(1.0, 0.72, 0.02), smoothstep(0.48, 0.78, t));
+    return mix(a, vec3(1.0, 1.0, 0.9), smoothstep(0.76, 1.0, t));
+  }
+
+  vec3 thermal(vec2 uv) {
+    float l = luma(texture2D(tFrame, uv).rgb);
+    float e = edge(uv, 1.5);
+    float n = hash(floor(vUv * uRes * 0.5) + fract(uTime) * 31.0) * 0.05;
+    return heat(pow(l, 0.75) + e * 0.35 + n);
+  }
+
+  float bayer(vec2 p) {
+    vec2 a = mod(floor(p), 4.0);
+    float v = 0.0, s = 1.0;
+    for (int i = 0; i < 2; i++) {
+      vec2 q = floor(a / s) * 0.5;
+      v = v * 0.25 + (mod(floor(a.x / s) + floor(a.y / s), 2.0) * 0.5 + mod(floor(a.y / s), 2.0) * 0.25);
+      s *= 2.0;
+    }
+    return v;
+  }
+
+  vec3 pixelArt(vec2 uv) {
+    float size = max(4.0, floor(uRes.y / 135.0));
+    vec2 cell = floor(uv * uRes / size);
+    vec3 c = texture2D(tFrame, (cell + 0.5) * size / uRes).rgb;
+    float d = bayer(cell) - 0.5;
+    return floor(c * 5.0 + d + 0.5) / 5.0;
+  }
+
+  vec3 digitalRain(vec2 uv) {
+    float size = max(8.0, floor(uRes.y / 56.0));
+    vec2 px = uv * uRes;
+    vec2 cell = floor(px / size);
+    float sp = 0.25 + hash(vec2(cell.x, 3.0)) * 0.6;
+    float head = fract(uTime * sp + hash(vec2(cell.x, 9.0)));
+    float pos = 1.0 - (cell.y + 0.5) * size / uRes.y;
+    float behind = fract(head - pos + 1.0);
+    float trail = pow(1.0 - behind, 5.0);
+    vec2 g = floor(fract(px / size) * vec2(3.0, 5.0));
+    float seed = floor(uTime * 7.0 * (0.4 + hash(cell)));
+    float on = step(0.48, hash(g + cell * 7.0 + seed));
+    float l = luma(texture2D(tFrame, (cell + 0.5) * size / uRes).rgb);
+    vec3 base = vec3(0.0, l * 0.55, l * 0.12);
+    vec3 glyph = mix(vec3(0.1, 1.0, 0.35), vec3(0.85, 1.0, 0.9), step(0.93, 1.0 - behind)) * on * trail * (0.45 + l * 1.5);
+    float shape = smoothstep(0.08, 0.5, edge(uv, 1.6)) * 0.55;
+    return base + glyph + vec3(0.1, 0.95, 0.35) * shape;
+  }
+
+  vec3 neonEdges(vec2 uv) {
+    float e = smoothstep(0.14, 0.5, edge(uv, 1.3)), wide = smoothstep(0.14, 0.7, edge(uv, 3.6));
+    float a = uTime * 0.7 + (vUv.x + vUv.y) * 4.0;
+    vec3 hue = 0.5 + 0.5 * cos(a + vec3(0.0, 2.1, 4.2));
+    float l = luma(texture2D(tFrame, uv).rgb);
+    return vec3(0.015, 0.0, 0.05) + hue * (e * 1.3 + wide * 0.4) + vec3(0.05, 0.0, 0.12) * l;
+  }
+
+  vec3 kaleidoscope(vec2 uv) {
+    vec2 p = uv - 0.5;
+    p.x *= uRes.x / uRes.y;
+    float r = length(p), a = atan(p.y, p.x) + uTime * 0.14;
+    float sides = 8.0, w = 6.2831853 / sides;
+    a = abs(mod(a, w) - w * 0.5);
+    r += sin(r * 12.0 - uTime * 2.0) * 0.015;
+    vec2 q = vec2(cos(a), sin(a)) * r;
+    q.x /= uRes.x / uRes.y;
+    vec3 c = texture2D(tFrame, clamp(q * 1.1 + 0.5, 0.002, 0.998)).rgb;
+    float t = uTime * 0.9 + r * 4.0;
+    mat3 hue = mat3(cos(t) * 0.5 + 0.5, 0.0, sin(t) * 0.5 + 0.5, sin(t) * 0.5 + 0.5, cos(t) * 0.5 + 0.5, 0.0, 0.0, sin(t) * 0.5 + 0.5, cos(t) * 0.5 + 0.5);
+    return clamp(hue * c * 1.7, 0.0, 1.0);
+  }
+
+  vec3 popComic(vec2 uv) {
+    vec3 c = texture2D(tFrame, uv).rgb;
+    float l = luma(c);
+    vec3 flatCol = floor(mix(vec3(l), c, 1.7) * 4.0 + 0.5) / 4.0;
+    vec2 px = vUv * uRes;
+    float size = max(6.0, floor(uRes.y / 95.0));
+    vec2 r = mat2(0.707, -0.707, 0.707, 0.707) * px / size;
+    float dot_ = length(fract(r) - 0.5);
+    float ink = 1.0 - smoothstep(0.0, 0.08, dot_ - (1.0 - l) * 0.62);
+    vec3 col = mix(clamp(flatCol, 0.0, 1.0) + 0.14, flatCol * 0.25, ink);
+    return mix(col, vec3(0.02), smoothstep(0.3, 0.55, edge(uv, 1.5)));
+  }
+
+  float glyph(int n, vec2 p) {
+    p = floor(p * vec2(-4.0, 4.0) + 2.5);
+    if (clamp(p.x, 0.0, 4.0) == p.x && clamp(p.y, 0.0, 4.0) == p.y) {
+      int a = int(p.x + 0.5) + 5 * int(p.y + 0.5);
+      if (((n >> a) & 1) == 1) return 1.0;
+    }
+    return 0.0;
+  }
+
+  vec3 asciiArt(vec2 uv) {
+    float size = max(8.0, floor(uRes.y / 75.0));
+    vec2 px = uv * uRes;
+    vec3 c = texture2D(tFrame, (floor(px / size) + 0.5) * size / uRes).rgb;
+    float g = luma(c);
+    int n = 4096;
+    if (g > 0.2) n = 65600;
+    if (g > 0.3) n = 332772;
+    if (g > 0.4) n = 15255086;
+    if (g > 0.5) n = 23385164;
+    if (g > 0.6) n = 15252014;
+    if (g > 0.7) n = 13199452;
+    if (g > 0.8) n = 11512810;
+    vec2 p = mod(px / (size * 0.5), 2.0) - vec2(1.0);
+    return mix(c * 1.6, vec3(0.55, 1.0, 0.65), 0.45) * glyph(n, p);
+  }
+
+  vec3 xray(vec2 uv) {
+    float l = 1.0 - luma(texture2D(tFrame, uv).rgb);
+    float e = smoothstep(0.1, 0.5, edge(uv, 1.4));
+    float scan = 0.92 + 0.08 * sin(vUv.y * uRes.y * 0.5 - uTime * 7.0);
+    return (vec3(0.03, 0.13, 0.3) + vec3(0.3, 0.72, 1.0) * pow(l, 1.6) * 0.75 + vec3(0.7, 0.95, 1.0) * e) * scan;
+  }
+
   void main() {
     vec3 src = texture2D(tFrame, vUv).rgb;
-    vec3 col = uMode < 1.5 ? cartoon(vUv) : uMode < 2.5 ? noir(vUv) : sketch(vUv);
+    vec3 col = uMode < 1.5 ? cartoon(vUv) : uMode < 2.5 ? noir(vUv) : uMode < 3.5 ? sketch(vUv)
+      : uMode < 4.5 ? thermal(vUv) : uMode < 5.5 ? pixelArt(vUv) : uMode < 6.5 ? digitalRain(vUv)
+      : uMode < 7.5 ? neonEdges(vUv) : uMode < 8.5 ? kaleidoscope(vUv) : uMode < 9.5 ? popComic(vUv)
+      : uMode < 10.5 ? asciiArt(vUv) : xray(vUv);
     gl_FragColor = vec4(mix(src, col, uAmt), 1.0);
   }
 `;
@@ -124,6 +249,13 @@ export class StyleFilter {
   }
 
   set(mode) { this.mode = mode; }
+
+  /** Compiles the shader ahead of time: the first cheat code shouldn't stall the game. */
+  warm(camera) {
+    const s = new THREE.Scene();
+    s.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material));
+    return this.renderer.compileAsync(s, camera);
+  }
 
   /** Eases in and out (dt: real seconds). */
   update(dt) {

@@ -404,7 +404,7 @@ export function placeIndiaProps({ scene, world, material, models, spots, groundA
   const up = new THREE.Vector3(0, 1, 0);
   const instance = (geometry, mat, placed, shadow) => {
     const inst = new THREE.InstancedMesh(geometry, mat, placed.length);
-    placed.forEach((s, i) => inst.setMatrixAt(i, s.matrix));
+    placed.forEach((s, i) => { inst.setMatrixAt(i, s.matrix); (s.instances ??= []).push([inst, i]); });
     inst.instanceMatrix.needsUpdate = true;
     inst.castShadow = shadow;
     inst.receiveShadow = true;
@@ -435,6 +435,7 @@ export function placeIndiaProps({ scene, world, material, models, spots, groundA
         const o = { type: "box", x: s.x, z: s.z, rot: s.rot, w: hx * 2, d: hz * 2, hw: hx, hd: hz, prop: kind };
         mapObstacles.push(o);
         navObstacles.push(o);
+        buildings.units.push({ s, kind, body, obstacle: o, hw: hx, hd: hz, h: size.y, entry: null });
       }
       continue;
     }
@@ -479,7 +480,8 @@ export function placeIndiaProps({ scene, world, material, models, spots, groundA
       const o = { type: "box", x: s.x, z: s.z, rot: s.rot, w: hx * 2, d: hz * 2, hw: hx, hd: hz, prop: kind };
       mapObstacles.push(o);
       navObstacles.push(o);
-      buildings.add(s, kind, room, planes, box, o, door);
+      const entry = buildings.add(s, kind, room, planes, box, o, door);
+      buildings.units.push({ s, kind, body, obstacle: o, hw: hx, hd: hz, h: size.y, entry });
     }
   }
   return buildings;
@@ -497,6 +499,7 @@ export class IndiaBuildings {
   constructor() {
     this.list = [];
     this.lootSpots = [];   // [{ x, y, z }]
+    this.units = [];       // everything placed, for main.js's destruction: { s, body, obstacle, hw, hd, h, entry }
   }
 
   add(s, kind, room, planes, box, obstacle, door) {
@@ -516,6 +519,7 @@ export class IndiaBuildings {
       const w = this._toWorld(b, lx, lz, {});
       this.lootSpots.push({ x: w.x, y: s.y + ly, z: w.z });
     }
+    return b;
   }
 
   _toLocal(b, x, z, out = _l) {
@@ -534,7 +538,7 @@ export class IndiaBuildings {
   /** The building (x, z) is inside, or null. */
   inside(x, z, margin = 0) {
     for (const b of this.list) {
-      if (Math.abs(x - b.x) > b.radius || Math.abs(z - b.z) > b.radius) continue;
+      if (b.destroyed || Math.abs(x - b.x) > b.radius || Math.abs(z - b.z) > b.radius) continue;
       const l = this._toLocal(b, x, z);
       if (l.x > b.x0 + margin && l.x < b.x1 - margin && l.z > b.z0 + margin && l.z < b.z1 - margin) return b;
     }

@@ -70,6 +70,10 @@ import { CHEATS, CHEAT_BY_ID, CheatReader } from "./cheats/Cheats.js";
 import { Ordnance } from "./cheats/Ordnance.js";
 import { StyleFilter } from "./render/StyleFilter.js";
 import { Demolition } from "./world/Demolition.js";
+import { rangesBounds, eraseRanges, restoreRanges } from "./world/Collapse.js";
+import { Asteroid, ASTEROID_FLIGHT } from "./world/Asteroid.js";
+import { GiantSnakes, GiantSpiders, DEAD as BEAST_DEAD } from "./creatures/Beasts.js";
+import { Beams } from "./cheats/Beams.js";
 import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "./net/RemotePlayers.js";
 import { MonsterSync } from "./net/MonsterSync.js";
 import { MonsterAudio } from "./audio/MonsterAudio.js";
@@ -1313,12 +1317,12 @@ function touchKey(code, pressed) {
 window.addEventListener("keydown", e => {
   if (e.code === "Tab") e.preventDefault(); // keep focus from jumping around the page
   // Enter / Y / "/" opens the room chat (the BR host's Enter still starts the match)
-  if (!e.repeat && (CHAT_KEYS.has(e.code) || e.code === bindings.code("chat")) && !(e.code === "Enter" && brHostCanStart()) && openChat()) {
+  // Letters that are part of a cheat code do not also fire the game actions (Y must not open the chat mid-code; movement still works)
+  const inCode = !e.repeat && isLocked() && !lobby?.open && !chat.isOpen && cheatReader.key(e.code);
+  if (!inCode && !e.repeat && (CHAT_KEYS.has(e.code) || e.code === bindings.code("chat")) && !(e.code === "Enter" && brHostCanStart()) && openChat()) {
     e.preventDefault(); // or the key's character lands in the chat box
     return;
   }
-  // Letters that are part of a cheat code don't also fire the game's actions (movement still works)
-  const inCode = !e.repeat && isLocked() && !lobby?.open && !chat.isOpen && cheatReader.key(e.code);
   setKey(e.code, true, e.repeat || inCode);
 });
 window.addEventListener("keyup", e => setKey(e.code, false, false));
@@ -2381,6 +2385,7 @@ const pvpDamage = new Map(); // player id → damage from this shot
 const pvpHead = new Map();
 
 function fireShot(def) {
+  if (chaos.gun) { fireSuper(chaos.gun); return; }   // (cheat: a super-weapon instead of bullets, no ammo used)
   inventory.consumeRound();
   timeSinceShot = 0;
 
@@ -2433,6 +2438,14 @@ function fireShot(def) {
     }
     if (!hit) continue;
 
+    if (_shotResult.body.beast) {
+      const { owner, i: beastSlot, head: onHead } = _shotResult.body.beast;
+      owner.hit(beastSlot, def.damage, localTarget.id, onHead);
+      effects.impact(_hitPoint, -_shotDir.x, 0.3, -_shotDir.z, "blood", onHead ? 18 : 8);
+      anyHit = true;
+      anyHead ||= onHead;
+      continue;
+    }
     const zombie = _shotResult.body.zombie;
     const victim = _shotResult.body.playerTarget;
     // (A teammate stops the bullet but takes no damage: there's no friendly fire)
@@ -2855,6 +2868,7 @@ function updatePickups(delta) {
           addPrompt("pillionBack", "Sit behind", "Facing back", "jump");
         }
       }
+      if (car.overturned && drive.on) addPrompt("jump", "Flip it back", car.spec.label, "jump");
       if (inventory.fuelCans > 0 && car.fuel < car.spec.fuelMax - 1) {
         addPrompt("refuel", "Refuel", `${inventory.fuelCans} petrol can${inventory.fuelCans > 1 ? "s" : ""}`, "fuel", fuel);
       }
@@ -3428,6 +3442,7 @@ function updatePostFx(realDt) {
     health: playerHealth / MAX_HEALTH,
     dead: playerHealth <= 0 && !brWatching(),
     slowmo: THREE.MathUtils.clamp((1 - timeScale) / (1 - WHEEL_SLOWMO), 0, 1),
+    apoc: chaos.apoc,
     frenzy: killStreak.frenzy,
     cave: caveDepth,
     scope: scopeBlend,
@@ -4328,6 +4343,7 @@ async function loadDetailedGear() {
   for (const { meshes } of groundLoot) for (const im of meshes) show.add(new THREE.InstancedMesh(im.geometry, im.material, 1));
   show.position.copy(camera.position);
   await renderer.compileAsync(show, camera, scene);
+  await readyTextures(show);
   for (const g of groundLoot) g.use();
   setGearModels(lib);
 }
@@ -4607,24 +4623,27 @@ async function loadWorld() {
 
   // The college gate across the North Road (after the terrain: it stands on it)
   if (gateGltf) {
-    collegeGate = placeCollegeGate({
+    buildCaps.gate = captureBuild(() => placeCollegeGate({
       gltf: gateGltf, scene, world, material: staticMaterial, roads, groundAt: groundHeight, mapObstacles, navObstacles,
-    });
+    }));
+    collegeGate = buildCaps.gate.result;
   }
   // The CSE building, on its flattened grounds by the road
   if (cseGltf) {
-    cseBuilding = placeCseBuilding({
+    buildCaps.cse = captureBuild(() => placeCseBuilding({
       gltf: cseGltf, scene, world, material: staticMaterial, roads, groundAt: groundHeight, mapObstacles, navObstacles, chunks,
       anisotropy: Math.min(renderer.capabilities.getMaxAnisotropy(), QUALITY.anisotropy),
-    });
+    }));
+    cseBuilding = buildCaps.cse.result;
     townLabels.push({ name: CSE_BUILDING.name, x: CSE_BUILDING.x, z: CSE_BUILDING.z });
   }
   // The college workshop, on its flattened grounds by the road
   if (workshopGltf) {
-    collegeWorkshop = placeCollegeWorkshop({
+    buildCaps.shop = captureBuild(() => placeCollegeWorkshop({
       gltf: workshopGltf, scene, world, material: staticMaterial, roads, groundAt: groundHeight, mapObstacles, navObstacles, chunks,
       anisotropy: Math.min(renderer.capabilities.getMaxAnisotropy(), QUALITY.anisotropy),
-    });
+    }));
+    collegeWorkshop = buildCaps.shop.result;
     townLabels.push({ name: COLLEGE_WORKSHOP.name, x: COLLEGE_WORKSHOP.x, z: COLLEGE_WORKSHOP.z });
   }
   // The rest of the campus round the cricket ground (world/Campus.js)
@@ -4706,6 +4725,7 @@ async function loadWorld() {
     addDebrisPile(x, z);
   }
   atmosphere.setSources(fireSpots);
+  chaos.baseFires = fireSpots;
 
   // Drivable vehicles: the Thar uses a stand-in jeep until its model is in public/models/india/
   headlight = new THREE.SpotLight(0xffe6b8, 0, 52, 0.5, 0.5, 1.3);
@@ -5057,6 +5077,32 @@ const remotePlayers = new RemotePlayers({
 });
 // Smoke hides enemy name tags in the battle royale
 remotePlayers.concealed = (from, to) => smokeFX.blocks(from, to);
+// A new character's shaders and textures are made ready off to the side, a texture a frame,
+// before it's shown: creating them all at first sight froze the game for up to 0.7 s
+const TEX_SLOTS = ["map", "normalMap", "roughnessMap", "metalnessMap", "emissiveMap", "aoMap", "alphaMap"];
+const _readyTextures = new WeakSet();
+const _nextFrame = () => new Promise(r => requestAnimationFrame(r));
+let _prepQueue = Promise.resolve();
+async function prepareModel(root) {
+  postFx.begin();      // (tone mapping and colour space are part of every program)
+  const done = renderer.compileAsync(root, camera, scene);
+  renderer.setRenderTarget(null);
+  await done;
+  await readyTextures(root);
+}
+
+/** Hands the graphics card a model's textures, one a frame (a whole set at once is what freezes). */
+async function readyTextures(root) {
+  const textures = new Set();
+  root.traverse(o => { for (const m of [].concat(o.material ?? [])) for (const k of TEX_SLOTS) if (m?.[k]?.isTexture) textures.add(m[k]); });
+  for (const t of textures) {
+    if (_readyTextures.has(t)) continue;
+    _readyTextures.add(t);
+    renderer.initTexture(t);
+    await _nextFrame();
+  }
+}
+remotePlayers.prepare = root => (_prepQueue = _prepQueue.then(() => prepareModel(root)).catch(err => console.warn(err)));
 // Teammates' and enemies' footsteps, from where they are
 const _stepAt = { x: 0, y: 0, z: 0 };
 remotePlayers.onStep = (p, x, feetY, z, vol) => {
@@ -5666,6 +5712,7 @@ function netTick(delta) {
         ? [+drive.car.x.toFixed(2), +drive.car.z.toFixed(2), +drive.car.yaw.toFixed(3), +drive.car.speed.toFixed(2), +drive.car.fuel.toFixed(1), drive.car.index, ...drive.car.netExtra()]
         : undefined,
       rd: ride.on ? [ride.car.index, ride.facing] : undefined,   // riding pillion: [bike, facing]
+      rt: ropeTilt ? +ropeTilt.toFixed(2) : undefined,           // leaning into a rope descent
     });
   }
   if (!net.isHost) return;
@@ -5813,6 +5860,7 @@ function vehicleSpawns(roads) {
 
 let solidKind = 0;
 let solidHit = null;     // the mapObstacles entry a vehicle last ran into (a pole, a stall…)
+let solidVeh = null;     // the other vehicle it last ran into
 /** True if a circle at (x, z) overlaps anything solid on the obstacle list (or the map edge). self: a vehicle to ignore. */
 // mapObstacles in a grid for solidAt, which a moving vehicle asks several times
 // a frame (it used to scan all of them each time: ~8 % of the main thread while
@@ -5869,7 +5917,7 @@ function solidAt(x, z, r, self = null) {
     for (const v of vehicles) {
       if (v === self) continue;
       const rr = v.spec.width * 0.6 + r, dx = x - v.x, dz = z - v.z;
-      if (dx * dx + dz * dz < rr * rr) return true;
+      if (dx * dx + dz * dz < rr * rr) { solidVeh = v; return true; }
     }
   }
   solidKind = prevKind;
@@ -6326,7 +6374,17 @@ function releaseRope() {
 }
 
 /** The hook flying out, the rope drawn; every frame. */
+const ROPE_FACE_DOWN = 1.15;      // rad: leaning head-first toward the ground on the way down
+let ropeTilt = 0;
+function ropeTiltTo(want, delta) {
+  ropeTilt += (want - ropeTilt) * (1 - Math.exp(-9 * delta));
+  if (Math.abs(ropeTilt) < 0.003 && want === 0) ropeTilt = 0;
+  characterRoot.rotation.order = "YXZ";
+  characterRoot.rotation.x = ropeTilt;
+}
+
 function updateRope(delta) {
+  if (ropeTilt !== 0 && !(rope.on && (rope.phase === "rappel" || rope.phase === "zip"))) ropeTiltTo(0, delta);
   rope.cd = Math.max(0, rope.cd - delta);
   for (const [id, r] of remoteRopes) {
     r.t += delta;
@@ -6456,7 +6514,10 @@ function updateRopeMove(delta) {
     // Rappelling, you bounce off the wall in little hops
     if (rope.phase === "rappel") soldier.ropePhase = rope.t * 1.4;
     const hx = rope.to.x - rope.pos.x, hz = rope.to.z - rope.pos.z;
-    if (hx * hx + hz * hz > 0.04) bodyYaw = rope.phase === "rappel" ? Math.atan2(-hx, -hz) : Math.atan2(hx, hz);
+    // Going down, you look where you're going: the whole body turned to the ground ahead and leaning into it
+    if (hx * hx + hz * hz > 0.04) bodyYaw = Math.atan2(hx, hz);
+    const down = rope.pos.y - rope.to.y, level = Math.hypot(hx, hz);
+    ropeTiltTo(rope.phase === "rappel" ? ROPE_FACE_DOWN : down > 1 ? Math.min(ROPE_FACE_DOWN, Math.atan2(down, level)) : 0, delta);
     if (d <= step + 0.02) {
       releaseRope();
       sfx.footstep(footSurface(rope.pos.x, rope.pos.y, rope.pos.z), 0.9);
@@ -6581,7 +6642,16 @@ function updateDriving(delta) {
   // Fording the river: the water drags at you
   if (surf.water > 0.25) car.speed *= Math.exp(-Math.min(2.5, surf.water * 2) * delta);
   progress.drive(Math.abs(car.speed) * delta);
+  if (car.overturned && keys.jump) { car.right(); damageVehicle(car, 8); sfx.equip(); }
   jumpQueued = false;
+  const landing = car.takeLanding();
+  if (landing > 7) {
+    damageVehicle(car, (landing - 7) * 2.2);
+    cameraTrauma = Math.min(1, cameraTrauma + Math.min(0.7, landing * 0.05));
+    _engineAt.x = car.x; _engineAt.y = car.y; _engineAt.z = car.z;
+    sfx.thud(_engineAt, landing > 12);
+    if (landing > 14) dealDamageToPlayer((landing - 14) * 3, 0, 0, 0.5);
+  }
   const hit = vehicleHit(car, crash);
   if (hit && crash > 10 && !car.contact.scrape) dealDamageToPlayer((crash - 10) * 3, 0, 0, 0.5);
   // The camera swings in behind you unless you're looking around with the mouse
@@ -6600,10 +6670,29 @@ const crashLight = lightPool.adopt(new THREE.PointLight(0xffb060, 0, 16, 1.6), 2
 const crashFX = new CrashFX(scene, IS_TOUCH ? 0.5 : QUALITY.post === "off" ? 0.6 : 1);
 const _crashPaint = [0.3, 0.3, 0.32, 0.4];
 
+const VEH_LAUNCH_SPEED = 8;     // m/s into another vehicle: both go up
+/** A real head-on: they both leave the ground and come down where they come down. */
+function crashLaunch(a, b, crash) {
+  const dx = b.x - a.x, dz = b.z - a.z, d = Math.hypot(dx, dz) || 1;
+  const up = Math.min(15, crash * 0.72), side = Math.min(13, crash * 0.6), spin = (a.index % 2 ? 1 : -1) * Math.min(7, 2.8 + crash * 0.18);
+  const throwIt = (v, sx, sz, s) => {
+    if (v.spec.heavy) return;
+    v.launch(up, sx * side, sz * side, s);
+    net.send({ t: "vl", i: v.index, v: +up.toFixed(1), x: +(sx * side).toFixed(1), z: +(sz * side).toFixed(1), s: +s.toFixed(2) });
+  };
+  throwIt(a, -dx / d, -dz / d, spin);
+  throwIt(b, dx / d, dz / d, -spin);
+  _boom.set((a.x + b.x) / 2, a.y + 1, (a.z + b.z) / 2);
+  sfx.thud(_boom, true);
+  effects.explosion(_boom);
+  cameraTrauma = 1;
+}
+net.on("vl", m => { const v = vehicles[m.i]; if (v && (v.driver === null || v.driver === "local")) v.launch(m.v, m.x, m.z, m.s); });
+
 /** After car.drive(): the effects of what it just hit, here and on everyone else's screen. True on a new hit. */
 function vehicleHit(car, crash) {
   const c = car.contact;
-  if (!c.on) return false;
+  if (!c.on) { solidVeh = null; return false; }
   const now = performance.now() / 1000;
   const kind = solidKind;
   const sp = Math.hypot(c.vx, c.vz);
@@ -6615,6 +6704,8 @@ function vehicleHit(car, crash) {
     }
   }
   if (crash < CRASH_MIN || now < car.nextHit) return false;
+  if (solidVeh && crash >= VEH_LAUNCH_SPEED) crashLaunch(car, solidVeh, crash);
+  solidVeh = null;
   car.nextHit = now + 0.22;
   const s = THREE.MathUtils.clamp((crash - CRASH_MIN) / (CRASH_FULL - CRASH_MIN), 0.05, 1);
   vehicleCrashFx(car, c.x, c.z, c.nx, c.nz, c.vx, c.vz, s, kind);
@@ -6761,12 +6852,15 @@ const HOUSE_HP = 100, CITY_HP = 160;
 const SHELL_COOLDOWN = 1.5, BOMB_COOLDOWN = 0.45, SHELL_RANGE = 320;
 const RAIN_TIME = 18, RAIN_GAP = 0.28, RAIN_SPREAD = 70, RAIN_HEIGHT = 150;
 const BASE_GRAVITY = -20, MOON_GRAVITY = -5, TURBO = 2.4, HEAD_SIZE = 2.7;
-const chaos = { filter: null, moon: false, heads: false, speed: false, rainT: 0, rainGap: 0, gunCd: 0 };
+const chaos = { filter: null, gun: null, moon: false, heads: false, speed: false, rainT: 0, rainGap: 0, gunCd: 0, ast: null, quake: 0, apoc: 0, autoT: 0, autoDone: false, held: null, baseFires: null, beastHome: null, beastT: 0 };
 const styleFilter = new StyleFilter(renderer);
 const demolition = new Demolition({ scene, groundAt: (x, z) => groundHeight(x, z) });
 const ordnance = new Ordnance({
   scene, world, groundAt: (x, z) => groundHeight(x, z),
-  onImpact: (kind, x, y, z, by) => detonate(x, y, z, kind === "bomb" ? BOMB_POWER : METEOR_POWER, by),
+  onImpact(kind, x, y, z, by) {
+    if (kind === "orb") { net.send({ t: "hole", x: +x.toFixed(2), y: +(y + 1.6).toFixed(2), z: +z.toFixed(2) }); startHole(x, y + 1.6, z, by); }
+    else detonate(x, y, z, kind === "bomb" ? BOMB_POWER : kind === "rocket" ? 26 : METEOR_POWER, by);
+  },
 });
 const _boom = new THREE.Vector3(), _muz = new THREE.Vector3(), _aimT = new THREE.Vector3();
 const _gunFrom = new CANNON.Vec3(), _gunTo = new CANNON.Vec3(), _gunHit = new CANNON.RaycastResult();
@@ -6777,13 +6871,13 @@ const cheatReader = new CheatReader(useCheat);
 function useCheat(def) {
   const msg = { t: "cheat", c: def.id };
   if (def.toggle) {
-    msg.on = !(def.id === "moon" ? chaos.moon : def.id === "heads" ? chaos.heads : def.id === "speed" ? chaos.speed : chaos.filter === def.id);
+    msg.on = !(def.id === "moon" ? chaos.moon : def.id === "heads" ? chaos.heads : def.id === "speed" ? chaos.speed : def.weapon ? chaos.gun === def.id : chaos.filter === def.id);
   }
   if (def.id === "tank" || def.id === "plane") {
     const v = vehicles.find(c => c.kind === def.id && c.stowed) ?? vehicles.find(c => c.kind === def.id && c.driver === null);
-    const at = cheatSpot(def.id === "plane" ? 16 : 10);
+    const at = def.id === "plane" ? cheatRunway() : cheatSpot(10);
     if (!v) { inventoryUI.feed(`Every ${v?.spec.label ?? def.label} is in use`, "info"); return; }
-    Object.assign(msg, { i: v.index, x: +at.x.toFixed(2), z: +at.z.toFixed(2), yaw: +aimYaw.toFixed(3) });
+    Object.assign(msg, { i: v.index, x: +at.x.toFixed(2), z: +at.z.toFixed(2), yaw: +(at.yaw ?? aimYaw).toFixed(3) });
   }
   net.send(msg);
   applyCheat(msg, myName || "You");
@@ -6801,14 +6895,38 @@ function cheatSpot(d) {
   return { x: p.x + sy * d, z: p.z + cy * d };
 }
 
+/** Near you, the spot and heading with the longest clear run: a plane needs room to take off. */
+function cheatRunway() {
+  const p = characterBody.position;
+  let best = null, bestRun = -1;
+  for (const [ox, oz] of [[0, 14], [14, 0], [-14, 0], [0, -14], [24, 24], [-24, 24], [24, -24], [-24, -24]]) {
+    const x = p.x + ox, z = p.z + oz;
+    if (solidAt(x, z, 4) || waterDepthAt(x, z) > 0.2) continue;
+    for (let i = 0; i < 16; i++) {
+      const yaw = (i / 16) * Math.PI * 2, sy = Math.sin(yaw), cy = Math.cos(yaw);
+      let run = 0;
+      // Against the 2D list, and the real colliders (not everything solid is on the list)
+      while (run < 120) {
+        const ax = x + sy * run, az = z + cy * run, bx = x + sy * (run + 5), bz = z + cy * (run + 5);
+        if (solidAt(bx, bz, 3) || waterDepthAt(bx, bz) > 0.2 || _flyEnv.hit(ax, groundHeight(ax, az) + 2, az, bx, groundHeight(bx, bz) + 2, bz)) break;
+        run += 5;
+      }
+      if (run > bestRun) { bestRun = run; best = { x, z, yaw }; }
+    }
+  }
+  return best ?? { ...cheatSpot(16), yaw: aimYaw };
+}
+
 function applyCheat(m, who) {
   const def = CHEAT_BY_ID.get(m.c);
   if (!def) return;
+  if (def.filter) {
+    chaos.filter = m.on ? m.c : chaos.filter === m.c ? null : chaos.filter;
+    styleFilter.set(chaos.filter);
+  }
+  if (def.weapon) chaos.gun = m.on ? m.c : chaos.gun === m.c ? null : chaos.gun;
   switch (m.c) {
-    case "toon": case "bw": case "sketch":
-      chaos.filter = m.on ? m.c : chaos.filter === m.c ? null : chaos.filter;
-      styleFilter.set(chaos.filter);
-      break;
+    case "doom": hostAsteroid(); break;
     case "tank": case "plane": vehicles[m.i]?.deploy(m.x, m.z, m.yaw); break;
     case "rain": if (!net.isClient) { chaos.rainT = RAIN_TIME; chaos.rainGap = 0; } break;
     case "moon": chaos.moon = !!m.on; world.gravity.y = chaos.moon ? MOON_GRAVITY : BASE_GRAVITY; break;
@@ -6846,12 +6964,21 @@ function applyBoom(x, y, z, power, by) {
   effects.explosion(_boom);
   fireFX.blast(x, y, z);
   onGrenadeExplode(_boom, by);
-  demolishAround(x, z, power);
+  for (const b of beasts) b.blast(x, z, GRENADE.radius, power, by);
+  demolishAround(x, z, power, power === PLOUGH_POWER ? 2 : Math.min(12, 3 + power / 35));
+  // Poles and stalls go too
+  const reach = Math.min(12, 3 + power / 35);
+  for (const pole of powerLines?.poles ?? []) {
+    const dx = pole.x - x, dz = pole.z - z;
+    if (dx * dx + dz * dz < reach * reach) powerLines.knock(pole, dx || 1, dz);
+  }
+  for (const s of shops ?? []) {
+    if (!s.broken && Math.hypot(s.x - x, s.z - z) < reach) shops.smash?.(s.index, performance.now() / 1000);
+  }
 }
 
 /** Buildings in reach of a blast lose health; at zero they come down. */
-function demolishAround(x, z, power) {
-  const r = 3 + power / 35;
+function demolishAround(x, z, power, r) {
   for (const h of houses?.houses ?? []) {
     if (h.destroyed || Math.abs(x - h.x) > h.radius + r || Math.abs(z - h.z) > h.radius + r || !houses.isInside(h, x, z, -r)) continue;
     h.hp = (h.hp ?? HOUSE_HP) - power;
@@ -6861,6 +6988,15 @@ function demolishAround(x, z, power) {
     if (b.destroyed || !city.near(b, x, z, r)) continue;
     b.hp = (b.hp ?? CITY_HP) - power;
     if (b.hp <= 0) bringDown(city.demolish(b, world));
+  }
+  for (const u of destructibles) {
+    if (u.destroyed) continue;
+    const dx = x - u.x, dz = z - u.z;
+    if (Math.abs(dx) > u.hw + u.hd + r || Math.abs(dz) > u.hw + u.hd + r) continue;
+    const c = Math.cos(u.rot), s = Math.sin(u.rot);
+    if (Math.abs(dx * c - dz * s) > u.hw + r || Math.abs(dx * s + dz * c) > u.hd + r) continue;
+    u.hp -= power;
+    if (u.hp <= 0) destructibleDown(u);
   }
 }
 
@@ -6889,8 +7025,10 @@ function bringDown(info, instant = false) {
 function restoreBuildings() {
   for (const h of houses?.houses ?? []) houses.restore(h);
   for (const b of city?.buildings ?? []) city.restore(b, world);
+  for (const u of destructibles) { u.hp = u.max; if (u.destroyed) { u.destroyed = false; u.up(); } }
   demolition.clear();
   ordnance.clear();
+  clearDisaster();
 }
 
 /** For someone joining: which styles are on and what's already been flattened. */
@@ -6898,18 +7036,22 @@ function cheatWorld() {
   const dem = [];
   (houses?.houses ?? []).forEach((h, i) => { if (h.destroyed) dem.push(0, i); });
   (city?.buildings ?? []).forEach((b, i) => { if (b.destroyed) dem.push(1, i); });
-  return { ch: [chaos.filter, chaos.moon ? 1 : 0, chaos.heads ? 1 : 0, chaos.speed ? 1 : 0], dem };
+  destructibles.forEach((u, i) => { if (u.destroyed) dem.push(2, i); });
+  return { ch: [chaos.filter, chaos.moon ? 1 : 0, chaos.heads ? 1 : 0, chaos.speed ? 1 : 0, chaos.gun], dem, ast: disasterWorld() };
 }
 
-function applyCheatWorld({ ch, dem }) {
+function applyCheatWorld({ ch, dem, ast }) {
+  applyDisasterWorld(ast);
   if (ch) {
     chaos.filter = ch[0]; styleFilter.set(ch[0]);
     chaos.moon = !!ch[1]; world.gravity.y = chaos.moon ? MOON_GRAVITY : BASE_GRAVITY;
     chaos.heads = !!ch[2]; setHeadScale(chaos.heads ? HEAD_SIZE : 1);
     chaos.speed = !!ch[3];
+    chaos.gun = ch[4] ?? null;
   }
   for (let i = 0; dem && i + 1 < dem.length; i += 2) {
-    if (dem[i] === 0) { const h = houses?.houses[dem[i + 1]]; if (h) bringDown(houses.demolish(h), true); }
+    if (dem[i] === 2) { const u = destructibles[dem[i + 1]]; if (u) destructibleDown(u, true); }
+    else if (dem[i] === 0) { const h = houses?.houses[dem[i + 1]]; if (h) bringDown(houses.demolish(h), true); }
     else { const b = city?.buildings[dem[i + 1]]; if (b) bringDown(city.demolish(b, world), true); }
   }
 }
@@ -6959,9 +7101,22 @@ function updateCheatGuns(delta, car) {
   else if (car.spec.plane && car.air) dropBomb(car);
 }
 
+const _flyFrom = new CANNON.Vec3(), _flyTo = new CANNON.Vec3(), _flyRes = new CANNON.RaycastResult();
+const flyOpts = { collisionFilterMask: GROUP_WORLD, skipBackfaces: true };
+const _flyEnv = {
+  blocked: (x, z, r, self) => solidAt(x, z, r, self),
+  surface: (x, z) => Math.max(surfaceHeight(x, z), SEA_Y),
+  hit(x0, y0, z0, x1, y1, z1) {
+    _flyFrom.set(x0, y0, z0); _flyTo.set(x1, y1, z1);
+    _flyRes.reset();
+    // (the ground itself is fly()'s landing check: this is for things standing on it)
+    return world.raycastClosest(_flyFrom, _flyTo, flyOpts, _flyRes) && _flyRes.body.shapes[0]?.type !== CANNON.Shape.types.HEIGHTFIELD;
+  },
+};
+
 /** Flying: W / S throttle, A / D bank, the mouse (up / down) the nose; fire drops bombs. */
 function updateFlying(delta, car, throttle, steer) {
-  const crash = car.fly(delta, { throttle, steer, pitch: THREE.MathUtils.clamp((aimPitch + 0.14) * 1.9, -1, 1) }, solidAt);
+  const crash = car.fly(delta, { throttle, steer, pitch: THREE.MathUtils.clamp((aimPitch + 0.14) * 1.9, -1, 1) }, _flyEnv);
   jumpQueued = false;
   if (performance.now() / 1000 - drive.lastMouse > 0.6) aimYaw += angleDiff(car.yaw, aimYaw) * (1 - Math.exp(-3 * delta));
   if (!car.air) { vehicleRunOver(car); smashCrates(car); }
@@ -6978,6 +7133,9 @@ function updateChaos(delta, realDelta) {
   styleFilter.update(realDelta);
   ordnance.update(delta);
   demolition.update(delta);
+  beams.update(delta);
+  updateHoles(delta);
+  updateDisaster(delta);
   if (chaos.rainT <= 0) return;
   chaos.rainT -= delta;
   chaos.rainGap -= delta;
@@ -6993,6 +7151,515 @@ function updateChaos(delta, realDelta) {
   const m = { t: "bomb", k: "meteor", x: +x.toFixed(2), y: +(groundHeight(x, z) + RAIN_HEIGHT).toFixed(2), z: +z.toFixed(2), vx: +((Math.random() - 0.5) * 14).toFixed(2), vy: -85, vz: +((Math.random() - 0.5) * 14).toFixed(2) };
   ordnance.spawn("meteor", m.x, m.y, m.z, m.vx, m.vy, m.vz, true, localTarget.id);
   net.send(m);
+}
+
+// ── Everything else that can come down: the college, shops and offices, plots, towers ──
+// In a fixed order (the same on every client), so a destruction is just an index on the wire.
+const destructibles = [];
+const buildCaps = { cse: null, shop: null, gate: null };
+const _zeroM = new THREE.Matrix4().makeScale(0, 0, 0);
+const _tmpM = new THREE.Matrix4();
+
+function hideBodies(list) { for (const b of list) world.removeBody(b); }
+function showBodies(list) { for (const b of list) world.addBody(b); }
+function zeroObstacles(list) { for (const o of list) { if (o._w === undefined) { o._w = o.w; o._d = o.d; o._r = o.r; } if (o.type === "circle") o.r = 0; else o.w = o.d = 0; } }
+function backObstacles(list) { for (const o of list) { if (o.type === "circle") o.r = o._r; else { o.w = o._w; o.d = o._d; } } }
+
+/** Runs a build, noting every body, scene object and obstacle it adds. */
+function captureBuild(fn) {
+  const bodies = [], objects = [], m0 = mapObstacles.length, n0 = navObstacles.length;
+  const addBody = world.addBody, add = scene.add;
+  world.addBody = function (b) { bodies.push(b); return addBody.call(world, b); };
+  scene.add = function (...o) { objects.push(...o); return add.apply(scene, o); };
+  let result;
+  try { result = fn(); } finally { world.addBody = addBody; scene.add = add; }
+  return { result, bodies, objects, obstacles: [...new Set([...mapObstacles.slice(m0), ...navObstacles.slice(n0)])] };
+}
+
+/** A whole model built as one thing (a college block with its own grounds). */
+function destructibleWhole(cap, hp, h, color, api, off) {
+  if (!cap?.result) return;
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const o of cap.obstacles) { const r = Math.hypot(o.w ?? 1, o.d ?? 1) / 2; x0 = Math.min(x0, o.x - r); x1 = Math.max(x1, o.x + r); z0 = Math.min(z0, o.z - r); z1 = Math.max(z1, o.z + r); }
+  const unit = { x: (x0 + x1) / 2, z: (z0 + z1) / 2, hw: (x1 - x0) / 2, hd: (z1 - z0) / 2, rot: 0, base: groundHeight((x0 + x1) / 2, (z0 + z1) / 2), h, color, hp, max: hp, destroyed: false,
+    down() { hideBodies(cap.bodies); zeroObstacles(cap.obstacles); for (const o of cap.objects) o.parent?.remove(o); },
+    up() { showBodies(cap.bodies); backObstacles(cap.obstacles); for (const o of cap.objects) scene.add(o); },
+  };
+  // Once it's gone, its doors, stairs and floors don't exist either
+  for (const [name, gone] of Object.entries(off)) {
+    const fn = api[name];
+    if (typeof fn === "function") api[name] = (...a) => (unit.destroyed ? (typeof gone === "function" ? gone(...a) : gone) : fn.apply(api, a));
+  }
+  destructibles.push(unit);
+}
+
+/** This blast or shot came from your own Duo / Squad. */
+function brFriendly(by) { return isBR() && isMate(net.id, by); }
+
+/** Called once the world is built. */
+function registerDestructibles(cse, shop, gate) {
+  const offInside = { inside: false, doorAt: null, doorAssist: false, surfaceAt: (x, z, ground) => ground };
+  destructibleWhole(cse, 480, 15, 0xc9bda6, cseBuilding ?? {}, offInside);
+  destructibleWhole(shop, 360, 10, 0xb0aaa0, collegeWorkshop ?? {}, { ...offInside, navigate: -1 });
+  destructibleWhole(gate, 140, 7, 0xbcae98, collegeGate ?? {}, { interaction: null });
+  for (const b of college?.buildings ?? []) {
+    if (!b.ranges?.length) continue;
+    const box = rangesBounds(b.ranges);
+    const obstacles = mapObstacles.filter(o => o.campus && !o.wall && Math.abs(o.x - box.x) < box.hw + 1 && Math.abs(o.z - box.z) < box.hd + 1);
+    destructibles.push({ ...box, rot: 0, color: 0xcbbda5, hp: 240, max: 240, destroyed: false,
+      down() { eraseRanges(b.ranges); hideBodies(b.bodies); zeroObstacles(obstacles); },
+      up() { restoreRanges(b.ranges); showBodies(b.bodies); backObstacles(obstacles); },
+    });
+  }
+  for (const p of plots?.plots ?? []) {
+    if (!p.ranges?.length) continue;
+    const box = rangesBounds(p.ranges), obstacles = p.obstacles ?? [];
+    destructibles.push({ ...box, rot: 0, color: 0xa56a48, hp: 60, max: 60, destroyed: false,
+      down() { eraseRanges(p.ranges); hideBodies(p.bodies); zeroObstacles(obstacles); },
+      up() { restoreRanges(p.ranges); showBodies(p.bodies); backObstacles(obstacles); },
+    });
+  }
+  for (const u of indiaBuildings?.units ?? []) {
+    const set = (inst, i, m) => { inst.setMatrixAt(i, m); inst.instanceMatrix.needsUpdate = true; };
+    destructibles.push({ x: u.s.x, z: u.s.z, hw: u.hw, hd: u.hd, rot: u.s.rot, base: u.s.y, h: u.h, color: u.kind === "truck" ? 0x8b3a2a : 0xc4b49c, hp: u.entry ? 180 : 70, max: u.entry ? 180 : 70, destroyed: false,
+      down() { for (const [inst, i] of u.s.instances) set(inst, i, _zeroM); hideBodies([u.body]); zeroObstacles([u.obstacle]); if (u.entry) u.entry.destroyed = true; },
+      up() { for (const [inst, i] of u.s.instances) set(inst, i, u.s.matrix); showBodies([u.body]); backObstacles([u.obstacle]); if (u.entry) u.entry.destroyed = false; },
+    });
+  }
+  for (const t of waterTowers?.towers ?? []) {
+    const parts = () => (waterTowers.meshes ?? []).map(im => im.userData.splitTo?.[t.index] ?? [im, t.index]);
+    destructibles.push({ x: t.x, z: t.z, hw: 3.5, hd: 3.5, rot: 0, base: t.y, h: 15, color: 0xa8a39a, hp: 120, max: 120, destroyed: false,
+      down() { t.saved = parts().map(([m, i]) => { m.getMatrixAt(i, _tmpM); const c = _tmpM.clone(); m.setMatrixAt(i, _zeroM); m.instanceMatrix.needsUpdate = true; return c; }); hideBodies([t.body]); zeroObstacles(t.obstacles); },
+      up() { parts().forEach(([m, i], k) => { m.setMatrixAt(i, t.saved[k]); m.instanceMatrix.needsUpdate = true; }); showBodies([t.body]); backObstacles(t.obstacles); },
+    });
+  }
+}
+
+function destructibleDown(u, instant = false) {
+  if (u.destroyed) return;
+  u.destroyed = true;
+  u.down();
+  bringDown({ x: u.x, z: u.z, base: u.base, w: u.hw * 2, d: u.hd * 2, h: u.h, rot: u.rot, color: u.color }, instant);
+}
+
+// ── Super-weapons: whatever gun you hold fires this instead (no ammo used) ───
+const SUPER = { rail: { cd: 0.6 }, hole: { cd: 3.2 }, bolt: { cd: 0.5 }, swarm: { cd: 1.4 } };
+const RAIL_DMG = 220, BOLT_DMG = 95, BOLT_JUMP = 18, BOLT_CHAIN = 6, HOLE_LIFE = 3.4, HOLE_PULL = 26, HOLE_DPS = 90;
+const COLORS = { rail: 0x5de8ff, bolt: 0xbcd0ff };
+let superNext = 0;
+const activeHoles = [];
+const beams = new Beams(scene);
+const _sa = new THREE.Vector3(), _sb = new THREE.Vector3(), _sd = new THREE.Vector3();
+const _rayFrom = new CANNON.Vec3(), _rayTo = new CANNON.Vec3(), _rayRes = new CANNON.RaycastResult();
+
+/** Damage whatever this body belongs to; true if it was something alive. */
+function superHit(body, dmg, dx, dz) {
+  if (!body) return false;
+  if (body.beast) { body.beast.owner.hit(body.beast.i, dmg, localTarget.id, body.beast.head); return true; }
+  if (body.zombie) { body.zombie.killCause = "gun"; hitMonster(body.zombie, dmg, dx * 8, dz * 8); return true; }
+  const t = body.playerTarget;
+  if (t && !t.local && isBR() && !brFriendly(t.id)) {
+    sendPvp(t.id, { d: Math.min(60, dmg * 0.3), hs: 0, w: "rifle", sx: +characterBody.position.x.toFixed(1), sz: +characterBody.position.z.toFixed(1) });
+    return true;
+  }
+  return false;
+}
+
+function fireRail(muz) {
+  camera.getWorldDirection(_aimT);
+  _rayFrom.set(camera.position.x, camera.position.y, camera.position.z);
+  let endX = camera.position.x + _aimT.x * SHELL_RANGE, endY = camera.position.y + _aimT.y * SHELL_RANGE, endZ = camera.position.z + _aimT.z * SHELL_RANGE;
+  let any = false, stopped = false;
+  const own = characterBody.collisionFilterGroup;
+  characterBody.collisionFilterGroup = 0;
+  // It goes straight through whatever's alive, and stops at the first wall
+  for (let n = 0; n < 8; n++) {
+    _rayTo.set(camera.position.x + _aimT.x * SHELL_RANGE, camera.position.y + _aimT.y * SHELL_RANGE, camera.position.z + _aimT.z * SHELL_RANGE);
+    _rayRes.reset();
+    if (!world.raycastClosest(_rayFrom, _rayTo, gunOpts, _rayRes)) break;
+    const p = _rayRes.hitPointWorld;
+    if (superHit(_rayRes.body, RAIL_DMG, _aimT.x, _aimT.z)) { any = true; _rayFrom.set(p.x + _aimT.x * 1.5, p.y + _aimT.y * 1.5, p.z + _aimT.z * 1.5); continue; }
+    endX = p.x; endY = p.y; endZ = p.z; stopped = true;
+    break;
+  }
+  characterBody.collisionFilterGroup = own;
+  _sb.set(endX, endY, endZ);
+  beams.beam(muz, _sb, COLORS.rail, 0.34, 0.42);
+  beams.beam(muz, _sb, 0xffffff, 0.1, 0.3);
+  net.send({ t: "sfire", k: "rail", p: [+muz.x.toFixed(2), +muz.y.toFixed(2), +muz.z.toFixed(2), +endX.toFixed(2), +endY.toFixed(2), +endZ.toFixed(2)] });
+  if (stopped) detonate(endX, endY + 0.3, endZ, 40, localTarget.id);
+  if (any) showHitMarker(false, false);
+  cameraTrauma = Math.min(1, cameraTrauma + 0.3);
+  sfx.gunshot(WEAPONS.sniper.sound, 1);
+}
+
+function fireBolt(muz) {
+  const pts = [+muz.x.toFixed(2), +muz.y.toFixed(2), +muz.z.toFixed(2)];
+  const hit = cheatAim(90);
+  const first = hit ? _gunHit.hitPointWorld : _gunTo;
+  pts.push(+first.x.toFixed(2), +first.y.toFixed(2), +first.z.toFixed(2));
+  let any = false;
+  if (hit && superHit(_gunHit.body, BOLT_DMG, _aimT.x, _aimT.z)) any = true;
+  // Then on to whatever's nearest, again and again
+  const seen = new Set([hit ? _gunHit.body : null]);
+  let x = first.x, y = first.y, z = first.z;
+  for (let n = 0; n < BOLT_CHAIN && any; n++) {
+    let best = null, bd = BOLT_JUMP, bx = 0, by = 0, bz = 0;
+    const consider = (body, px, py, pz) => {
+      if (!body || seen.has(body)) return;
+      const d = Math.hypot(px - x, py - y, pz - z);
+      if (d < bd) { bd = d; best = body; bx = px; by = py; bz = pz; }
+    };
+    for (const m of zombieManager?.active ?? []) if (!m.dying) consider(m.body, m.body.position.x, m.body.position.y, m.body.position.z);
+    for (const owner of beasts) for (const s of owner.slots) if (s.active && s.state !== BEAST_DEAD) consider(s.bodies[0], s.bodies[0].position.x, s.bodies[0].position.y, s.bodies[0].position.z);
+    if (isBR()) for (const t of remotePlayers.targets()) if (t.alive && !brFriendly(t.id)) consider(remotePlayers.players.get(t.id)?.body, t.pos.x, t.pos.y, t.pos.z);
+    if (!best) break;
+    seen.add(best);
+    superHit(best, BOLT_DMG * 0.8, 0, 0);
+    x = bx; y = by; z = bz;
+    pts.push(+x.toFixed(2), +y.toFixed(2), +z.toFixed(2));
+  }
+  beams.bolt(pts, COLORS.bolt);
+  net.send({ t: "sfire", k: "bolt", p: pts });
+  if (any) showHitMarker(false, false);
+  cameraTrauma = Math.min(1, cameraTrauma + 0.14);
+  sfx.play?.("equip", { vol: 0.5, rate: 1.9 });
+}
+
+function launchFrom(muz, kind, speed, spread) {
+  camera.getWorldDirection(_aimT);
+  const dx = _aimT.x + (Math.random() - 0.5) * spread, dy = _aimT.y + (Math.random() - 0.5) * spread, dz = _aimT.z + (Math.random() - 0.5) * spread;
+  const l = Math.hypot(dx, dy, dz) || 1;
+  const m = { t: "bomb", k: kind, x: +(muz.x + dx / l * 2).toFixed(2), y: +(muz.y + dy / l * 2).toFixed(2), z: +(muz.z + dz / l * 2).toFixed(2), vx: +(dx / l * speed).toFixed(2), vy: +(dy / l * speed).toFixed(2), vz: +(dz / l * speed).toFixed(2) };
+  ordnance.spawn(kind, m.x, m.y, m.z, m.vx, m.vy, m.vz, true, localTarget.id);
+  net.send(m);
+}
+
+/** A super-weapon fires instead of the gun. */
+function fireSuper(kind) {
+  const now = clock.elapsedTime;
+  if (now < superNext) return;
+  superNext = now + SUPER[kind].cd;
+  timeSinceShot = 0;
+  soldier.getMuzzleWorldPosition(_sa);
+  effects.muzzleFlash(_sa);
+  noteShot("me", characterBody.position.x, characterBody.position.z);
+  makeNoise(characterBody.position.x, characterBody.position.z, 40, "shot");
+  if (kind === "rail") fireRail(_sa);
+  else if (kind === "bolt") fireBolt(_sa);
+  else if (kind === "hole") { launchFrom(_sa, "orb", 42, 0); sfx.throwWhoosh(); }
+  else { for (let i = 0; i < 7; i++) launchFrom(_sa, "rocket", 62, 0.2); sfx.throwWhoosh(); cameraTrauma = Math.min(1, cameraTrauma + 0.18); }
+}
+net.on("sfire", m => {
+  if (m.k === "rail") { _sa.set(m.p[0], m.p[1], m.p[2]); _sb.set(m.p[3], m.p[4], m.p[5]); beams.beam(_sa, _sb, COLORS.rail, 0.34, 0.42); beams.beam(_sa, _sb, 0xffffff, 0.1, 0.3); sfx.gunshot(WEAPONS.sniper.sound, 0.8, _sa); }
+  else if (m.k === "bolt") beams.bolt(m.p, COLORS.bolt);
+});
+
+function startHole(x, y, z, by) {
+  beams.hole(x, y, z, HOLE_LIFE);
+  activeHoles.push({ x, y, z, t: HOLE_LIFE, by });
+  sfx.rumble(HOLE_LIFE, 0.5);
+}
+net.on("hole", m => startHole(m.x, m.y, m.z, m.from));
+
+function updateHoles(delta) {
+  for (let i = activeHoles.length - 1; i >= 0; i--) {
+    const h = activeHoles[i];
+    h.t -= delta;
+    // Everything nearby gets dragged in; you too
+    const p = characterBody.position, dx = h.x - p.x, dz = h.z - p.z, d = Math.hypot(dx, dz);
+    if (d < HOLE_PULL && d > 0.8 && playerHealth > 0 && !drive.on) {
+      const f = (1 - d / HOLE_PULL) * 90 * delta;
+      knockbackVel.x += dx / d * f; knockbackVel.z += dz / d * f;
+      if (d < 5) dealDamageToPlayer(HOLE_DPS * 0.4 * delta, 0, 0, 0.1);
+    }
+    if (!net.isClient) {
+      for (const m of zombieManager?.active ?? []) {
+        if (m.dying) continue;
+        const mx = h.x - m.body.position.x, mz = h.z - m.body.position.z, md = Math.hypot(mx, mz);
+        if (md < HOLE_PULL && md > 0.6) zombieManager.damage(m, HOLE_DPS * delta, mx / md * 3, mz / md * 3, h.by);
+      }
+      for (const b of beasts) b.blast(h.x, h.z, HOLE_PULL * 0.6, HOLE_DPS * delta, h.by);
+      if (isBR()) bots.burn(h.x, h.z, HOLE_PULL * 0.4, HOLE_DPS, delta, h.by);
+    }
+    if (h.t <= 0) {
+      activeHoles.splice(i, 1);
+      if (h.by === localTarget.id) detonate(h.x, h.y, h.z, BOMB_POWER, localTarget.id);
+    }
+  }
+}
+
+// ── The asteroid and what comes after it ─────────────────────────────────────
+const ASTEROID_AUTO_SOLO = 180, ASTEROID_AUTO_BR = 300;   // s in: it happens by itself, once
+const QUAKE_TIME = 8;
+const BLAST_RADIUS = 62;
+const asteroid = new Asteroid({ backdropScene: backdrop.scene, scene, groundAt: (x, z) => groundHeight(x, z) });
+// How hard they press. A battle royale is about the other players, so there they're few, slow
+// enough to walk away from, only notice you close by, and give up and go back to prowling.
+const PACE_BR = { max: 2, every: 45, first: 18, clear: 80, speed: 3.9, sense: 55, chase: 12, rest: 22, mercy: 15 };
+const PACE_HORDE = { max: 4, every: 18, first: 4.5, clear: 45, speed: 5.4, sense: 130, chase: 22, rest: 7, mercy: 6 };
+const beastPace = () => (isBR() ? PACE_BR : PACE_HORDE);
+const beastEnv = {
+  scene, world, net, material: staticMaterial, groundAt: (x, z) => groundHeight(x, z),
+  targets: snakeTargets,
+  pace: beastPace,
+  mercy: new Map(),
+  hurt(id, d, x, z) {
+    if (id === localTarget.id) dealDamageToPlayer(d, 0, 0, 0.8, x, z, "monster");
+    else if (isBotId(id)) bots.damage(id, d, false, null, "snake");
+    else net.send({ t: "hurt", to: id, d, kx: 0, kz: 0, sh: 0.8, sx: +x.toFixed(1), sz: +z.toFixed(1) });
+  },
+  grab(id, owner, slot, on) {
+    if (id === localTarget.id) setSnakeHold(on ? { owner, slot } : null);
+    else if (!isBotId(id)) net.send({ t: "sng", to: id, k: owner.kind, s: slot, on: on ? 1 : 0 });
+  },
+  plough(x, z) {
+    if (!houses?.houseAt(x, z) && !city?.buildingAt(x, z)) return;
+    detonate(x, groundHeight(x, z) + 2, z, PLOUGH_POWER, localTarget.id);
+  },
+  onKill(owner, slot, by, team) {
+    net.send({ t: "snk", l: owner.tune.label, by, team: team ? 1 : 0 });
+    snakeKilled(owner.tune.label, by, team);
+  },
+  hiss(x, z) { sfxAt("hiss", x, z); net.send({ t: "snh2", x, z }); },
+};
+const snakes = new GiantSnakes(beastEnv);
+const spiders = new GiantSpiders(beastEnv);
+const beasts = [snakes, spiders];
+const beastOf = k => (k === "p" ? spiders : snakes);
+
+/** Host: every so often something new comes out, snake or spider, well away from everyone. */
+function updateBeastSpawns(delta) {
+  const home = chaos.beastHome;
+  if (net.isClient || !home || (chaos.beastT -= delta) > 0) return;
+  const P = beastPace();
+  chaos.beastT = P.every;
+  if (beasts.reduce((n, b) => n + b.liveCount, 0) >= P.max) return;
+  const list = snakeTargets();
+  for (let i = 0; i < 24; i++) {
+    const a = Math.random() * 6.28, d = 6 + i * 7;
+    const x = home.x + Math.cos(a) * d, z = home.z + Math.sin(a) * d;
+    if (Math.hypot(x, z) > 440 || seaDepth(x, z) > 0 || list.some(t => Math.hypot(t.x - x, t.z - z) < P.clear)) continue;
+    const pick = beasts.filter(b => b.hasRoom);
+    if (pick.length) pick[(Math.random() * pick.length) | 0].spawnAt(x, z, home.x, home.z);
+    return;
+  }
+}
+
+const PLOUGH_POWER = 401;
+const _targetPool = [];
+function snakeTargets() {
+  const out = (snakeTargets.list ??= []);
+  out.length = 0;
+  let n = 0;
+  const entry = () => (_targetPool[n++] ??= { id: 0, x: 0, y: 0, z: 0, bot: false });
+  const onFoot = !isBR() || (!br.ghost && br.flight === PHASE_GROUND && br.state === "match");
+  if (playerHealth > 0 && onFoot && chaos.held === null) {
+    const e = entry(), p = characterBody.position;
+    e.id = localTarget.id; e.x = p.x; e.y = p.y; e.z = p.z; e.bot = false;
+    out.push(e);
+  }
+  for (const [id, p] of remotePlayers.players) {
+    if (!p.hasState || p.dead || p.phase !== PHASE_GROUND) continue;
+    const e = entry();
+    e.id = id; e.x = p.body.position.x; e.y = p.body.position.y; e.z = p.body.position.z; e.bot = isBotId(id);
+    out.push(e);
+  }
+  return out;
+}
+function sfxAt(what, x, z) {
+  const d = Math.hypot(x - camera.position.x, z - camera.position.z);
+  sfx[what](THREE.MathUtils.clamp(1.15 - d / 75, 0, 1));
+}
+net.on("snh2", m => sfxAt("hiss", m.x, m.z));
+net.on("snh", m => beastOf(m.k).hit(m.i, m.d, m.from, !!m.h));
+net.on("sn", m => beastOf(m.k).applyNet(m.l));
+net.on("sng", m => setSnakeHold(m.on ? { owner: beastOf(m.k), slot: m.s } : null));
+net.on("snk", m => snakeKilled(m.l, m.by, !!m.team));
+
+function snakeKilled(label, by, team) {
+  inventoryUI.feed(`${team ? "Together you brought down" : "Killed"} a giant ${label.toLowerCase()}`, "info");
+  gameHud.killFeed(by === localTarget.id ? (myName || "You") : brNameSafe(by), team ? `TEAM ${label}` : label, "#7ee05a", false);
+  if (by === localTarget.id) { killsThisLife++; onLocalKill(true); showHitMarker(true, true); sfx.kill(); postFx.kick(0.3, 0x7ee05a); }
+}
+function brNameSafe(id) { return remotePlayers.players.get(id)?.name ?? net.players.get(id)?.name ?? "Someone"; }
+
+/** Caught in the jaws ({ owner, slot }), or let go (null). */
+function setSnakeHold(hold) {
+  if (hold?.owner === chaos.held?.owner && hold?.slot === chaos.held?.slot) return;
+  chaos.held = hold;
+  if (hold === null) { characterBody.collisionResponse = true; return; }
+  exitVehicle();
+  cancelClimb();
+  if (rope.on) releaseRope();
+  characterBody.collisionResponse = false;
+  gameHud.showBanner({ title: "IT HAS YOU", sub: "Shoot its head before it swallows", color: "#ff3a1a", duration: 2.5 });
+  cameraTrauma = 1;
+  postFx.kick(0.5, 0xff2a1a);
+}
+
+const _mouth = new THREE.Vector3();
+function snakeHoldAfterStep() {
+  if (chaos.held === null) return;
+  if (playerHealth <= 0) { setSnakeHold(null); return; }
+  chaos.held.owner.mouth(chaos.held.slot, _mouth);
+  characterBody.position.set(_mouth.x, _mouth.y, _mouth.z);
+  characterBody.velocity.set(0, 0, 0);
+  moveVelocity.set(0, 0, 0);
+}
+
+/** Host: the sky falls. Somewhere you can see it but might survive it. */
+function hostAsteroid() {
+  if (net.isClient || chaos.ast) return;
+  const list = snakeTargets();
+  const t = list[(Math.random() * list.length) | 0];
+  const cx = t?.x ?? characterBody.position.x, cz = t?.z ?? characterBody.position.z;
+  let x = cx, z = cz;
+  for (let i = 0; i < 40; i++) {
+    const a = Math.random() * 6.28, r = 85 + Math.random() * 50;
+    const px = cx + Math.cos(a) * r, pz = cz + Math.sin(a) * r;
+    if (Math.hypot(px, pz) < 430 && seaDepth(px, pz) <= 0 && waterDepthAt(px, pz) < 0.1) { x = px; z = pz; break; }
+  }
+  net.send({ t: "ast", x: +x.toFixed(1), z: +z.toFixed(1) });
+  startAsteroid(x, z);
+}
+net.on("ast", m => startAsteroid(m.x, m.z));
+
+function startAsteroid(x, z) {
+  if (chaos.ast) return;
+  chaos.ast = { x, z, t: 0, hit: false };
+  chaos.autoDone = true;
+  asteroid.aim(x, z);
+  gameHud.showBanner({ title: "ASTEROID INCOMING", sub: "Look up. Run.", color: "#ff3a1a", duration: 5 });
+  sfx.spotted();
+  sfx.rumble(ASTEROID_FLIGHT + 1, 0.55);
+}
+
+function asteroidImpact(a) {
+  a.hit = true;
+  asteroid.hide();
+  const g = groundHeight(a.x, a.z);
+  chaos.quake = QUAKE_TIME;
+  chaos.apoc = 1;
+  asteroid.makeCrater(a.x, a.z);
+  const d = Math.hypot(a.x - camera.position.x, a.z - camera.position.z);
+  const near = THREE.MathUtils.clamp(1.25 - d / 340, 0.25, 1);
+  // The light of it, then the wave, then the ground
+  postFx.kick(0.8, 0xfff2d8);
+  for (const [dly, s] of [[0, 1], [0.22, 0.75], [0.55, 0.5]]) setTimeout(() => postFx.shockwave(0.5, 0.5, s * near, 0xffc890, 0.85, 1.4), dly * 1000);
+  sfx.explosion(null, 1.4);
+  setTimeout(() => sfx.explosion(null, 1), 180);
+  setTimeout(() => sfx.explosion(null, 0.7), 520);
+  sfx.rumble(QUAKE_TIME, 1);
+  for (let i = 0; i < 16; i++) {
+    const an = Math.random() * 6.28, r = Math.random() * 34;
+    const bx = a.x + Math.cos(an) * r, bz = a.z + Math.sin(an) * r;
+    setTimeout(() => fireFX.blast(bx, groundHeight(bx, bz) + 2 + Math.random() * 18, bz), i * 90);
+  }
+  for (let i = 0; i < 5; i++) fireFX.ground(a.x + (Math.random() - 0.5) * 28, a.z + (Math.random() - 0.5) * 28, 8, 45);
+  for (let i = 0; i < 3; i++) demolition.collapse({ x: a.x, z: a.z, base: g, w: 74, d: 74, h: 34, rot: i, color: i ? 0x4a3524 : 0x241a14 });
+  demolishAround(a.x, a.z, 99999, BLAST_RADIUS);
+  atmosphere.setSources?.([...(chaos.baseFires ?? []), { x: a.x, z: a.z }]);
+  // You, thrown off your feet
+  const p = characterBody.position, dx = p.x - a.x, dz = p.z - a.z, pd = Math.hypot(dx, dz) || 1;
+  if (pd < BLAST_RADIUS * 1.6 && playerHealth > 0 && (!isBR() || br.flight === PHASE_GROUND)) {
+    const f = 1 - pd / (BLAST_RADIUS * 1.6);
+    dealDamageToPlayer(f * 115, dx / pd * 34 * f, dz / pd * 34 * f, 1, a.x, a.z, "blast");
+  }
+  // Everything with wheels goes up
+  for (const v of vehicles) {
+    if (v.stowed || (v.driver !== null && v.driver !== "local")) continue;
+    const vx = v.x - a.x, vz = v.z - a.z, vd = Math.hypot(vx, vz) || 1;
+    if (vd < 130) { const f = 1 - vd / 130; v.launch(5 + f * 13, vx / vd * f * 14, vz / vd * f * 14, (v.index % 2 ? 1 : -1) * (2 + f * 6)); }
+  }
+  if (!net.isClient) {
+    for (const m of zombieManager?.active ?? []) {
+      if (m.dying) continue;
+      const md = Math.hypot(m.body.position.x - a.x, m.body.position.z - a.z);
+      if (md < BLAST_RADIUS) { m.killCause = "blast"; zombieManager.damage(m, 9999, 0, 0, localTarget.id); }
+    }
+    if (isBR()) bots.blast({ x: a.x, y: g, z: a.z }, null, BLAST_RADIUS, 120);
+    chaos.beastHome = { x: a.x, z: a.z };
+    chaos.beastT = beastPace().first;
+  }
+  setTimeout(() => {
+    if (chaos.ast === a) gameHud.showBanner({ title: "SOMETHING WOKE UP", sub: "Snakes. Spiders. Shoot one together and it drops.", color: "#7ee05a", duration: 4.5 });
+  }, 4200);
+}
+
+/** A new match: the crater fills in, the sky clears. */
+function clearDisaster() {
+  chaos.ast = null;
+  chaos.quake = 0;
+  chaos.apoc = 0;
+  chaos.autoT = 0;
+  chaos.autoDone = false;
+  asteroid.hide();
+  asteroid.clearCrater();
+  for (const b of beasts) b.clear();
+  chaos.beastHome = null;
+  beastEnv.mercy.clear();
+  setSnakeHold(null);
+  atmosphere.setSources?.(chaos.baseFires ?? []);
+}
+
+function updateDisaster(delta) {
+  // By itself, once: a few minutes into a game, or into a match
+  if (!net.isClient && !chaos.autoDone && !chaos.ast && !bench.on) {
+    if (isBR()) { if (br.state === "match" && br.t > ASTEROID_AUTO_BR) hostAsteroid(); }
+    else if (director?.state === "fight") { chaos.autoT += delta; if (chaos.autoT > ASTEROID_AUTO_SOLO) hostAsteroid(); }
+  }
+  const a = chaos.ast;
+  if (a && !a.hit) {
+    a.t += delta;
+    const k = Math.min(1, a.t / ASTEROID_FLIGHT);
+    asteroid.place(k);
+    cameraTrauma = Math.max(cameraTrauma, k * k * 0.5);
+    if (k >= 1) asteroidImpact(a);
+  }
+  if (chaos.quake > 0) {
+    chaos.quake -= delta;
+    const f = Math.max(0, chaos.quake / QUAKE_TIME);
+    const d = a ? Math.hypot(a.x - camera.position.x, a.z - camera.position.z) : 0;
+    cameraTrauma = Math.max(cameraTrauma, (0.35 + 0.65 * f) * THREE.MathUtils.clamp(1.3 - d / 400, 0.4, 1));
+  }
+  updateBeastSpawns(delta);
+  for (const b of beasts) b.update(delta);
+}
+
+/** What a late joiner needs: where the crater is. */
+function disasterWorld() {
+  return chaos.ast?.hit ? [chaos.ast.x, chaos.ast.z] : null;
+}
+function applyDisasterWorld(at) {
+  if (!at || chaos.ast) return;
+  chaos.ast = { x: at[0], z: at[1], t: ASTEROID_FLIGHT, hit: true };
+  chaos.apoc = 1;
+  chaos.autoDone = true;
+  asteroid.makeCrater(at[0], at[1]);
+}
+
+/** Everything the cheats and the asteroid can bring on: compiled now, so none of it stalls a fight later. */
+async function warmSpecials() {
+  await styleFilter.warm(camera);
+  const list = [...beasts.flatMap(b => b.parts()), beams.mesh, ...beams.holes.map(h => h.g), demolition.mesh, ...Object.values(ordnance.meshes), ...vehicles.filter(v => v?.stowed).slice(0, 8).map(v => v.root)];
+  for (const obj of list) {
+    postFx.begin();
+    const done = renderer.compileAsync(obj, camera, scene);
+    renderer.setRenderTarget(null);
+    await done;
+  }
+  // Every character's textures, while you are still on the home screen: a stranger joining mid-fight
+  // otherwise froze the game while the graphics card took a big texture (phones fetch them when needed)
+  if (IS_TOUCH) return;
+  for (let char = 0; char < 4; char++) {
+    const s = new Soldier({ avatar: encodeAvatar({ char, top: 0, bottom: 0, shoes: 0, hair: 0 }) });
+    await s.load(gltfLoader);
+    await prepareModel(s.root);
+    // Guns and armour come off the bones while they're not in use, so they aren't in that walk
+    for (const part of [...Object.values(s.guns).flatMap(g => [g.model, g.back]), ...Object.values(s.gearMeshes ?? {}).flat()]) if (part) await prepareModel(part);
+    s.release();
+  }
 }
 
 function updateVehicles(delta) {
@@ -9658,6 +10325,7 @@ function animate() {
   unstick(delta);
   if (isBR()) brAfterStep(delta);
   vehicleAfterStep();
+  snakeHoldAfterStep();
   keepInBounds();
   keepOnCaveFloor(delta);
 
@@ -10216,6 +10884,7 @@ async function boot() {
     zombieManager.onDoorBang = (x, z) => {
       sfx.doorBang({ x, y: groundHeight(x, z) + 1.2, z });
     };
+    registerDestructibles(buildCaps.cse, buildCaps.shop, buildCaps.gate);
     spawnWorldLoot();
 
     updateThirdPersonCamera(1 / 60);
@@ -10234,17 +10903,19 @@ async function boot() {
     // The animation clips nobody needs in the first seconds (deaths, swimming, climbing, throws…)
     loadExtraAnimations(gltfLoader).catch(err => console.warn(err));
     // The detailed helmets and backpacks: compiled off-screen, then every soldier wears them
-    loadDetailedGear().catch(err => console.warn(err));
+    const gearReady = loadDetailedGear().catch(err => console.warn(err));
+    const specialsReady = warmSpecials().catch(err => console.warn(err));
 
     setupGui();
 
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, ride, pillionKey, keys, climb, queueJump() { jumpQueued = true; }, get touch() { return touch; }, get stamina() { return { stamina, cap: staminaCap(), exhausted }; }, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, get collegeWorkshop() { return collegeWorkshop; }, mapObstacles, get kills() { return killsThisLife; }, scene, perfOverlay, backdrop, postFx, sun, characterRoot, perfMgr, world, get crates() { return crates; }, get bench() { return bench; }, styleFilter, solidAtForTest: (x, z) => solidAt(x, z, 3), chaos, useCheat, cheats: CHEATS, applyBoom, get city() { return city; }, demolition, ordnance, drive, cameraRig, squadLobby, get preview() { return lootScreen.preview; } }; // TEMP-DBG
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, ride, pillionKey, keys, climb, queueJump() { jumpQueued = true; }, get touch() { return touch; }, get stamina() { return { stamina, cap: staminaCap(), exhausted }; }, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, get collegeWorkshop() { return collegeWorkshop; }, mapObstacles, get kills() { return killsThisLife; }, scene, perfOverlay, backdrop, postFx, sun, characterRoot, perfMgr, world, get crates() { return crates; }, get bench() { return bench; }, beams, clearDisaster, snakes, spiders, beasts, beastEnv, asteroid, destructibles, hostAsteroid, get vehiclePhysics() { return { crashLaunch }; }, styleFilter, solidAtForTest: (x, z) => solidAt(x, z, 3), chaos, useCheat, cheats: CHEATS, applyBoom, get city() { return city; }, demolition, ordnance, drive, cameraRig, squadLobby, get preview() { return lootScreen.preview; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
-    if (BENCH_ENABLED) startBenchmark();
+    // (the benchmark measures play, not the warm-up the home screen hides)
+    if (BENCH_ENABLED) Promise.all([gearReady, specialsReady]).then(startBenchmark);
     else { lobby.show(); lobby.autoJoin(); }
     // The inventory screen's 3D character loads in the background
     lootScreen.initPreview(gltfLoader);
