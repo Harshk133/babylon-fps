@@ -18,6 +18,7 @@ const GRID_COLS = "ABCDEFGHIJ";
 const VEHICLE_ICON = {
   thar: ["jeep", "#8fbf4a"], rickshaw: ["rickshaw", "#ffd23a"], tractor: ["tractor", "#ff7a2e"],
   sportbike: ["bike", "#4db8ff"], motorbike: ["bike", "#4db8ff"],
+  tank: ["tractor", "#7ee05a"], plane: ["jeep", "#6ab4ff"],
 };
 // Relief colours by height (0 = the lowest land, 1 = the highest): lush lowland,
 // grassland, dry upland, brown hills, bare rock

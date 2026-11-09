@@ -99,6 +99,9 @@ const STRAP_MAT = new THREE.MeshStandardMaterial({ color: 0x1d1e1c, roughness: 0
 // with a body re-fits its gear then (until then, and for any that's missing, the stand-ins)
 let _gearModels = null;
 const _live = new Set();
+let headScale = 1;
+/** The BOBBLEHEAD cheat: everyone's head size. */
+export function setHeadScale(s) { headScale = s; }
 export function setGearModels(lib) {
   _gearModels = lib;
   for (const s of _live) s._rebuildGear();
@@ -650,6 +653,7 @@ export class Soldier {
     if (this.firstPerson === on) return;
     this.firstPerson = on;
     if (this.b?.head) this.b.head.scale.setScalar(on ? 0.001 : 1);
+    this._headScale = 0;   // (update() puts the cheat's size back)
     const lv = this.gear.helmet;
     this.gearMeshes.helmet.forEach((m, i) => showPart(m, i === lv - 1 && !on));
   }
@@ -1190,6 +1194,10 @@ export class Soldier {
     this._blend(dt, BLEND_RATE);
     this._mix(dt);
     this._procedural(dt, s, armed, speed);
+    if (this.b.head && !this.firstPerson && this._headScale !== headScale) {
+      this._headScale = headScale;
+      this.b.head.scale.setScalar(headScale);
+    }
   }
 
   /** Touchdown from a parachute: the landing-from-height clip (impact crouch, then up). */

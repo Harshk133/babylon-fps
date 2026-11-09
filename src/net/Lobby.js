@@ -19,6 +19,12 @@ const PARTY_KEY = "babylon-fps:party";
 const MODES = { solo: "Solo", coop: "Co-op", br: "Battle Royale" };
 const TEAM_LABELS = { 1: "Solo", 2: "Duo", 4: "Squad" };
 const cleanParty = s => s.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 12);
+/** FNV-1a, for a short relay room name out of a room code + party code (24 characters is all a room name gets). */
+function shortHash(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(36);
+}
 
 function load(key, fallback) {
   try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
@@ -42,6 +48,8 @@ export class Lobby {
     this.fillEl = document.getElementById("lobby-fill");
     this.partyEl = document.getElementById("lobby-party");
     this.open = false;
+    /** Called when the party you'd be standing with may have changed (set by main.js). */
+    this.onPartyChange = null;
 
     const params = new URLSearchParams(location.search);
     // An invite link says which queue and party; otherwise what you played last
@@ -57,12 +65,17 @@ export class Lobby {
     const saved = load(MODE_KEY, "solo");
     const linked = params.get("mode");
     this.invite = params.has("room") && params.get("room").trim() ? (linked === "br" ? "br" : "coop") : null;
+    // A squad invite (lobby=1) opens this screen, so friends gather here before anyone drops
+    this.waitInLobby = params.get("lobby") === "1";
     this.select(this.invite ?? (MODES[saved] ? saved : "solo"));
     this.selectTeam(this.teamSize);
 
     this.copyBtn?.addEventListener("click", () => {
       const room = this.roomEl.value.trim().toLowerCase() || "horde";
-      copyText(Net.inviteUrl(this.mode === "br" ? "br" : "coop", room, this.linkExtras(true)))
+      const extras = this.linkExtras(true);
+      if (extras.party) extras.lobby = "1"; // (friends land on the home screen, next to you)
+      this._partyChanged();                 // copying the link may have just made the party code
+      copyText(Net.inviteUrl(this.mode === "br" ? "br" : "coop", room, extras))
         .then(ok => this.setStatus(ok ? "Invite link copied: send it to your friends" : "Couldn't copy: copy the address bar after you join", !ok));
     });
 
@@ -95,7 +108,9 @@ export class Lobby {
       if (this.mode === "solo") onSolo(name());
       else join(this.mode === "coop" ? onCoop : onBattleRoyale);
     });
+    this.partyEl.addEventListener("input", () => save(PARTY_KEY, cleanParty(this.partyEl.value)));
     for (const el of [this.nameEl, this.roomEl, this.partyEl]) {
+      el.addEventListener("input", () => this._partyChanged());
       el.addEventListener("keydown", e => {
         e.stopPropagation(); // typing WASD here shouldn't move the player
         if (e.key === "Enter") this.playBtn.click();
@@ -117,6 +132,7 @@ export class Lobby {
     if (this.copyBtn) this.copyBtn.hidden = mode === "solo";
     this._showPlaySub();
     this.setStatus("");
+    this._partyChanged();
   }
 
   /** The battle royale queue: 1 | 2 | 4. Each is its own set of rooms. */
@@ -130,7 +146,22 @@ export class Lobby {
       btn.setAttribute("aria-checked", on);
     }
     this._showPlaySub();
+    this._partyChanged();
   }
+
+  _partyChanged() { this.onPartyChange?.(); }
+
+  /** The presence room for friends gathering on this screen; null without a Duo / Squad party. */
+  get partyRoom() {
+    if (!this.open || this.mode !== "br" || this.teamSize <= 1) return null;
+    const party = cleanParty(this.partyEl.value);
+    if (!party) return null;
+    const room = this.roomEl.value.trim().toLowerCase() || "horde";
+    return `pt-${shortHash(`${room}|${this.teamSize}|${party}`)}`;
+  }
+
+  /** The name to show friends before you've played. */
+  get displayName() { return this.nameEl.value.trim() || "Survivor"; }
 
   _showPlaySub() {
     this.playSubEl.textContent = this.mode === "br" && this.teamSize > 1 ? `Battle Royale · ${TEAM_LABELS[this.teamSize]}` : MODES[this.mode];
@@ -166,7 +197,7 @@ export class Lobby {
 
   /** Opened from an invite link (or reloaded inside a room): join it right away, once. */
   autoJoin() {
-    if (!this.invite || this._autoJoined) return;
+    if (!this.invite || this._autoJoined || this.waitInLobby) return;
     this._autoJoined = true;
     this.playBtn.click();
   }
@@ -175,7 +206,7 @@ export class Lobby {
   static setRoomUrl(mode, room, extra = {}) {
     try {
       const url = new URL(location.href);
-      for (const k of ["team", "party"]) url.searchParams.delete(k);
+      for (const k of ["team", "party", "lobby"]) url.searchParams.delete(k);
       if (mode) {
         url.searchParams.set("room", room); url.searchParams.set("mode", mode);
         for (const [k, v] of Object.entries(extra)) if (v) url.searchParams.set(k, v);
@@ -187,6 +218,7 @@ export class Lobby {
   show() {
     this.open = true;
     this.el.classList.add("visible");
+    this._partyChanged();
     // Phones would pop the keyboard up over the whole lobby
     if (!IS_TOUCH && !this.nameEl.value) setTimeout(() => this.nameEl.focus(), 50);
   }
@@ -194,6 +226,7 @@ export class Lobby {
   hide() {
     this.open = false;
     this.el.classList.remove("visible");
+    this._partyChanged();
   }
 }
 

@@ -194,6 +194,7 @@ export function houseHalfSize(kind) {
 // Kept for callers that iterate the original house's loot spots
 export const HOUSE_LOOT_SPOTS = HOUSE.loot;
 
+const _rubble = new THREE.Color();
 const _v = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _m = new THREE.Matrix4();
@@ -590,6 +591,7 @@ export class Houses {
       mass: 0, material: this.material, collisionFilterGroup: GROUP_WORLD, collisionFilterMask: ~GROUP_ZOMBIE,
     });
     const solid = T.colliderBoxes.filter(c => !c.stairs), stairs = T.colliderBoxes.filter(c => c.stairs);
+    const bodies = [];
     for (const [list, b] of [[solid, body], [stairs, stairBody], [T.glassBoxes, glassBody]]) {
       if (!list.length) continue;
       for (const c of list) {
@@ -601,6 +603,7 @@ export class Houses {
       b.position.set(x, base, z);
       b.quaternion.copy(q);
       this.world.addBody(b);
+      bodies.push(b);
     }
     // Door leaf: kinematic box that follows the animated panel
     const doorBody = new CANNON.Body({
@@ -616,7 +619,7 @@ export class Houses {
       x, z, y0, base, rot: rotY, cos: Math.cos(rotY), sin: Math.sin(rotY),
       type, T, t, hw: t.halfW, hd: t.halfD, matrix, tint: tint ?? new THREE.Color(1, 1, 1),
       radius: Math.hypot(t.halfW, t.halfD) * S + 0.5, cy: y0 + t.floors * WALL_H * S * 0.5,
-      doorRoot, door, doorMeshes, panel, mixer, openAction, closeAction, doorBody,
+      doorRoot, door, doorMeshes, panel, mixer, openAction, closeAction, doorBody, bodies,
       doorOpen: false, doorAnim: 0,
       floors,
       doorWorld: new THREE.Vector3(),
@@ -899,7 +902,7 @@ export class Houses {
       const d = Math.hypot(h.x - cp.x, h.z - cp.z);
       _sphere.center.set(h.x, h.cy, h.z);
       _sphere.radius = h.radius;
-      const inView = d < SHELL_RANGE && (d < NEAR_ALWAYS || _frustum.intersectsSphere(_sphere));
+      const inView = !h.destroyed && d < SHELL_RANGE && (d < NEAR_ALWAYS || _frustum.intersectsSphere(_sphere));
       h.shown = inView;
       h.inside = inView && d < INTERIOR_RANGE;
       sig = (Math.imul(sig, 31) + (h.shown ? (h.inside ? 2 : 1) : 0)) | 0;
@@ -968,7 +971,7 @@ export class Houses {
   /** Map footprints (+ door state) for the minimap; compound walls as thin boxes. */
   mapObstacles() {
     const S = HOUSE_SCALE;
-    const out = this.houses.map(h => ({
+    const out = this.houses.map(h => (h.obstacle = {
       type: "box", x: h.x, z: h.z, w: (h.t.halfW * 2 + 0.2) * S, d: (h.t.halfD * 2 + 0.2) * S, rot: h.rot, house: true,
       door: { x: h.t.doorX * S, z: h.t.halfD * S, half: DOOR_HALF * S, get open() { return h.doorOpen; } },
     }));
@@ -985,7 +988,31 @@ export class Houses {
     return out;
   }
 
+  /** A house comes down: no more walls, roof or colliders. Returns what the rubble needs to know. */
+  demolish(h) {
+    if (h.destroyed) return null;
+    h.destroyed = true;
+    for (const b of h.bodies) this.world.removeBody(b);
+    this.world.removeBody(h.doorBody);
+    if (h.obstacle) { h.obstacle._w = h.obstacle.w; h.obstacle._d = h.obstacle.d; h.obstacle.w = h.obstacle.d = 0; }
+    for (const f of h.floors) f.lightOn = false;
+    this._dirty = true;
+    const S = HOUSE_SCALE;
+    return { x: h.x, z: h.z, base: h.base, w: h.t.halfW * 2 * S, d: h.t.halfD * 2 * S, h: h.t.floors * WALL_H * S, rot: h.rot, color: _rubble.setHex(0xc2b39c).multiply(h.tint).getHex() };
+  }
+
+  restore(h) {
+    if (!h.destroyed) return;
+    h.destroyed = false;
+    h.hp = undefined;
+    for (const b of h.bodies) this.world.addBody(b);
+    this.world.addBody(h.doorBody);
+    if (h.obstacle) { h.obstacle.w = h.obstacle._w; h.obstacle.d = h.obstacle._d; }
+    this._dirty = true;
+  }
+
   isInside(h, x, z, margin = IN_MARGIN) {
+    if (h.destroyed) return false;
     const l = this._toLocal(h, x, z, _a);
     return Math.abs(l.x) < h.hw - margin && Math.abs(l.z) < h.hd - margin;
   }
@@ -1073,6 +1100,7 @@ export class Houses {
    */
   surfaceAt(x, z, y, ground) {
     for (const h of this.houses) {
+      if (h.destroyed) continue;
       if (Math.abs(x - h.x) > h.radius || Math.abs(z - h.z) > h.radius) continue;
       const l = this._toLocal(h, x, z, _a);
       if (Math.abs(l.x) > h.hw || Math.abs(l.z) > h.hd) continue;
@@ -1097,6 +1125,7 @@ export class Houses {
   interaction(px, pz, py = 0) {
     let door = null, sw = null, bestD = DOOR_RANGE * DOOR_RANGE;
     for (const h of this.houses) {
+      if (h.destroyed) continue;
       if (Math.abs(px - h.x) > h.radius + DOOR_RANGE || Math.abs(pz - h.z) > h.radius + DOOR_RANGE) continue;
       const up = this.level(h, py);
       if (!up) {
@@ -1143,6 +1172,7 @@ export class Houses {
 
   update(delta, px, pz) {
     for (const h of this.houses) {
+      if (h.destroyed) continue;
       if (h.doorAnim > 0) {
         h.doorAnim -= delta;
         h.mixer.update(delta);
@@ -1154,6 +1184,7 @@ export class Houses {
     // Give the shared lights to the nearest lit floors (within 60 m)
     let f0 = null, f1 = null, d0 = 3600, d1 = 3600;
     for (const h of this.houses) {
+      if (h.destroyed) continue;
       const d2 = (h.x - px) ** 2 + (h.z - pz) ** 2;
       if (d2 > d1) continue;
       for (const f of h.floors) {
@@ -1182,6 +1213,7 @@ export class Houses {
    */
   doorAssist(x, z, vx, vz, out) {
     for (const h of this.houses) {
+      if (h.destroyed) continue;
       if (Math.abs(x - h.x) > h.radius + 2 || Math.abs(z - h.z) > h.radius + 2) continue;
       const l = this._toLocal(h, x, z, _a);
       const dx = h.t.doorX;
@@ -1244,6 +1276,7 @@ export class Houses {
     }
 
     for (const h of this.houses) {
+      if (h.destroyed) continue;
       if (!navNear(h.x, h.z, h.radius + 2) && Math.hypot(zx - h.x, zz - h.z) > h.radius + 2 && Math.hypot(px - h.x, pz - h.z) > h.radius + 2) continue;
       const zl = this._toLocal(h, zx, zz, _zl);
       const pl = this._toLocal(h, px, pz, _pl);

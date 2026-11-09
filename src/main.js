@@ -6,7 +6,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLLoader } from "three/addons/loaders/VRMLLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { ZombieManager } from "./zombies/ZombieManager.js";
-import { Soldier, SWAP_TIME, THROW_RECOVER, LAND_FROM_HEIGHT, setGearModels } from "./player/Soldier.js";
+import { Soldier, SWAP_TIME, THROW_RECOVER, LAND_FROM_HEIGHT, setGearModels, setHeadScale } from "./player/Soldier.js";
 import { loadGearModels } from "./items/GearModels.js";
 import { encodeAvatar, PALETTES } from "./player/Avatar.js";
 import { AvatarPicker } from "./ui/AvatarPicker.js";
@@ -60,11 +60,16 @@ import { CAMPUS_ROADS, CRICKET } from "./world/CampusLayout.js";
 import { loadIndiaModels } from "./world/IndiaAssets.js";
 import { propSpots, placeIndiaProps } from "./world/IndiaProps.js";
 import { mergeStaticMeshes } from "./world/MergeStatic.js";
-import { Vehicle, VEHICLES, standInJeep, standInTractor } from "./vehicles/Vehicle.js";
+import { Vehicle, VEHICLES, standInJeep, standInTractor, standInTank, standInPlane } from "./vehicles/Vehicle.js";
 import { LegalScreen, legalButton } from "./ui/LegalScreen.js";
 import { QUALITY, QUALITY_NAME, QUALITY_SETTING, QUALITY_PRESETS, saveQuality } from "./quality.js";
 import { Net } from "./net/Net.js";
 import { Lobby, copyText } from "./net/Lobby.js";
+import { SquadLobby } from "./net/SquadLobby.js";
+import { CHEATS, CHEAT_BY_ID, CheatReader } from "./cheats/Cheats.js";
+import { Ordnance } from "./cheats/Ordnance.js";
+import { StyleFilter } from "./render/StyleFilter.js";
+import { Demolition } from "./world/Demolition.js";
 import { RemotePlayers, PHASE_GROUND, PHASE_PLANE, PHASE_FALL, PHASE_CHUTE } from "./net/RemotePlayers.js";
 import { MonsterSync } from "./net/MonsterSync.js";
 import { MonsterAudio } from "./audio/MonsterAudio.js";
@@ -515,7 +520,7 @@ function updateCombatHUD(delta) {
     crosshairEl?.style.setProperty("--gap", `${gap}px`);
   }
   const def = currentDef();
-  const busy = sprinting || playerHealth <= 0 || !def || brAirborne() || drive.on;
+  const busy = sprinting || playerHealth <= 0 || !def || brAirborne() || (drive.on && !drive.car.spec.turret);
   // Red dot / holo: their reticle replaces the crosshair at the shoulder aim
   const o = def?.opticDef;
   const dotSight = !busy && !scopeShown && o && !o.scope && aimBlend > 0.55 && fpBlend < 0.5 ? o.reticle : null;
@@ -1312,7 +1317,9 @@ window.addEventListener("keydown", e => {
     e.preventDefault(); // or the key's character lands in the chat box
     return;
   }
-  setKey(e.code, true, e.repeat);
+  // Letters that are part of a cheat code don't also fire the game's actions (movement still works)
+  const inCode = !e.repeat && isLocked() && !lobby?.open && !chat.isOpen && cheatReader.key(e.code);
+  setKey(e.code, true, e.repeat || inCode);
 });
 window.addEventListener("keyup", e => setKey(e.code, false, false));
 canvas.addEventListener("click", () => {
@@ -1534,6 +1541,7 @@ function updateCharacterMovement(delta) {
     speed *= STANCES[stance].speed;
     speed *= analog;
   }
+  if (chaos.speed) speed *= TURBO;
   // Wading: knee-deep water halves your pace
   if (!swimming && depth > 0.15) speed *= 1 - Math.min(0.55, depth * 0.6);
 
@@ -4003,7 +4011,7 @@ const worldMap = new WorldMap({
   players: () => brMapPlayers(),
   obstacles: () => mapObstacles,
   fires: () => atmosphere.sources,
-  vehicles: () => vehicles,
+  vehicles: () => vehicles.filter(v => !v.stowed),
   hideDriven: () => isBR(),
   br: () => (isBR() ? _mapState : null),
   height: (x, z) => (caves ? caves.mapHeight(x, z) : groundHeight(x, z)),
@@ -4719,6 +4727,12 @@ async function loadWorld() {
     vehicles[index] = v;
     mapObstacles.push(v.footprint);
   });
+  // The cheat codes' tanks and planes: waiting out of the world, so their network ids are the same for everyone
+  CHEAT_FLEET.forEach((kind, n) => {
+    const index = parked.length + n;
+    const spawn = { kind, x: 0, z: -2000 - n * 30, yaw: 0, stowed: true };
+    vehicles[index] = new Vehicle({ scene, world, kind, model: kind === "tank" ? standInTank() : standInPlane(), material: staticMaterial, spawn, index, standIn: true });
+  });
 
   // Stones: boulders are solid and the same everywhere; pebbles follow the quality setting
   const keepOff = (x, z, pad) => Math.hypot(x, z) < 15 || houses.blocks(x, z, pad + 2) || nearObstacle(x, z, pad)
@@ -5161,7 +5175,7 @@ function playerJoined(p) {
     br.netTimer = 0; // send them the match state right away
     team.dirty = true;
     if (net.isHost) {
-      net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state }, cse: cseBuilding?.openDoors(), crates: crates?.brokenList(), poles: powerLines?.state(), stalls: shops.brokenList?.() });
+      net.send({ t: "world", to: p.id, doors: houses.houses.map(h => h.doorOpen), lights: houses.houses.map(h => h.floors.map(f => f.lightOn)), veh: vehiclesState(), gate: collegeGate && { ...collegeGate.state }, cse: cseBuilding?.openDoors(), crates: crates?.brokenList(), poles: powerLines?.state(), stalls: shops.brokenList?.(), ...cheatWorld() });
       brAdmitLate(p);
     }
     return;
@@ -5178,6 +5192,7 @@ function playerJoined(p) {
       crates: crates?.brokenList(),
       poles: powerLines?.state(),
       stalls: shops.brokenList?.(),
+      ...cheatWorld(),
     });
   }
 }
@@ -5425,6 +5440,7 @@ net.on("st", msg => remotePlayers.applyState(msg.from, msg));
 const CHAT_KEYS = new Set(["Enter", "NumpadEnter", "Slash"]); // plus the bound chat key (Y by default)
 const chat = new Chat({
   send(text, toTeam) {
+    if (cheatReader.text(text)) return; // a cheat code isn't a message
     if (toTeam) { brTeamSay(text); return; }
     net.send({ t: "chat", m: text });
     const me = net.players.get(net.id);
@@ -5497,6 +5513,7 @@ net.on("crate", msg => {
   breakCrate(msg.i, msg.dx ?? 0, msg.dz ?? 0, true);
 });
 net.on("world", msg => {
+  applyCheatWorld(msg);
   if (msg.crates) for (const i of msg.crates) crates?.break(i, 0, 0, performance.now() / 1000, false);
   if (msg.poles) for (const [i, dx, dz] of msg.poles) powerLines?.setDown(i, dx, dz);
   if (msg.stalls) for (const i of msg.stalls) shops.smash?.(i, performance.now() / 1000);
@@ -5517,6 +5534,7 @@ net.on("world", msg => {
     if (!v || v.driver !== null || !p) return;
     [v.x, v.z, v.yaw, v.fuel] = p;
     if (p[4] !== undefined && p[4] !== null) v.setHealth(p[4]);
+    if (v.spawn.stowed) v.setStowed(Math.hypot(v.x, v.z) > 900);
     v.place();
   });
 });
@@ -5645,7 +5663,7 @@ function netTick(delta) {
       th: throwAiming && playerHealth > 0 ? inventory.selectedThrowable : undefined,
       ph: isBR() ? (br.ghost ? PHASE_PLANE : br.flight) : PHASE_GROUND,
       veh: drive.on
-        ? [+drive.car.x.toFixed(2), +drive.car.z.toFixed(2), +drive.car.yaw.toFixed(3), +drive.car.speed.toFixed(2), +drive.car.fuel.toFixed(1), drive.car.index]
+        ? [+drive.car.x.toFixed(2), +drive.car.z.toFixed(2), +drive.car.yaw.toFixed(3), +drive.car.speed.toFixed(2), +drive.car.fuel.toFixed(1), drive.car.index, ...drive.car.netExtra()]
         : undefined,
       rd: ride.on ? [ride.car.index, ride.facing] : undefined,   // riding pillion: [bike, facing]
     });
@@ -6552,6 +6570,12 @@ function updateDriving(delta) {
     sfx.sputter();
     inventoryUI.feed(`Out of petrol! ${IS_TOUCH ? "Tap the petrol can in the hotbar" : `Press ${K("refuel")} with a petrol can`}`, "info", "fuel");
   }
+  // (the camera sits further back on the big ones)
+  cameraRig.drive.distance = car.spec.cam?.distance ?? 5.6;
+  cameraRig.drive.height = car.spec.cam?.height ?? 0.75;
+  updateCheatGuns(delta, car);
+  if (car.spec.plane) { updateFlying(delta, car, throttle, steer); return; }
+  if (car.spec.turret) car.aimTurret(aimYaw, aimPitch);
   const surf = surfaceAt(car.x, car.z);
   const crash = car.drive(delta, { throttle, steer, handbrake: keys.jump, grip: surf.grip }, solidAt);
   // Fording the river: the water drags at you
@@ -6561,7 +6585,7 @@ function updateDriving(delta) {
   const hit = vehicleHit(car, crash);
   if (hit && crash > 10 && !car.contact.scrape) dealDamageToPlayer((crash - 10) * 3, 0, 0, 0.5);
   // The camera swings in behind you unless you're looking around with the mouse
-  if (now - drive.lastMouse > 1.2 && Math.abs(car.speed) > 1.5) {
+  if (!car.spec.turret && now - drive.lastMouse > 1.2 && Math.abs(car.speed) > 1.5) {
     aimYaw += angleDiff(car.yaw, aimYaw) * (1 - Math.exp(-2.2 * delta));
     aimPitch += (-0.16 - aimPitch) * (1 - Math.exp(-2 * delta));
   }
@@ -6725,6 +6749,252 @@ function surfaceAt(x, z) {
   return s;
 }
 
+// ─── Cheats ───────────────────────────────────────────────────────────────────
+// Type a code while playing (cheats/Cheats.js), or send it in the chat box. Each one
+// goes to the whole room as cheat { c, on } and is applied by everyone: the picture
+// style, gravity, heads and speed are shared state (world.ch for late joiners).
+// Whoever fires something tells the room where it hit (boom), and every client
+// blows it up the same way, so buildings fall for everybody (world.dem).
+const CHEAT_FLEET = ["tank", "tank", "tank", "tank", "plane", "plane", "plane", "plane"];
+const SHELL_POWER = 60, BOMB_POWER = 110, METEOR_POWER = 45;
+const HOUSE_HP = 100, CITY_HP = 160;
+const SHELL_COOLDOWN = 1.5, BOMB_COOLDOWN = 0.45, SHELL_RANGE = 320;
+const RAIN_TIME = 18, RAIN_GAP = 0.28, RAIN_SPREAD = 70, RAIN_HEIGHT = 150;
+const BASE_GRAVITY = -20, MOON_GRAVITY = -5, TURBO = 2.4, HEAD_SIZE = 2.7;
+const chaos = { filter: null, moon: false, heads: false, speed: false, rainT: 0, rainGap: 0, gunCd: 0 };
+const styleFilter = new StyleFilter(renderer);
+const demolition = new Demolition({ scene, groundAt: (x, z) => groundHeight(x, z) });
+const ordnance = new Ordnance({
+  scene, world, groundAt: (x, z) => groundHeight(x, z),
+  onImpact: (kind, x, y, z, by) => detonate(x, y, z, kind === "bomb" ? BOMB_POWER : METEOR_POWER, by),
+});
+const _boom = new THREE.Vector3(), _muz = new THREE.Vector3(), _aimT = new THREE.Vector3();
+const _gunFrom = new CANNON.Vec3(), _gunTo = new CANNON.Vec3(), _gunHit = new CANNON.RaycastResult();
+const gunOpts = { collisionFilterMask: GROUP_WORLD | GROUP_ZOMBIE | GROUP_PLAYER, skipBackfaces: true };
+const cheatReader = new CheatReader(useCheat);
+
+/** You entered a code: for the whole room. */
+function useCheat(def) {
+  const msg = { t: "cheat", c: def.id };
+  if (def.toggle) {
+    msg.on = !(def.id === "moon" ? chaos.moon : def.id === "heads" ? chaos.heads : def.id === "speed" ? chaos.speed : chaos.filter === def.id);
+  }
+  if (def.id === "tank" || def.id === "plane") {
+    const v = vehicles.find(c => c.kind === def.id && c.stowed) ?? vehicles.find(c => c.kind === def.id && c.driver === null);
+    const at = cheatSpot(def.id === "plane" ? 16 : 10);
+    if (!v) { inventoryUI.feed(`Every ${v?.spec.label ?? def.label} is in use`, "info"); return; }
+    Object.assign(msg, { i: v.index, x: +at.x.toFixed(2), z: +at.z.toFixed(2), yaw: +aimYaw.toFixed(3) });
+  }
+  net.send(msg);
+  applyCheat(msg, myName || "You");
+}
+
+/** Clear ground ahead of you to park something. */
+function cheatSpot(d) {
+  const p = characterBody.position, sy = Math.sin(aimYaw), cy = Math.cos(aimYaw);
+  for (const dist of [d, d * 1.5, d * 0.7, d * 2]) {
+    for (const side of [0, 6, -6, 12, -12]) {
+      const x = p.x + sy * dist + cy * side, z = p.z + cy * dist - sy * side;
+      if (!solidAt(x, z, 4) && waterDepthAt(x, z) < 0.2) return { x, z };
+    }
+  }
+  return { x: p.x + sy * d, z: p.z + cy * d };
+}
+
+function applyCheat(m, who) {
+  const def = CHEAT_BY_ID.get(m.c);
+  if (!def) return;
+  switch (m.c) {
+    case "toon": case "bw": case "sketch":
+      chaos.filter = m.on ? m.c : chaos.filter === m.c ? null : chaos.filter;
+      styleFilter.set(chaos.filter);
+      break;
+    case "tank": case "plane": vehicles[m.i]?.deploy(m.x, m.z, m.yaw); break;
+    case "rain": if (!net.isClient) { chaos.rainT = RAIN_TIME; chaos.rainGap = 0; } break;
+    case "moon": chaos.moon = !!m.on; world.gravity.y = chaos.moon ? MOON_GRAVITY : BASE_GRAVITY; break;
+    case "heads": chaos.heads = !!m.on; setHeadScale(chaos.heads ? HEAD_SIZE : 1); break;
+    case "loot": cheatArm(); break;
+    case "speed": chaos.speed = !!m.on; break;
+  }
+  const off = def.toggle && !m.on;
+  gameHud.showBanner({ title: off ? "CHEAT OFF" : "CHEAT ACTIVATED", sub: def.label, text: `by ${who}`, color: def.color, duration: 2.6 });
+  sfx.levelStart();
+  postFx.kick(0.4, def.color);
+}
+net.on("cheat", m => applyCheat(m, net.players.get(m.from)?.name ?? "Someone"));
+
+function cheatArm() {
+  if (net.isHost && isBR()) bots.arm();
+  if (playerHealth <= 0 || knock.on || (isBR() && (br.ghost || br.flight !== PHASE_GROUND))) return;
+  playerHealth = healthTrail = MAX_HEALTH;
+  for (const id of WEAPON_ORDER) inventory.addWeapon(id, WEAPONS[id].magSize, WEAPONS[id].magSize * 8);
+  for (const k of THROWABLE_ORDER) inventory.addThrowable(k, 3);
+  inventory.addMedkit(2);
+  if (!inventory.current) inventory.equip(WEAPON_ORDER[1] ?? WEAPON_ORDER[0]);
+  onWeaponChanged(false);
+}
+
+/** Blows up at this spot for the whole room. */
+function detonate(x, y, z, power, by) {
+  net.send({ t: "boom", x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), p: power });
+  applyBoom(x, y, z, power, by);
+}
+net.on("boom", m => applyBoom(m.x, m.y, m.z, m.p, m.from));
+
+function applyBoom(x, y, z, power, by) {
+  _boom.set(x, y, z);
+  effects.explosion(_boom);
+  fireFX.blast(x, y, z);
+  onGrenadeExplode(_boom, by);
+  demolishAround(x, z, power);
+}
+
+/** Buildings in reach of a blast lose health; at zero they come down. */
+function demolishAround(x, z, power) {
+  const r = 3 + power / 35;
+  for (const h of houses?.houses ?? []) {
+    if (h.destroyed || Math.abs(x - h.x) > h.radius + r || Math.abs(z - h.z) > h.radius + r || !houses.isInside(h, x, z, -r)) continue;
+    h.hp = (h.hp ?? HOUSE_HP) - power;
+    if (h.hp <= 0) bringDown(houses.demolish(h));
+  }
+  for (const b of city?.buildings ?? []) {
+    if (b.destroyed || !city.near(b, x, z, r)) continue;
+    b.hp = (b.hp ?? CITY_HP) - power;
+    if (b.hp <= 0) bringDown(city.demolish(b, world));
+  }
+}
+
+/** The rubble, the dust and the noise; loot that was up on its floors is gone with it. */
+function bringDown(info, instant = false) {
+  if (!info) return;
+  demolition.collapse(info, instant);
+  const R = Math.hypot(info.w, info.d) / 2 + 1;
+  for (let i = pickups.active.length - 1; i >= 0; i--) {
+    const e = pickups.active[i];
+    if (e.y > info.base + 1.2 && Math.hypot(e.x - info.x, e.z - info.z) < R) pickups.release(e);
+  }
+  if (instant) return;
+  for (let i = 0; i < 7; i++) {
+    _boom.set(info.x + (Math.random() - 0.5) * info.w, info.base + 0.6 + Math.random() * info.h * 0.6, info.z + (Math.random() - 0.5) * info.d);
+    effects.impact(_boom, 0, 1, 0, "dust", 40);
+  }
+  fireFX.blast(info.x, info.base + info.h * 0.5, info.z);
+  _boom.set(info.x, info.base + 2, info.z);
+  sfx.explosion(_boom);
+  const near = camera.position.distanceTo(_boom);
+  cameraTrauma = Math.min(1, cameraTrauma + THREE.MathUtils.clamp(1 - near / 70, 0, 1));
+  worldShockwave(info.x, info.base + 4, info.z, THREE.MathUtils.clamp(1.2 - near / 90, 0, 1), 0xffc890);
+}
+
+function restoreBuildings() {
+  for (const h of houses?.houses ?? []) houses.restore(h);
+  for (const b of city?.buildings ?? []) city.restore(b, world);
+  demolition.clear();
+  ordnance.clear();
+}
+
+/** For someone joining: which styles are on and what's already been flattened. */
+function cheatWorld() {
+  const dem = [];
+  (houses?.houses ?? []).forEach((h, i) => { if (h.destroyed) dem.push(0, i); });
+  (city?.buildings ?? []).forEach((b, i) => { if (b.destroyed) dem.push(1, i); });
+  return { ch: [chaos.filter, chaos.moon ? 1 : 0, chaos.heads ? 1 : 0, chaos.speed ? 1 : 0], dem };
+}
+
+function applyCheatWorld({ ch, dem }) {
+  if (ch) {
+    chaos.filter = ch[0]; styleFilter.set(ch[0]);
+    chaos.moon = !!ch[1]; world.gravity.y = chaos.moon ? MOON_GRAVITY : BASE_GRAVITY;
+    chaos.heads = !!ch[2]; setHeadScale(chaos.heads ? HEAD_SIZE : 1);
+    chaos.speed = !!ch[3];
+  }
+  for (let i = 0; dem && i + 1 < dem.length; i += 2) {
+    if (dem[i] === 0) { const h = houses?.houses[dem[i + 1]]; if (h) bringDown(houses.demolish(h), true); }
+    else { const b = city?.buildings[dem[i + 1]]; if (b) bringDown(city.demolish(b, world), true); }
+  }
+}
+
+function cheatAim(range) {
+  camera.getWorldDirection(_aimT);
+  _gunFrom.set(camera.position.x, camera.position.y, camera.position.z);
+  _gunTo.set(camera.position.x + _aimT.x * range, camera.position.y + _aimT.y * range, camera.position.z + _aimT.z * range);
+  const own = characterBody.collisionFilterGroup;
+  characterBody.collisionFilterGroup = 0;
+  _gunHit.reset();
+  const hit = world.raycastClosest(_gunFrom, _gunTo, gunOpts, _gunHit);
+  characterBody.collisionFilterGroup = own;
+  return hit;
+}
+
+function fireTankShell(car) {
+  chaos.gunCd = SHELL_COOLDOWN;
+  car.muzzleWorld(_muz);
+  const hit = cheatAim(SHELL_RANGE);
+  const end = hit ? _gunHit.hitPointWorld : _gunTo;
+  _boom.set(end.x, end.y, end.z);
+  effects.muzzleFlash(_muz);
+  effects.tracer(_muz, _boom);
+  sfx.gunshot(WEAPONS.sniper.sound, 1);
+  cameraTrauma = Math.min(1, cameraTrauma + 0.4);
+  car.impact?.(0.25, 0, -1);
+  net.send({ t: "shot", w: WEAPONS.sniper.sound, f: [+_muz.x.toFixed(2), +_muz.y.toFixed(2), +_muz.z.toFixed(2)], h: [+end.x.toFixed(2), +end.y.toFixed(2), +end.z.toFixed(2)] });
+  noteShot("me", car.x, car.z);
+  if (hit) detonate(end.x, end.y + 0.3, end.z, SHELL_POWER, localTarget.id);
+}
+
+function dropBomb(car) {
+  chaos.gunCd = BOMB_COOLDOWN;
+  const sy = Math.sin(car.yaw), cy = Math.cos(car.yaw), v = car.speed * 0.9;
+  const m = { t: "bomb", k: "bomb", x: +car.x.toFixed(2), y: +(car.y - 0.4).toFixed(2), z: +car.z.toFixed(2), vx: +(sy * v).toFixed(2), vy: -4, vz: +(cy * v).toFixed(2) };
+  ordnance.spawn("bomb", m.x, m.y, m.z, m.vx, m.vy, m.vz, true, localTarget.id);
+  net.send(m);
+  sfx.throwWhoosh();
+}
+net.on("bomb", m => ordnance.spawn(m.k, m.x, m.y, m.z, m.vx, m.vy, m.vz, false, m.from));
+
+function updateCheatGuns(delta, car) {
+  chaos.gunCd = Math.max(0, chaos.gunCd - delta);
+  if (!input.fire || chaos.gunCd > 0 || !isLocked() || inventoryOpen || worldMap.open || playerHealth <= 0 || car.wrecked) return;
+  if (car.spec.turret) fireTankShell(car);
+  else if (car.spec.plane && car.air) dropBomb(car);
+}
+
+/** Flying: W / S throttle, A / D bank, the mouse (up / down) the nose; fire drops bombs. */
+function updateFlying(delta, car, throttle, steer) {
+  const crash = car.fly(delta, { throttle, steer, pitch: THREE.MathUtils.clamp((aimPitch + 0.14) * 1.9, -1, 1) }, solidAt);
+  jumpQueued = false;
+  if (performance.now() / 1000 - drive.lastMouse > 0.6) aimYaw += angleDiff(car.yaw, aimYaw) * (1 - Math.exp(-3 * delta));
+  if (!car.air) { vehicleRunOver(car); smashCrates(car); }
+  if (crash > 0) {
+    detonate(car.x, car.y + 1, car.z, BOMB_POWER, localTarget.id);
+    damageVehicle(car, 99999);
+    exitVehicle();
+    dealDamageToPlayer(70, 0, 0, 0.9);
+  }
+}
+
+/** Every frame: meteors, falling bombs and rubble. */
+function updateChaos(delta, realDelta) {
+  styleFilter.update(realDelta);
+  ordnance.update(delta);
+  demolition.update(delta);
+  if (chaos.rainT <= 0) return;
+  chaos.rainT -= delta;
+  chaos.rainGap -= delta;
+  if (chaos.rainGap > 0) return;
+  chaos.rainGap = RAIN_GAP;
+  // Round somebody: you or anyone else who's in the world
+  let tx = characterBody.position.x, tz = characterBody.position.z, seen = 1;
+  for (const p of remotePlayers.players.values()) {
+    if (!p.hasState || p.dead || p.phase === PHASE_PLANE) continue;
+    if (Math.random() < 1 / ++seen) { tx = p.body.position.x; tz = p.body.position.z; }
+  }
+  const x = tx + (Math.random() - 0.5) * RAIN_SPREAD, z = tz + (Math.random() - 0.5) * RAIN_SPREAD;
+  const m = { t: "bomb", k: "meteor", x: +x.toFixed(2), y: +(groundHeight(x, z) + RAIN_HEIGHT).toFixed(2), z: +z.toFixed(2), vx: +((Math.random() - 0.5) * 14).toFixed(2), vy: -85, vz: +((Math.random() - 0.5) * 14).toFixed(2) };
+  ordnance.spawn("meteor", m.x, m.y, m.z, m.vx, m.vy, m.vz, true, localTarget.id);
+  net.send(m);
+}
+
 function updateVehicles(delta) {
   let lit = null, litD = Infinity;
   const sceneLight = Math.min(1, 0.25 + sun.intensity * 0.3 + hemiLight.intensity * 0.3);
@@ -6815,6 +7085,7 @@ net.on("st", msg => {
       inventoryUI.feed(`${remotePlayers.players.get(msg.from)?.name ?? "Someone"} is driving`, "info");
     }
     car.setRemote(msg.from, msg.veh[0], msg.veh[1], msg.veh[2], msg.veh[3], msg.veh[4]);
+    car.setRemoteExtra(msg.veh);
   }
   // Out of the one they were driving (or switched)
   for (const v of vehicles) if (v !== car && v.driver === msg.from) v.releaseRemote();
@@ -7372,6 +7643,7 @@ function brStartMatch(seed, ids, t, teams = null) {
   lootClaims.clear();
   brSpawnLoot(seed);
   crates?.restoreAll(); // every crate whole again for the drop
+  restoreBuildings();
   powerLines?.restoreAll();
   shops.restoreAll?.();
   brResetTwists();
@@ -9091,6 +9363,7 @@ const lobby = new Lobby({
   onSolo(name) {
     myName = name;
     gameMode = "solo";
+    if (IS_TOUCH) chat.setEnabled(true);   // (phones enter cheat codes in the chat box)
     lobby.hide();
   },
   async onCoop(name, room) {
@@ -9117,11 +9390,24 @@ const lobby = new Lobby({
   },
 });
 
+// Friends in your Duo / Squad party stand beside your character on this screen (net/SquadLobby.js)
+const squadLobby = new SquadLobby({
+  preview: () => lootScreen.preview,
+  loader: gltfLoader,
+  avatar: () => encodeAvatar(soldier.avatar),
+  name: () => lobby.displayName,
+  stage: document.getElementById("lobby-stage"),
+  roster: document.getElementById("lobby-crew"),
+});
+const syncSquadLobby = () => squadLobby.set(lobby.partyRoom, lobby.teamSize);
+lobby.onPartyChange = syncSquadLobby;
+
 // Your look: applied to your soldier (in the world behind the lobby) and the inventory screen's
 const lookEl = document.getElementById("lobby-look");
 if (lookEl) new AvatarPicker(lookEl, soldier.avatar, a => {
   soldier.setAvatar(a).catch(err => console.warn(err));
   lootScreen.preview?.soldier?.setAvatar(a).catch(err => console.warn(err));
+  syncSquadLobby(); // friends see the new look too
 });
 
 // While the lobby is up, the inventory screen's 3D character (canvas, renderer and all) stands
@@ -9139,6 +9425,7 @@ function updateLobbyStage(dt) {
     previewHome[0].insertBefore(canvas, previewHome[1]);
     previewHome = null;
   }
+  squadLobby.update(); // (also puts the preview back to just you for the inventory screen)
   if (!show) return;
   preview.sync(inventory.current, inventory.gearLevels());
   preview.render(dt);
@@ -9192,7 +9479,7 @@ function refreshKeyLabels() {
       [kb("use"), "Doors · kick a crate (punch when crouched)"], [kb("light"), "Light switch"],
       [kb("vehicle"), "Drive / ride / get out"], [`${kb("pillionFront")}${kb("pillionBack")}`, "Sit behind on a bike (front / back)"],
       [kb("refuel"), "Refuel with a petrol can"], [kb("repair"), "Repair with a toolkit"], [kb("torch"), "Flashlight"],
-      [kb("inventory"), "Inventory"], [kb("map"), "Map: click to pin a spot"], [`${kb("chat")}<kbd>Enter</kbd>`, "Chat"],
+      [kb("inventory"), "Inventory"], [kb("map"), "Map: click to pin a spot"], [`${kb("chat")}<kbd>Enter</kbd>`, "Chat"], ["<kbd>Type</kbd>", "A cheat code while playing"],
       [kb("ping"), "Duo / Squad: mark for your team"], [kb("quickChat"), "Duo / Squad: quick chat"], [kb("voice"), "Duo / Squad: push to talk"], ["<kbd>Esc</kbd>", "Pause"],
     ];
     list.innerHTML = rows.map(([k, t]) => `<div>${k}<span>${t}</span></div>`).join("");
@@ -9274,6 +9561,7 @@ function renderFrame() {
   renderer.clearDepth();
   renderer.render(scene, camera);
   postFx.end();
+  styleFilter.render();
 }
 
 let _animRunning = false;
@@ -9427,6 +9715,7 @@ function animate() {
   updateThrowAim(delta);
   updateMelee(delta);
   updateRepair(delta);
+  updateChaos(delta, realDelta);
   updateRope(delta);
   updateAutoDoors(delta);
   updateLastPos(delta);
@@ -9952,7 +10241,7 @@ async function boot() {
     window.zombieManager = zombieManager;
     window.inventory = inventory;
     window.env = env;
-    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, ride, pillionKey, keys, climb, queueJump() { jumpQueued = true; }, get touch() { return touch; }, get stamina() { return { stamina, cap: staminaCap(), exhausted }; }, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, get collegeWorkshop() { return collegeWorkshop; }, mapObstacles, get kills() { return killsThisLife; }, scene, perfOverlay, backdrop, postFx, sun, characterRoot, perfMgr, world, get crates() { return crates; }, get bench() { return bench; } }; // TEMP-DBG
+    window.weather = weather; window.__dbg = { net, br, remotePlayers, characterBody, soldier, input, camera, get crosshair() { return crosshairPoint; }, get houses() { return houses; }, get stance() { return stance; }, inventory, pickups, vehicles, toggleVehicle, refuelVehicle, drive, ride, pillionKey, keys, climb, queueJump() { jumpQueued = true; }, get touch() { return touch; }, get stamina() { return { stamina, cap: staminaCap(), exhausted }; }, groundHeight, setAim(y, p) { aimYaw = y; aimPitch = p; }, quality: QUALITY_NAME, renderer, get hp() { return playerHealth; }, setHp(v) { playerHealth = v; }, get shops() { return shops; }, get waterTowers() { return waterTowers; }, get collegeWorkshop() { return collegeWorkshop; }, mapObstacles, get kills() { return killsThisLife; }, scene, perfOverlay, backdrop, postFx, sun, characterRoot, perfMgr, world, get crates() { return crates; }, get bench() { return bench; }, styleFilter, solidAtForTest: (x, z) => solidAt(x, z, 3), chaos, useCheat, cheats: CHEATS, applyBoom, get city() { return city; }, demolition, ordnance, drive, cameraRig, squadLobby, get preview() { return lootScreen.preview; } }; // TEMP-DBG
     deathScreenEl?.addEventListener("click", respawnPlayer);
 
     if (BENCH_ENABLED) startBenchmark();

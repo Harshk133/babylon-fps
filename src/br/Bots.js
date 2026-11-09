@@ -814,7 +814,7 @@ export class Bots {
     }
     // A free car when the zone is far away
     if (zoneGoal && zoneGoal.far > 90 && b.weapon && !b.car) {
-      const car = g.vehicles.find(v => !v.driver && v.fuel > 8 && !v.wrecked && Math.hypot(v.x - b.x, v.z - b.z) < CAR_LOOK);
+      const car = g.vehicles.find(v => !v.driver && !v.spec.noBots && v.fuel > 8 && !v.wrecked && Math.hypot(v.x - b.x, v.z - b.z) < CAR_LOOK);
       if (car) { b.mode = "car"; b.wantCar = car; b.goal = { x: car.x, z: car.z }; b.pick = null; b.driveTo = zoneGoal; return; }
     }
     // Loot worth having nearby (more eager while it's poorly equipped)
@@ -930,6 +930,7 @@ export class Bots {
   /** Walks toward (gx, gz): pathing round houses (doors too), a wall probe, unsticking. */
   _walk(b, gx, gz, speed, delta) {
     const g = this.g;
+    speed *= g.speedMul?.() ?? 1;
     // Escaping after getting stuck: straight out along a free line for a moment
     if (b.escapeT > 0) {
       b.escapeT -= delta;
@@ -1008,6 +1009,17 @@ export class Bots {
     b.lookOff += (b.lookWant - b.lookOff) * (1 - Math.exp(-3 * delta));
     b.aimYaw += angleDiff(b.yaw + b.lookOff, b.aimYaw) * (1 - Math.exp(-5 * delta));
     b.aimPitch += (b.pitchOff - b.aimPitch) * (1 - Math.exp(-3 * delta));
+  }
+
+  /** The LOCKNLOAD cheat, for every bot on its feet. */
+  arm() {
+    for (const b of this.list) {
+      if (b.dead) continue;
+      b.hp = Math.max(b.hp, 100);
+      for (const w of ["rifle", "smg", "shotgun"]) b.guns[w] = { mag: WEAPONS[w].magSize, reserve: 150 };
+      b.weapon = "rifle";
+      b.throws.grenade += 3;
+    }
   }
 
   /** A jump (just the arc: it doesn't change where it can go). */

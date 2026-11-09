@@ -30,6 +30,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
  * the wheel turns. dust: puffs per m/s per wheel on loose ground (emitDust).
  * spin: wheels built and spun by the vehicle itself [x, z, radius, width, front].
  */
+const NO_EXTRA = [];
 const BIKE_TURN_IN = 10;   // 1/s: how fast a bike's turn rate reaches what the steering asks
 
 export const VEHICLES = {
@@ -87,6 +88,41 @@ export const VEHICLES = {
     // Loose rear end: a sharp turn at speed on dirt swings the back out
     grip: 0.72, slide: 0.2, steerRate: 4, dust: 2.4,
     spin: [[0.86, -0.85, 0.78, 0.46, false], [-0.86, -0.85, 0.78, 0.46, false], [0.74, 1.2, 0.44, 0.28, true], [-0.74, 1.2, 0.44, 0.28, true]],
+  },
+  // The cheat-code vehicles (main.js "Cheats"): built by hand, parked out of the world until someone asks.
+  // turret: a gun that follows your aim. plane: flown, not driven (see fly()); takeoff / stall: m/s.
+  tank: {
+    label: "battle tank",
+    length: 7.2, width: 3.4,
+    maxSpeed: 13, reverseSpeed: 6, accel: 5, brake: 12, coast: 3,
+    maxSteer: 0.75, wheelBase: 2.6,
+    fuelMax: 100, fuelStart: 100, burn: 0.05, idleBurn: 0, canFuel: 100, health: 900,
+    enterRange: 5, headlight: 150,
+    seat: [0, 2.3, -0.55],
+    lamps: [[1.2, 1.3, 3.5], [-1.2, 1.3, 3.5]],
+    tails: [[1.2, 1.25, -3.55], [-1.2, 1.25, -3.55]],
+    wheels: { front: 2.6, rear: -2.6, track: 1.4 },
+    hits: { z: [-2.2, 0, 2.2], r: 1.75 },
+    box: [1.7, 1.15, 3.6, 1.2],
+    runOver: 14, tone: 0.4, grip: 1.4, slide: 0.05, steerRate: 5, dust: 3,
+    turret: true, noBots: true, cam: { distance: 11, height: 2.6 },
+  },
+  plane: {
+    label: "bomber plane",
+    length: 12, width: 13,
+    maxSpeed: 58, reverseSpeed: 0, accel: 11, brake: 14, coast: 2,
+    maxSteer: 0.35, wheelBase: 6,
+    fuelMax: 100, fuelStart: 100, burn: 0.12, idleBurn: 0, canFuel: 100, health: 260,
+    enterRange: 7, headlight: 150,
+    seat: [0, 2.2, 1.7],
+    lamps: [[0, 1.5, 6.1]],
+    tails: [[6.2, 1.6, -0.6], [-6.2, 1.6, -0.6]],
+    wheels: { front: 3.4, rear: -3.4, track: 1.7 },
+    hits: { z: [-3, 0, 3], r: 1.4 },
+    box: [1.3, 1.2, 5.6, 1.6],
+    runOver: 20, tone: 0.8, grip: 2, slide: 0.02, steerRate: 4, dust: 2,
+    plane: { takeoff: 22, stall: 15, maxPitch: 0.7, maxRoll: 1.0, turn: 1.05, clearance: 16, top: 125 },
+    noBots: true, cam: { distance: 20, height: 4.5 },
   },
   // Motorbikes (public/models/bikes/, Poly Pizza, CC BY 3.0: credited in src/legal/credits.js). Two wheels:
   // they lean into turns instead of sliding, rest on a kickstand when parked, and carry a
@@ -287,6 +323,77 @@ export function standInTractor() {
   return g;
 }
 
+const _armyGreen = new THREE.MeshStandardMaterial({ color: 0x4d5a35, roughness: 0.75, metalness: 0.25 });
+const _armyDark = new THREE.MeshStandardMaterial({ color: 0x2a2f22, roughness: 0.85, metalness: 0.2 });
+const _steel = new THREE.MeshStandardMaterial({ color: 0x8a8f96, roughness: 0.4, metalness: 0.8 });
+const _planeBody = new THREE.MeshStandardMaterial({ color: 0x6f7f8c, roughness: 0.5, metalness: 0.45 });
+const _glass = new THREE.MeshStandardMaterial({ color: 0x16242c, roughness: 0.15, metalness: 0.7 });
+const _addBox = (g, w, h, d, x, y, z, m) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); o.castShadow = true; g.add(o); return o; };
+
+/** The hull: tracks, road wheels and sloped armour (the turret is built apart, it has to turn). */
+export function standInTank() {
+  const g = new THREE.Group();
+  _addBox(g, 2.5, 0.85, 6.6, 0, 1.1, 0, _armyGreen);       // hull
+  _addBox(g, 2.5, 0.5, 1.5, 0, 1.35, 3.05, _armyGreen).rotation.x = 0.55; // glacis
+  _addBox(g, 2.9, 0.08, 6.9, 0, 1.56, 0, _armyDark);       // deck
+  for (const sx of [-1, 1]) {
+    _addBox(g, 0.7, 0.95, 7.2, 1.42 * sx, 0.5, 0, _armyDark);   // track
+    _addBox(g, 0.82, 0.1, 7.0, 1.42 * sx, 1.02, 0, _armyGreen); // fender
+    for (let i = 0; i < 6; i++) {
+      const w = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.78, 12).rotateZ(Math.PI / 2), _steel);
+      w.position.set(1.42 * sx, 0.42, -2.75 + i * 1.1);
+      g.add(w);
+    }
+  }
+  _addBox(g, 1.1, 0.5, 0.2, 0, 1.6, -3.3, _armyDark);      // exhaust housing
+  return g;
+}
+
+/** The turret: { group, barrel, tip }: turned and elevated by the vehicle. */
+function tankTurret() {
+  const group = new THREE.Group();
+  group.position.set(0, 1.6, -0.3);
+  _addBox(group, 2.3, 0.72, 2.9, 0, 0.36, 0, _armyGreen);
+  _addBox(group, 1.6, 0.14, 2.0, 0, 0.78, -0.1, _armyDark);
+  const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.16, 14), _armyDark);
+  hatch.position.set(0, 0.86, -0.3); hatch.castShadow = true;
+  group.add(hatch);
+  const barrel = new THREE.Group();
+  barrel.position.set(0, 0.42, 1.4);
+  const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.13, 4, 12).rotateX(Math.PI / 2).translate(0, 0, 2), _steel);
+  tube.castShadow = true;
+  const brake = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 0.5, 12).rotateX(Math.PI / 2).translate(0, 0, 4.1), _armyDark);
+  barrel.add(tube, brake);
+  const tip = new THREE.Object3D();
+  tip.position.set(0, 0, 4.4);
+  barrel.add(tip);
+  group.add(barrel);
+  return { group, barrel, tip };
+}
+
+export function standInPlane() {
+  const g = new THREE.Group();
+  const cyl = (r1, r2, h, x, y, z, m) => { const o = new THREE.Mesh(new THREE.CylinderGeometry(r1, r2, h, 14).rotateX(Math.PI / 2), m); o.position.set(x, y, z); o.castShadow = true; g.add(o); return o; };
+  cyl(0.85, 0.95, 5, 0, 1.75, 2.5, _planeBody);             // fuselage, forward half
+  cyl(0.95, 0.3, 6.6, 0, 1.75, -3.3, _planeBody);           // ...and tapering to the tail
+  cyl(0.5, 0.85, 1, 0, 1.75, 5.5, _armyDark);               // cowling
+  _addBox(g, 1.15, 0.65, 2.2, 0, 2.55, 1.5, _glass);        // canopy
+  _addBox(g, 13, 0.2, 2.5, 0, 1.45, 0.6, _planeBody);       // wings
+  _addBox(g, 4.6, 0.14, 1.3, 0, 1.95, -5.8, _planeBody);    // tailplane
+  _addBox(g, 0.16, 1.9, 1.5, 0, 2.8, -5.9, _armyGreen);     // fin
+  for (const sx of [-1, 1]) {
+    cyl(0.42, 0.42, 2.4, 3.2 * sx, 1.2, 1.2, _armyDark);    // engine pods / bomb racks
+    _addBox(g, 0.12, 1, 0.12, 1.7 * sx, 0.7, 2.4, _armyDark); // gear legs
+    const w = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.26, 12).rotateZ(Math.PI / 2), _armyDark);
+    w.position.set(1.7 * sx, 0.36, 2.4);
+    g.add(w);
+  }
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.16, 10).rotateZ(Math.PI / 2), _armyDark);
+  tail.position.set(0, 0.2, -5.2);
+  g.add(tail);
+  return g;
+}
+
 const tyreMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.95 });
 const rimMat = new THREE.MeshStandardMaterial({ color: 0xc8a020, roughness: 0.5, metalness: 0.4 });
 
@@ -344,6 +451,12 @@ export class Vehicle {
     this.chassis = new THREE.Group();
     this.chassis.add(holder);
     this.root.add(this.chassis);
+    if (S.turret) { this.gun = tankTurret(); this.root.add(this.gun.group); }
+    if (S.plane) {
+      this.prop = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.2, 0.08), _armyDark);
+      this.prop.position.set(0, 1.75, 6.05);
+      this.root.add(this.prop);
+    }
     this.height = size.y * s;
     for (const w of this.bikeWheels) {
       mergeStaticMeshes(w.group, { flatten: true });
@@ -409,6 +522,11 @@ export class Vehicle {
     this.x = this.spawn.x;
     this.z = this.spawn.z;
     this.yaw = this.spawn.yaw;
+    this.setStowed(!!this.spawn.stowed);
+    this.air = false;         // a plane off the ground
+    this.climb = 0;
+    this.turretYaw = this.yaw;
+    this.gunPitch = 0;
     this.speed = 0;
     this.steer = 0;
     this.yawRate = 0;
@@ -460,7 +578,143 @@ export class Vehicle {
   }
 
   /** Ground pose from the wheels: height, pitch and roll. */
+  /** Cheat vehicles wait out of the world until someone calls one in. */
+  setStowed(on) {
+    this.stowed = on;
+    this.root.visible = !on;
+  }
+
+  /** Called in by a cheat: here, ready to go. */
+  deploy(x, z, yaw) {
+    this.setStowed(false);
+    this.x = x; this.z = z; this.yaw = yaw;
+    this.turretYaw = yaw;
+    this.air = false;
+    this.speed = 0;
+    this.remote = null;
+    this.driver = null;
+    this.fuel = this.spec.fuelMax;
+    this.setHealth(this.maxHealth);
+    this.damage = 0;
+    this._pose(0);
+    this.place();
+  }
+
+  /** The extra numbers a driver sends after [x, z, yaw, speed, fuel, index]. */
+  netExtra() {
+    if (this.spec.plane) return [+this.y.toFixed(2), +this.pitch.toFixed(3), +this.roll.toFixed(3), this.air ? 1 : 0];
+    if (this.spec.turret) return [+this.turretYaw.toFixed(3), +this.gunPitch.toFixed(3)];
+    return NO_EXTRA;
+  }
+
+  setRemoteExtra(v) {
+    const r = this.remote;
+    if (!r || v.length < 8) return;
+    if (this.spec.plane) { r.y = v[6]; r.pitch = v[7]; r.roll = v[8]; this.air = !!v[9]; }
+    else if (this.spec.turret) { r.ty = v[6]; r.gp = v[7]; }
+  }
+
+  /** The tank's gun follows your aim (world yaw, pitch). */
+  aimTurret(yaw, pitch) {
+    this.turretYaw = yaw;
+    this.gunPitch = THREE.MathUtils.clamp(pitch, -0.14, 0.4);
+  }
+
+  muzzleWorld(out) {
+    this.gun.group.updateWorldMatrix(true, true);
+    return this.gun.tip.getWorldPosition(out);
+  }
+
+  /**
+   * A plane, flown by you. input: { throttle −1..1, steer −1..1 (+ = left bank), pitch −1..1 (+ = nose up) }.
+   * It rolls down the ground, lifts off by itself at takeoff speed, and sinks if it gets too
+   * slow. Comes back to the ground gently and it lands; too steep, or into a building, it crashes.
+   * Returns the crash speed (0 if none).
+   */
+  fly(delta, input, blocked) {
+    const R = this.spec, P = R.plane;
+    const t = this.fuel > 0 && !this.wrecked ? input.throttle : 0;
+    this.throttle = Math.max(0, t);
+    let v = this.speed;
+    if (t > 0) v += R.accel * t * delta * (1 - v / R.maxSpeed * 0.85);
+    else if (t < 0) v -= R.brake * delta;
+    else v -= R.coast * delta * (this.air ? 0.3 : 1);
+    v = Math.max(0, Math.min(R.maxSpeed, v));
+    this.speed = v;
+    if (this.fuel > 0) this.fuel = Math.max(0, this.fuel - R.burn * this.throttle * delta);
+    const lift = Math.max(0, Math.min(1, (v - P.stall) / (P.takeoff - P.stall)));
+    const k = 1 - Math.exp(-2.4 * delta);
+    if (!this.air) {
+      this.yawRate = input.steer * 0.75 * Math.min(1, v / 8);
+      const yaw = this.yaw + this.yawRate * delta;
+      const nx = this.x + Math.sin(yaw) * v * delta, nz = this.z + Math.cos(yaw) * v * delta;
+      if (v > 3 && this._blockedAt(nx, nz, yaw, blocked)) { this.speed = 0; return v; }
+      this.x = nx; this.z = nz; this.yaw = yaw;
+      if (v >= P.takeoff) { this.air = true; this.climb = 2.5; }
+      return 0;
+    }
+    let want = input.pitch * P.maxPitch;
+    if (this.climb > 0) { this.climb -= delta; want = Math.max(want, 0.32); }
+    want -= (1 - lift) * 0.8;
+    this.pitch += (want - this.pitch) * k;
+    this.roll += (-input.steer * P.maxRoll - this.roll) * k;
+    this.yawRate = -Math.sin(this.roll) * P.turn;
+    this.yaw += this.yawRate * delta;
+    // The edge of the island: it turns you back
+    const far = Math.hypot(this.x, this.z);
+    if (far > 490) {
+      let d = (Math.atan2(-this.x, -this.z) - this.yaw) % (Math.PI * 2);
+      if (d > Math.PI) d -= Math.PI * 2; else if (d < -Math.PI) d += Math.PI * 2;
+      this.yaw += d * 1.5 * delta;
+    }
+    const cp = Math.cos(this.pitch);
+    this.x += Math.sin(this.yaw) * cp * v * delta;
+    this.z += Math.cos(this.yaw) * cp * v * delta;
+    this.y = Math.min(P.top, this.y + Math.sin(this.pitch) * v * delta - (1 - lift) * 14 * delta);
+    const ground = groundHeight(this.x, this.z);
+    if (this.y <= ground) {
+      this.y = ground;
+      const sink = -Math.sin(this.pitch) * v;
+      this.air = false;
+      this.pitch = this.roll = 0;
+      if (sink > 9 || Math.abs(this.roll) > 0.5) { const c = v; this.speed = 0; return Math.max(20, c); }
+      return 0;
+    }
+    if (this.y - ground < P.clearance && blocked(this.x, this.z, 2.5, this)) {
+      const c = v;
+      this.air = false;
+      this.speed = 0;
+      this.pitch = this.roll = 0;
+      return Math.max(20, c);
+    }
+    return 0;
+  }
+
+  /** Smooths a plane someone else flies; one nobody flies comes down. */
+  _planeTick(delta) {
+    const r = this.remote;
+    if (r && this.driver !== "local" && r.y !== undefined) {
+      const k = 1 - Math.exp(-10 * delta);
+      this.y += (r.y - this.y) * k;
+      this.pitch += (r.pitch - this.pitch) * k;
+      this.roll += (r.roll - this.roll) * k;
+    } else if (this.air && this.driver === null) {
+      this.pitch += (-0.6 - this.pitch) * (1 - Math.exp(-delta));
+      this.x += Math.sin(this.yaw) * this.speed * delta;
+      this.z += Math.cos(this.yaw) * this.speed * delta;
+      this.y -= 30 * delta;
+      const g = groundHeight(this.x, this.z);
+      if (this.y <= g) { this.y = g; this.air = false; this.speed = 0; this.pitch = this.roll = 0; this.setHealth(0); this.place(); }
+    }
+    if (this.prop) this.prop.rotation.z += (this.throttle * 40 + Math.abs(this.speed)) * delta;
+  }
+
   _pose(delta) {
+    if (this.spec.plane && this.air) {
+      this.root.position.set(this.x, this.y, this.z);
+      this.root.rotation.set(-this.pitch + this.jolt, this.yaw, this.roll + this.joltRoll);
+      return;
+    }
     const { front, rear: back, track } = this.spec.wheels;
     const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
     const fx = sy, fz = cy;          // forward
@@ -669,6 +923,7 @@ export class Vehicle {
 
   /** Someone else is driving: their latest pose. */
   setRemote(id, x, z, yaw, speed, fuel) {
+    if (this.stowed) this.setStowed(false);   // (someone's driving it, whatever we heard)
     if (this.driver !== id) {
       this.driver = id;
       if (!this.remote) { this.x = x; this.z = z; this.yaw = yaw; }
@@ -707,6 +962,12 @@ export class Vehicle {
       this.throttle = Math.min(1, Math.abs(r.speed) / this.spec.maxSpeed + 0.2);
     }
     if (this.spec.bike) this._bikeDynamics(delta);
+    if (this.spec.plane) this._planeTick(delta);
+    if (this.gun) {
+      if (r && this.driver !== "local" && r.ty !== undefined) { this.turretYaw = r.ty; this.gunPitch = r.gp; }
+      this.gun.group.rotation.y = this.turretYaw - this.yaw;
+      this.gun.barrel.rotation.x = -this.gunPitch;
+    }
     if (delta > 0) {
       // The jolt of a hit: springs, a little under-damped, so the body rocks and settles
       const d = Math.min(delta, 0.05);
@@ -717,7 +978,7 @@ export class Vehicle {
       if (this.damage > 0 && !this.wrecked) this.damage = Math.max(0, this.damage - delta / DAMAGE_CLEAR);
     }
     // A parked vehicle nobody touches doesn't need re-posing every frame
-    const moving = this.driver !== null || this._settle > 0 || (this.spec.bike && Math.abs(this.leanV) + Math.abs(this.diveV) > 0.01);
+    const moving = this.driver !== null || this._settle > 0 || this.air || (this.spec.bike && Math.abs(this.leanV) + Math.abs(this.diveV) > 0.01);
     if (moving) {
       this._pose(delta);
       this._settle = this.driver !== null ? 0.5 : this._settle - delta;
@@ -813,6 +1074,7 @@ export class Vehicle {
    * more; on asphalt only a slide makes (tyre) smoke. Capped per frame.
    */
   emitDust(fx, delta, surface) {
+    if (this.air) return;
     const sp = Math.abs(this.speed);
     const R = this.spec;
     const rate = Math.max(0, sp - 1.2) * (R.dust ?? 1) * surface.amount + this.skid * (surface.amount > 0 ? 10 : 6);

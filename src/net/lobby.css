@@ -356,6 +356,41 @@
 .lobby-mode.selected .mode-tag { color: #fff; border-color: var(--mode); }
 
 /* Room code + Play */
+/* Your squad on the home screen: friends' characters beside yours, names over them */
+.lb-stage { position: relative; }
+.lb-stage.crew { display: flex; margin-bottom: 0; min-height: 150px; }
+.lb-stage.crew canvas { display: block; width: 100%; } /* (the inventory screen hides this canvas on narrow screens) */
+/* Friends here: the mode cards shrink to their names, so the squad gets the room */
+.lb-deploy:has(.lb-stage.crew) .lb-heading,
+.lb-deploy:has(.lb-stage.crew) .mode-icon,
+.lb-deploy:has(.lb-stage.crew) .mode-desc,
+.lb-deploy:has(.lb-stage.crew) .mode-tag { display: none; }
+.lb-deploy:has(.lb-stage.crew) .lobby-modes { flex: none; grid-template-rows: auto; }
+.lb-deploy:has(.lb-stage.crew) .lobby-mode { display: block; min-height: 0; padding: 7px 14px; transform: none; }
+.lb-deploy:has(.lb-stage.crew) .mode-name { margin: 0; font-size: 20px; }
+@media (max-height: 430px) { .lb-stage.crew { min-height: 96px; } .lb-deploy:has(.lb-stage.crew) .lobby-mode { padding: 3px 12px; } .lb-deploy:has(.lb-stage.crew) .mode-name { font-size: 16px; } }
+.lb-crew-tags { position: absolute; inset: 0; pointer-events: none; }
+.lb-stage:not(.crew) .lb-crew-tags { display: none; }
+.lb-crew-tag {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  max-width: 130px;
+  padding: 1px 8px;
+  font: 500 16px/1.25 var(--font-hud);
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--who, #fff);
+  background: rgba(8, 5, 4, 0.72);
+  border-radius: 2px;
+}
+.lb-crew { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font: 500 16px/1.2 var(--font-hud); letter-spacing: 0.05em; color: var(--bone); }
+.lb-crew[hidden], #lobby:not([data-mode="br"]) .lb-crew { display: none; }
+.lb-crew-head { color: var(--mode); text-transform: uppercase; letter-spacing: 0.1em; }
+.lb-crew-name { max-width: 150px; white-space: nowrap; text-overflow: ellipsis; color: var(--who, #fff); }
+.lb-crew-name + .lb-crew-name::before { content: "\00b7  "; color: var(--bone-dim); }
+.lb-crew-wait { font: 400 13px/1.2 "Segoe UI", system-ui, sans-serif; letter-spacing: 0; color: var(--bone-dim); }
+
 /* Battle royale only: team size (the queue), auto-fill and a party code */
 .lb-team { display: none; align-items: flex-end; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
 #lobby[data-mode="br"] .lb-team { display: flex; }
@@ -576,6 +611,7 @@
   .lb-logo span:last-child { font-size: clamp(44px, 14vw, 72px); }
   .lb-deploy { order: 0; }
   .lb-stage { display: none; }
+  .lb-stage.crew { display: flex; flex: none; height: 250px; margin-bottom: 0; }
   .lobby-progress { order: 1; flex-shrink: 0; overflow: visible !important; }
   .lobby-look { order: 1; }
   .lobby-modes { grid-template-columns: 1fr; gap: 8px; }

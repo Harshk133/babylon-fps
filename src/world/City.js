@@ -184,7 +184,7 @@ export class City {
     const cells = new Map();
     const cellOf = (x, z) => {
       const k = Math.floor(x / CELL) * 4096 + Math.floor(z / CELL);
-      if (!cells.has(k)) cells.set(k, { facade: [], plain: [], sign: [], x: 0, z: 0, n: 0 });
+      if (!cells.has(k)) cells.set(k, { facade: [], plain: [], sign: [], x: 0, z: 0, n: 0, verts: { facade: 0, plain: 0, sign: 0 }, meshes: {} });
       return cells.get(k);
     };
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), one = new THREE.Vector3(1, 1, 1), p = new THREE.Vector3();
@@ -311,15 +311,21 @@ export class City {
       }
 
       // To the world
-      for (const [list, dst] of [[facade, cell.facade], [plain, cell.plain], [sign, cell.sign]]) {
-        for (const g of list) { g.applyMatrix4(m); dst.push(g); }
+      // (remembering where it lands in the merged mesh: a demolished building's vertices collapse to nothing)
+      b.parts = [];
+      for (const [key, list, dst] of [["facade", facade, cell.facade], ["plain", plain, cell.plain], ["sign", sign, cell.sign]]) {
+        const start = cell.verts[key];
+        for (const g of list) { g.applyMatrix4(m); dst.push(g); cell.verts[key] += g.attributes.position.count; }
+        if (cell.verts[key] > start) b.parts.push({ cell, key, start, count: cell.verts[key] - start, saved: null });
       }
+      b.bodies = [];
       // Physics
       const body = new CANNON.Body({ mass: 0, material, collisionFilterGroup: GROUP_WORLD });
       for (const [hx, hy, hz, x, y, z] of solids) body.addShape(new CANNON.Box(new CANNON.Vec3(hx, hy, hz)), new CANNON.Vec3(x, y, z));
       body.position.set(b.x, y0, b.z);
       body.quaternion.setFromEuler(0, b.rot, 0);
       world.addBody(body);
+      b.bodies.push(body);
       if (stairs.length) {
         const sb = new CANNON.Body({ mass: 0, material, collisionFilterGroup: GROUP_WORLD, collisionFilterMask: ~GROUP_ZOMBIE });
         const qz = new CANNON.Quaternion();
@@ -330,11 +336,12 @@ export class City {
         sb.position.set(b.x, y0, b.z);
         sb.quaternion.setFromEuler(0, b.rot, 0);
         world.addBody(sb);
+        b.bodies.push(sb);
       }
       // Minimap / vehicles: the footprint with its stairs
       const cz = -b.back / 2, c = Math.cos(b.rot), s = Math.sin(b.rot);
       b.fx = b.x + cz * s; b.fz = b.z + cz * c;
-      mapObstacles.push({ type: "box", x: b.fx, z: b.fz, w, d: d + b.back, rot: b.rot, city: true });
+      mapObstacles.push(b.obstacle = { type: "box", x: b.fx, z: b.fz, w, d: d + b.back, rot: b.rot, city: true });
       // Loot: in the shop, and on the roof when the stairs go up there
       const spot = (lx, ly, lz) => this.lootSpots.push({ x: b.x + lx * c + lz * s, y: y0 + ly, z: b.z - lx * s + lz * c });
       spot(-cx * 0.4, 0.14, d * 0.15);
@@ -357,6 +364,7 @@ export class City {
         scene.add(mesh);
         chunks?.addMesh(mesh);
         this.meshes.push(mesh);
+        cell.meshes[key] = mesh;
       }
     }
   }
@@ -369,12 +377,49 @@ export class City {
   }
 
   /** The building whose footprint (+ stairs, + pad) holds (x, z), or null. */
+  /** A building comes down. Returns what the rubble needs to know. */
+  demolish(b, world) {
+    if (b.destroyed) return null;
+    b.destroyed = true;
+    for (const body of b.bodies) world.removeBody(body);
+    b.obstacle._w = b.obstacle.w; b.obstacle._d = b.obstacle.d;
+    b.obstacle.w = b.obstacle.d = 0;
+    for (const p of b.parts) {
+      const a = p.cell.meshes[p.key].geometry.attributes.position;
+      p.saved = a.array.slice(p.start * 3, (p.start + p.count) * 3);
+      a.array.fill(0, p.start * 3, (p.start + p.count) * 3);
+      a.needsUpdate = true;
+    }
+    return { x: b.fx, z: b.fz, base: this.base, w: b.w, d: b.d, h: b.floors * FH, rot: b.rot, color: 0xb9ad9a };
+  }
+
+  restore(b, world) {
+    if (!b.destroyed) return;
+    b.destroyed = false;
+    b.hp = undefined;
+    for (const body of b.bodies) world.addBody(body);
+    b.obstacle.w = b.obstacle._w; b.obstacle.d = b.obstacle._d;
+    for (const p of b.parts) {
+      const a = p.cell.meshes[p.key].geometry.attributes.position;
+      a.array.set(p.saved, p.start * 3);
+      a.needsUpdate = true;
+    }
+  }
+
+  /** Is (x, z) within reach r of this building's footprint? */
+  near(b, x, z, r) {
+    if (Math.abs(x - b.x) > b.w + b.d + r || Math.abs(z - b.z) > b.w + b.d + r) return false;
+    this._local(b, x, z, _l);
+    return Math.abs(_l.x) < b.w / 2 + r && Math.abs(_l.z) < b.d / 2 + b.back + r;
+  }
+
   buildingAt(x, z, pad = 0) {
     if (!this.grid) {
       this.grid = new SpatialGrid(24, 6);
       for (const b of this.buildings) this.grid.insertCircle(b, b.x, b.z, Math.hypot(b.w, b.d) / 2 + b.back);
     }
     for (const b of pad <= 6 ? this.grid.near(x, z) : this.buildings) {
+      if (b.destroyed) continue;
       if (Math.abs(x - b.x) > b.w + b.d + pad || Math.abs(z - b.z) > b.w + b.d + pad) continue;
       this._local(b, x, z, _l);
       if (Math.abs(_l.x) < b.w / 2 + pad && _l.z < b.d / 2 + pad && _l.z > -b.d / 2 - b.back - pad) return b;
